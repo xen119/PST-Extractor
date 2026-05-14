@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>PST Mail Explorer</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <main class="workspace">
+        <aside class="panel navigator-panel" aria-label="Mailbox navigation">
+          <div class="navigator-header">
+            <div>
+              <p class="eyebrow">PST Browser</p>
+              <h1>PST Mail Explorer</h1>
+            </div>
+            <button id="refresh-catalog" class="ghost-button small" type="button">
+              Refresh
+            </button>
+          </div>
+
+          <section class="sidebar-section" aria-label="Mailbox list">
+            <div class="panel-head slim">
+              <h2>Mailboxes</h2>
+              <span id="pst-count-badge" class="badge">0</span>
+            </div>
+            <div id="pst-empty" class="panel-empty">
+              No PST files found. Put .pst or .ost files in the project <code>PST/</code> folder.
+            </div>
+            <div id="pst-list" class="pst-list" aria-live="polite"></div>
+          </section>
+
+          <section id="session-summary" class="summary-card" aria-live="polite">
+            <div class="summary-empty">
+              Select a PST file from the list to load its folders and messages.
+            </div>
+          </section>
+
+          <section class="sidebar-section folders-section" aria-label="Folder tree">
+            <div class="panel-head slim">
+              <h2>Folders</h2>
+              <span id="folder-count-badge" class="badge">0</span>
+            </div>
+            <div id="folder-tree" class="folder-tree panel-empty">
+              Select a PST file to load folders.
+            </div>
+          </section>
+        </aside>
+
+        <section class="panel list-panel" aria-label="Message list">
+          <div class="panel-head slim">
+            <h2>Messages</h2>
+            <div class="list-head-meta">
+              <span id="message-result-count" class="result-count">
+                Select a folder to view messages.
+              </span>
+              <span id="message-count-badge" class="badge">0</span>
+              <span id="page-info" class="page-info">Page 0 of 0</span>
+            </div>
+          </div>
+
+          <div class="filters compact">
+            <label class="search-field">
+              <span>Search</span>
+              <input
+                id="message-search"
+                type="search"
+                placeholder="Subject, sender, recipient"
+                autocomplete="off"
+              />
+            </label>
+            <label class="toggle-field">
+              <input id="mail-only-toggle" type="checkbox" checked />
+              <span>Mail only</span>
+            </label>
+            <label class="toggle-field">
+              <input id="review-flagged-toggle" type="checkbox" />
+              <span>Flagged</span>
+            </label>
+            <label class="toggle-field">
+              <input id="review-tagged-toggle" type="checkbox" />
+              <span>Tagged</span>
+            </label>
+            <label class="select-field">
+              <span>Sort</span>
+              <select id="message-sort">
+                <option value="date-desc">Newest first</option>
+                <option value="order">Folder order</option>
+              </select>
+            </label>
+            <div class="pager">
+              <button id="page-prev" class="ghost-button small" type="button" disabled>
+                Prev
+              </button>
+              <button id="page-next" class="ghost-button small" type="button" disabled>
+                Next
+              </button>
+            </div>
+          </div>
+
+          <div id="message-list" class="message-list panel-empty">
+            Select a folder to begin.
+          </div>
+        </section>
+
+        <section class="panel detail-panel" aria-label="Reading pane">
+          <div class="panel-head slim">
+            <h2>Reading Pane</h2>
+            <div class="detail-nav">
+              <button id="message-prev" class="ghost-button small" type="button" disabled>
+                Previous
+              </button>
+              <button id="message-next" class="ghost-button small" type="button" disabled>
+                Next
+              </button>
+            </div>
+          </div>
+          <div id="message-detail" class="message-detail panel-empty">
+            Select a message to inspect it.
+          </div>
+        </section>
+      </main>
+
+      <footer id="status-bar" class="status-bar" aria-live="polite">
+        Select a PST file from the list on the left.
+      </footer>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

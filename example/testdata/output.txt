@@ -1,0 +1,278 @@
+> Executing task: yarn run test-min <
+
+yarn run v1.22.15
+$ ts-node test-min.ts
+./testdata/enron.pst
+Personal folders
+ |- Top of Personal Folders
+ |  |- Deleted Items
+ |  |- lokay-m
+ |  |  |- MLOKAY (Non-Privileged)
+ |  |  |  |- TW-Commercial Group
+ |  |  |  |  |- Sender: Lee  Dennis, Subject: New OBA's
+ |  |  |  |  |- Sender: Reames Julie, Subject: I/B Link Capacity for November and December 2001
+ |  |  |  |  |- Sender: dlsmith@pplweb.com, Subject: West Texas Capacity
+ |  |  |  |  |- Sender: Buehler  Craig, Subject: EOL Confirmation -Transwestern Pipeline Company
+ |  |  |  |  |- Sender: Buehler  Craig, Subject: EOL Confirmation -Transwestern Pipeline Company
+ |  |  |  |  |- Sender: Brostad  Karen, Subject: New PNR points for Transwestern
+ |  |  |  |  |- Sender: Frazier  Perry, Subject: RR expansion contracts.
+ |  |  |  |  |- Sender: Buehler  Craig, Subject: TW EOLs
+ |  |  |  |  |- Sender: Lokay, Subject: Bullets 10/26/01
+ |  |  |  |  |- Sender: Frazier  Perry, Subject: Verify RR expansion cr's for ROFR.
+ |  |  |  |  |- Sender: Frazier  Perry, Subject: Red Rock Adm. cr # 27698 revisions.
+ |  |  |  |  |- Sender: Moore, Subject: TW Weekly Report for October 26, 2001
+ |  |  |  |  |- Sender: Cabrera  Reyna, Subject: FW: New PNR points for Transwestern
+ |  |  |  |  |- Sender: Lee  Dennis, Subject: TW administrative contract # 27698
+ |  |  |  |- Systems
+ |  |  |  |  |- Sender: ETS General Announcement/ET&S/Enron@ENRON, Subject: How to prepare your expense report
+ |  |  |  |  |- Sender: Carl Carter, Subject: eRequest
+ |  |  |  |  |- Sender: Puthigai  Savita, Subject: EnronOnline -Stack Manager Changes
+ |  |  |  |  |- Sender: Enron Announcements/Corp/Enron@ENRON, Subject: LIM Software Upgrade Notice
+ |  |  |  |  |- Sender: Lee  Dennis, Subject: Sending customer information from ENVISION
+ |  |  |  |  |- Sender: Enron Global Technology@ENRON, Subject: Email Retention Policy
+ |  |  |  |  |- Sender: Enron Messaging Administration, Subject: Supported Internet Email Addresses
+ |  |  |  |- Sent Items
+ |  |  |  |  |- Sender: Lokay, Subject: Cirque du Soleil - Dralion
+ |  |  |  |  |- Sender: Lokay, Subject: Accepted: Updated: Finalize Transwestern Presentations
+ |  |  |  |- Personal
+ |  |  |  |  |- Sender: Jim Lokay jimbomania@hotmail.com@ENRON, Subject: Fwd: Enjoy fall in an Alamo midsize car -- just $169 a week!
+ |  |  |  |  |- Sender: cbulf, Subject: TRIP INFO
+ |  |  |  |  |- Sender: Michelle Lokay, Subject: Check out page 7!
+ |  |  |  |  |- Sender: ClickAtHome, Subject: ClickAtHome is Coming Soon!
+ |  |  |  |  |- Sender: Lisa Norwood, Subject: contact
+ |  |  |  |  |- Sender: Jim Lokay jimboman@bigfoot.com@ENRON, Subject: [Fwd: New email address - again!]
+ |  |  |  |  |- Sender: Jim Lokay jimboman@bigfoot.com@ENRON, Subject: file
+ |  |  |  |  |- Sender: Enron Announcements/Corp/Enron@ENRON, Subject: An Opportunity to Change Your Electricity Provider
+ |  |  |  |  |- Sender: James Lokay jlokay@yahoo.com@ENRON, Subject: Fwd: RE: Party Request-the Galleria - Sat 8/11/2001 4:00 PM
+ |  |  |  |  |- Sender: Jim Lokay Lokay@bigfoot.com@ENRON, Subject: links
+ |  |  |  |  |- Sender: Clickathome,, Subject: Re: Time Warner Cable question
+ |  |  |  |  |- Sender: Ramirez  Pilar, Subject: RE: Good Web
+ |  |  |  |  |- Sender: Schoolcraft  Darrell, Subject: Wedding
+ |  |  |  |  |- Sender: PostOffice@DILBERT.COM@ENRON, Subject: Dilbert Strip from Jim is waiting for you!
+ |  |  |  |  |- Sender: Lokay, Subject: eBay item 576466888 (Ends Apr-10-01 104814 PDT) - !!!!Green Is In!!!!! Erin Bud
+ |  |  |  |  |- Sender: Lokay, Subject: eBay item 576853567 (Ends Apr-09-01 134449 PDT) - TY Beanie Buddies ERIN Buddy!
+ |  |  |  |  |- Sender: Lokay, Subject: eBay item 577532611 (Ends Apr-09-01 175133 PDT) - VALENTINA BUDDY beanie buddie
+ |  |  |  |  |- Sender: Lokay, Subject: eBay item 577242315 (Ends Apr-12-01 175442 PDT) - Ty Beanie Buddy & Baby - Vale
+ |  |  |  |  |- Sender: Jim Lokay Lokay@bigfoot.com@ENRON, Subject: scans
+ |  |  |  |  |- Sender: Jim Lokay Lokay@bigfoot.com@ENRON, Subject: Re: VALENTINA BUDDY beanie buddies RETIRED  Item #577532611
+ |  |  |  |  |- Sender: Lokay, Subject: Job Opportunity?
+ |  |  |  |  |- Sender: Jim Lokay Lokay@bigfoot.com@ENRON, Subject: Quickie
+ |  |  |  |  |- Sender: Jim Lokay Lokay@bigfoot.com@ENRON, Subject: In case you needed to know...
+ |  |  |  |  |- Sender: Jim Lokay Lokay@bigfoot.com@ENRON, Subject: graphic
+ |  |  |  |  |- Sender: Hitschel  Bonnie V. BHitschel@tesoropetroleum.com@ENRON, Subject: RE:FIESTA
+ |  |  |  |  |- Sender: Jim Lokay Lokay@bigfoot.com@ENRON, Subject: Houston
+ |  |  |  |  |- Sender: Fawcett  Jeffery, Subject: California Sing-along
+ |  |  |  |  |- Sender: Loe  David DLoe@UtiliCorp.com@ENRON, Subject: FW: ONEOK ski trip
+ |  |  |  |  |- Sender: Loe  David DLoe@UtiliCorp.com@ENRON, Subject: FW: ONEOK ski trip
+ |  |  |  |  |- Sender: Jim Lokay Lokay@bigfoot.com@ENRON, Subject: unit for sale
+ |  |  |  |  |- Sender: Hitschel  Bonnie V. BHitschel@tesoropetroleum.com@ENRON, Subject: FW: Even For You
+ |  |  |  |  |- Sender: Jennifer Smith @ENRON, Subject: Learn Technical Analysis, Early Bird Special for Houston Class
+ |  |  |  |  |- Sender: Watson  Kimberly, Subject: Lindy's B-day
+ |  |  |  |  |- Sender: Ramirez  Pilar, Subject: FW: Breast Cancer
+ |  |  |  |  |- Sender: Jim Lokay Lokay@bigfoot.com@ENRON, Subject: unverified news report
+ |  |  |  |  |- Sender: Lokay, Subject: Accomplishments for Year 2001, as of 05/10
+ |  |  |  |  |- Sender: Lokay, Subject: Rose Rec
+ |  |  |  |  |- Sender: Hitschel  Bonnie V. BHitschel@tesoropetroleum.com@ENRON, Subject: Voluntary Spyware
+ |  |  |  |  |- Sender: Yee  Danny danny.yee@sap.com@ENRON, Subject: Possible Spreadsheet
+ |  |  |  |  |- Sender: eserver@enron.com@ENRON, Subject: <<Concur Expense Document>> - Expense060501
+ |  |  |  |  |- Sender: Hitschel  Bonnie V. BHitschel@tesoropetroleum.com@ENRON, Subject: Just for fun
+ |  |  |  |  |- Sender: Stevens  Missy, Subject: RE: Enron Efforts to the Flood victims
+ |  |  |  |  |- Sender: Stuart  Charla, Subject: RE: OPEN ENROLLMENT FOR ENRON KIDS' CENTER IS UNDERWAY!!!
+ |  |  |  |  |- Sender: Goradia, Subject:
+ |  |  |  |  |- Sender: jacammarano@pplweb.com@ENRON, Subject: Invitation to Golf Outing
+ |  |  |  |  |- Sender: Horton  Stanley, Subject: GOOD JOB!
+ |  |  |  |  |- Sender: tsschuler@pplweb.com@ENRON, Subject: PPL EnergyPlus Golf Outing
+ |  |  |  |- Sender: Mailbox - Ftenergy1, Subject: Power Mart '01 - Register online for your FREE exhibition pass!
+ |- Search Root
+ |- SPAM Search Folder 2
+./testdata/enron.pst processed in 164 ms
+./testdata/pstextractortest@outlook.com.ost
+
+ |- Root - Public
+ |  |- IPM_SUBTREE
+ |  |- NON_IPM_SUBTREE
+ |  |  |- EFORMS REGISTRY
+ |  |  |  |- Organization Forms
+ |- Root - Mailbox
+ |  |- Common Views
+ |  |- Finder
+ |  |  |- Reminders
+ |  |  |- Contact Search
+ |  |  |- To-Do Search
+ |  |  |- Tracked Mail Processing
+ |  |- Shortcuts
+ |  |- Views
+ |  |- IPM_SUBTREE
+ |  |  |- Deleted Items
+ |  |  |  |- Sender: Google Calendar, Subject: Invitation: meeting from Ed @ Fri Aug 13, 2021 4pm - 4:30pm (MDT) (pstextractortest@outlook.com)
+ |  |  |- Inbox
+ |  |  |  |- Sender: Microsoft OneDrive, Subject: Get started with OneDrive
+ |  |  |  |- Sender: Outlook Team, Subject: Welcome to your new Outlook.com account
+ |  |  |  |- Sender: Ed, Subject: test, no attachment
+ |  |  |  |- Sender: Ed, Subject: text file attachment
+ |  |  |  |- Sender: Ed, Subject: jpg attachment
+ |  |  |  |- Sender: Ed, Subject: pdf attachment
+ |  |  |  |- Sender: Ed, Subject: text, jpg, pdf attachments
+ |  |  |  |- Sender: Google Calendar, Subject: Invitation: unanswered meeting @ Sat Aug 14, 2021 (pstextractortest@outlook.com)
+ |  |  |  |- Sender: Google Calendar, Subject: Invitation: meeting with attachments @ Tue Aug 17, 2021 (pstextractortest@outlook.com)
+ |  |  |  |- Sender: Google Calendar, Subject: Accepted: meeting with attachments (jpg, pdf, text) @ Tue Aug 24, 2021 11am - 12pm (MDT) (Pst Extractor)  
+ |  |  |- Outbox
+ |  |  |- Sent Items
+ |  |  |  |- Sender: Pst Extractor, Subject: Accepted: meeting from Ed
+ |  |  |  |- Sender: Pst Extractor, Subject: meeting with attachments (jpg, pdf, text)
+ |  |  |- Archive
+ |  |  |- Yammer Root
+ |  |  |  |- Inbound
+ |  |  |  |- Outbound
+ |  |  |  |- Feeds
+ |  |  |- Conversation History
+ |  |  |  |- Team Chat
+ |  |  |- Files
+ |  |  |- Conversation Action Settings
+ |  |  |- Junk Email
+ |  |  |- ExternalContacts
+ |  |  |- Journal
+ |  |  |- Tasks
+ |  |  |- Drafts
+ |  |  |- Contacts
+ |  |  |  |- Companies
+ |  |  |  |- Organizational Contacts
+ |  |  |  |- PeopleCentricConversation Buddies
+ |  |  |  |- GAL Contacts
+ |  |  |  |- {06967759-274D-40B2-A3EB-D7F9E73727D7}
+ |  |  |  |- Recipient Cache
+ |  |  |  |- {A9E2BC46-B3A0-4243-B315-60D991004455}
+ |  |  |- Calendar
+ |  |  |  |- United States holidays
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Day After Thanksgiving Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Thanksgiving Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Election Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Columbus Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Labor Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Independence Day (Observed)
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Father's Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Memorial Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Mother's Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Administrative Professionals Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Tax Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Easter Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Presidents' Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Martin Luther King Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Day After Thanksgiving Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Thanksgiving Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Election Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Columbus Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Labor Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Father's Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Memorial Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Mother's Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Administrative Professionals Day
+ |  |  |  |  |- Sender: Pst Extractor, Subject: Easter Day
+ |  |  |  |- Birthdays
+ |  |  |  |- Sender: pstextractortest@outlook.com, Subject: repeats every monday for 10 weeks
+ |  |  |  |- Sender: pstextractortest@outlook.com, Subject: repeats for 3 days
+ |  |  |  |- Sender: pstextractortest@outlook.com, Subject: just a regular meeting
+ |  |  |  |- Sender: pstextractortest@outlook.com, Subject: Occurs every August 13 effective 8/13/2021 from 10:00 AM to 10:30 AM
+ |  |  |  |- Sender: epfromer@gmail.com, Subject: meeting from Ed
+ |  |  |  |- Sender: epfromer@gmail.com, Subject: unanswered meeting
+ |  |  |  |- Sender: pstextractortest@outlook.com, Subject: all day event for 3 days
+ |  |  |  |- Sender: epfromer@gmail.com, Subject: meeting with attachments
+ |  |  |  |- Sender: pstextractortest@outlook.com, Subject: meeting with attachments (jpg, pdf, text)
+ |  |  |- Notes
+ |  |  |- Sync Issues
+ |  |  |  |- Conflicts
+ |  |  |  |- Local Failures
+ |  |  |  |- Server Failures
+ |  |  |  |- Sender: Pst Extractor, Subject: Synchronization Log:
+ |  |  |- RSS Feeds
+ |  |  |- Quick Step Settings
+ |  |- ~MAPISP(Internal)
+ |  |- Drizzle
+ |  |- Shared Data
+ |  |- SPAM Search Folder 2
+ |  |- ItemProcSearch
+./testdata/pstextractortest@outlook.com.ost processed in 185 ms
+./testdata/pstextractortestpdf@outlook.com.ost
+
+ |- Root - Public
+ |  |- IPM_SUBTREE
+ |  |- NON_IPM_SUBTREE
+ |  |  |- EFORMS REGISTRY
+ |  |  |  |- Organization Forms
+ |- Root - Mailbox
+ |  |- Common Views
+ |  |- Finder
+ |  |  |- To-Do Search
+ |  |- Shortcuts
+ |  |- Views
+ |  |- IPM_SUBTREE
+ |  |  |- Deleted Items
+ |  |  |- Inbox
+ |  |  |  |- Sender: Ed, Subject: single PDF
+ |  |  |  |- Sender: Outlook Team, Subject: Welcome to your new Outlook.com account
+ |  |  |- Outbox
+ |  |  |- Sent Items
+ |  |  |- Archive
+ |  |  |- Yammer Root
+ |  |  |  |- Inbound
+ |  |  |  |- Outbound
+ |  |  |  |- Feeds
+ |  |  |- Conversation History
+ |  |  |  |- Team Chat
+ |  |  |- Files
+ |  |  |- Conversation Action Settings
+ |  |  |- Junk Email
+ |  |  |- ExternalContacts
+ |  |  |- Journal
+ |  |  |- Notes
+ |  |  |- Calendar
+ |  |  |  |- Birthdays
+ |  |  |  |- United States holidays
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Day After Thanksgiving Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Thanksgiving Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Election Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Columbus Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Labor Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Independence Day (Observed)
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Father's Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Memorial Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Mother's Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Administrative Professionals Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Tax Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Easter Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Presidents' Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Martin Luther King Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Day After Thanksgiving Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Thanksgiving Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Election Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Columbus Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Labor Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Father's Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Memorial Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Mother's Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Administrative Professionals Day
+ |  |  |  |  |- Sender: Pst ExtractorPDF, Subject: Easter Day
+ |  |  |- Contacts
+ |  |  |  |- GAL Contacts
+ |  |  |  |- {06967759-274D-40B2-A3EB-D7F9E73727D7}
+ |  |  |  |- Recipient Cache
+ |  |  |  |- PeopleCentricConversation Buddies
+ |  |  |  |- Organizational Contacts
+ |  |  |  |- Companies
+ |  |  |  |- {A9E2BC46-B3A0-4243-B315-60D991004455}
+ |  |  |- Drafts
+ |  |  |- Tasks
+ |  |  |- Sync Issues
+ |  |  |  |- Conflicts
+ |  |  |  |- Local Failures
+ |  |  |  |- Server Failures
+ |  |  |- Quick Step Settings
+ |  |- ~MAPISP(Internal)
+ |  |- Drizzle
+ |  |- Shared Data
+ |  |- SPAM Search Folder 2
+ |  |- ItemProcSearch
+./testdata/pstextractortestpdf@outlook.com.ost processed in 98 ms
+Done in 4.36s.
+
+Terminal will be reused by tasks, press any key to close it.
