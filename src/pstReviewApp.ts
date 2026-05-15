@@ -30,6 +30,7 @@ import {
   getMessageSummary,
   isMailLikeSummary,
   listFolderMessages,
+  listSessionMessages,
   messageMatchesQuery,
   sanitizeFileNameForDownload,
   sortMessageSummaries,
@@ -49,6 +50,32 @@ export interface CreatePstReviewAppOptions {
   reviewStore: ReviewStore
   openApiSpec: Record<string, unknown>
   pstRootDir?: string
+  apiSecurity?: ApiSecurityConfig
+}
+
+interface RequestInfoLike {
+  origin?: string
+  referer?: string
+  ip?: string
+  method?: string
+  url?: string
+  contentType?: string
+  tenantId?: string
+}
+
+interface WebChecksLike {
+  getRequestInfo?: (req: express.Request) => RequestInfoLike
+}
+
+interface M365AuthLike {
+  CheckTokens?: (req: express.Request, res: express.Response, next: express.NextFunction) => unknown
+}
+
+export interface ApiSecurityConfig {
+  bypassIps?: string[]
+  allowedOrigins?: string[]
+  webChecks?: WebChecksLike
+  m365Auth?: M365AuthLike
 }
 
 interface SessionRecord {
@@ -56,9 +83,12 @@ interface SessionRecord {
   index: ViewerSessionIndex
   filePath: string
   fileName: string
+  scopePath: string
+  scopeLabel: string
 }
 
 interface OpenMailboxRequestBody {
+  scopePath?: string
   fileName?: string
 }
 
@@ -80,6 +110,8 @@ interface ListFolderOptions {
 
 interface SessionResponse {
   sessionId: string
+  scopePath: string
+  scopeLabel: string
   fileName: string
   summary: ReturnType<typeof buildSessionSummary>
   tree: ReturnType<typeof buildFolderTree>
@@ -102,11 +134,67 @@ interface ReviewedFolderPage extends FolderMessagePage {
   }
 }
 
+interface SearchRequestQuery {
+  scope?: string
+  scopePath?: string
+  sessionId?: string
+  query?: string
+  mailOnly?: boolean
+  sort?: string
+  page?: number
+  pageSize?: number
+  reviewFlagged?: boolean
+  reviewTagged?: boolean
+  reviewTag?: string
+}
+
+interface SearchResultItem extends ReviewedMessageSummary {
+  scopePath: string
+  scopeLabel: string
+  fileName: string
+  mailboxName: string
+}
+
+interface SearchResultPage {
+  items: SearchResultItem[]
+  total: number
+  page: number
+  pageSize: number
+  totalPages: number
+  query: string
+  mailOnly: boolean
+  sort: string
+  scope: string
+  scopePath: string
+  scopeLabel: string
+  reviewFilters: {
+    flaggedOnly: boolean
+    taggedOnly: boolean
+    tag: string
+  }
+}
+
 const DEFAULT_PAGE_SIZE = 50
 const DEFAULT_DOC_TITLE = 'PST API Documentation'
 const DEFAULT_SWAGGER_ASSET_PATH = path.dirname(
   require.resolve('swagger-ui-dist/swagger-ui.css')
 )
+const DEFAULT_AUTH_BYPASS_IPS = ['127.0.0.1', '::1', '::ffff:127.0.0.1', 'localhost']
+const DEFAULT_CORS_ALLOW_HEADERS = [
+  'Accept',
+  'Authorization',
+  'Content-Type',
+  'GraphToken',
+  'Origin',
+  'Referer',
+  'X-Graph-Token',
+  'X-TenantId',
+  'X-Requested-With',
+  'graphtoken',
+  'x-graph-token',
+  'x-tenantid'
+].join(', ')
+const DEFAULT_CORS_ALLOW_METHODS = 'GET, POST, PATCH, DELETE, OPTIONS'
 
 function createSessionId(): string {
   return randomBytes(12).toString('hex')
@@ -116,6 +204,198 @@ function normalizeText(value: unknown): string {
   return String(value ?? '')
     .trim()
     .replace(/\s+/g, ' ')
+}
+
+function normalizeOrigin(value: unknown): string {
+  const text = normalizeText(value)
+  if (!text) {
+    return ''
+  }
+
+  try {
+    return new URL(text).origin.toLowerCase()
+  } catch {
+    return text.toLowerCase()
+  }
+}
+
+function normalizeRequestInfoField(value: unknown): string {
+  const text = normalizeText(value)
+  if (!text) {
+    return ''
+  }
+
+  if (/^\(.+\?\)$/.test(text) || /^[A-Za-z][A-Za-z0-9_-]*\?$/.test(text)) {
+    return ''
+  }
+
+  return text
+}
+
+function normalizeIpAddress(value: unknown): string {
+  const text = normalizeText(value)
+  if (!text) {
+    return ''
+  }
+
+  return text
+    .replace(/^\[|\]$/g, '')
+    .replace(/^::ffff:/i, '')
+    .toLowerCase()
+}
+
+function parseList(value: string[] | undefined, fallback: string[] = []): string[] {
+  const source = Array.isArray(value) ? value : []
+  const combined = [...fallback, ...source]
+  const values: string[] = []
+
+  for (const item of combined) {
+    for (const part of String(item || '').split(/[,\n;]/g)) {
+      const normalized = part.trim()
+      if (normalized) {
+        values.push(normalized)
+      }
+    }
+  }
+
+  return values
+}
+
+function canonicalRequestOrigin(req: express.Request): string {
+  const host = req.headers.host
+  if (!host) {
+    return ''
+  }
+
+  const protocol = req.protocol || 'http'
+  return normalizeOrigin(`${protocol}://${host}`)
+}
+
+function getFallbackRequestInfo(req: express.Request): RequestInfoLike {
+  return {
+    origin: normalizeRequestInfoField(req.headers.origin),
+    referer: normalizeRequestInfoField(req.headers.referer),
+    ip:
+      (typeof req.headers['x-forwarded-for'] === 'string'
+        ? req.headers['x-forwarded-for'].split(',')[0]
+        : '') || req.ip || req.socket?.remoteAddress || '',
+    method: normalizeRequestInfoField(req.method),
+    url: normalizeRequestInfoField(req.originalUrl || req.url),
+    contentType: normalizeRequestInfoField(req.headers['content-type']),
+    tenantId: normalizeRequestInfoField(req.headers['x-tenantid'])
+  }
+}
+
+function getRequestInfo(req: express.Request, webChecks?: WebChecksLike): RequestInfoLike {
+  try {
+    if (webChecks?.getRequestInfo) {
+      const info = webChecks.getRequestInfo(req)
+      if (info && typeof info === 'object') {
+        return {
+          origin: normalizeRequestInfoField(info.origin),
+          referer: normalizeRequestInfoField(info.referer),
+          ip: normalizeRequestInfoField(info.ip),
+          method: normalizeRequestInfoField(info.method),
+          url: normalizeRequestInfoField(info.url),
+          contentType: normalizeRequestInfoField(info.contentType),
+          tenantId: normalizeRequestInfoField(info.tenantId)
+        }
+      }
+    }
+  } catch (error) {
+    console.warn('Unable to read request info from webChecks:', error)
+  }
+
+  return getFallbackRequestInfo(req)
+}
+
+function isPublicApiPath(pathname: string): boolean {
+  return pathname === API_ROUTES.openApiJson || pathname === API_ROUTES.docs || pathname.startsWith(`${API_ROUTES.docs}/`)
+}
+
+function isProtectedApiPath(pathname: string): boolean {
+  return pathname.startsWith('/api/') && !isPublicApiPath(pathname)
+}
+
+function buildCorsHeaders(origin: string): Record<string, string> {
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Headers': DEFAULT_CORS_ALLOW_HEADERS,
+    'Access-Control-Allow-Methods': DEFAULT_CORS_ALLOW_METHODS,
+    'Access-Control-Expose-Headers': 'Content-Disposition, Content-Length',
+    Vary: 'Origin'
+  }
+}
+
+function createApiSecurityMiddleware(
+  config: ApiSecurityConfig = {}
+): express.RequestHandler {
+  const bypassIps = new Set(
+    parseList(config.bypassIps, DEFAULT_AUTH_BYPASS_IPS).map(normalizeIpAddress).filter(Boolean)
+  )
+  const allowedOrigins = new Set(
+    parseList(config.allowedOrigins).map(normalizeOrigin).filter(Boolean)
+  )
+
+  return async (req, res, next) => {
+    const pathname = (req.originalUrl || req.url || '').split('?')[0] || ''
+    if (!isProtectedApiPath(pathname)) {
+      return next()
+    }
+
+    const info = getRequestInfo(req, config.webChecks)
+    const requestOrigin = normalizeOrigin(info.origin || req.headers.origin || '')
+    const requestHostOrigin = canonicalRequestOrigin(req)
+    const requestIp = normalizeIpAddress(info.ip || req.ip || req.socket?.remoteAddress || '')
+    const isBypassed = bypassIps.has(requestIp)
+    const isSameOrigin = Boolean(requestOrigin && requestOrigin === requestHostOrigin)
+    const originAllowed = !requestOrigin || isSameOrigin || allowedOrigins.has(requestOrigin)
+
+    if (!originAllowed) {
+      return res.status(403).json({
+        error: 'CORS origin not allowed',
+        origin: requestOrigin || info.origin || ''
+      })
+    }
+
+    if (requestOrigin && !isSameOrigin && allowedOrigins.has(requestOrigin)) {
+      res.set(buildCorsHeaders(requestOrigin))
+    }
+
+    if (req.method === 'OPTIONS') {
+      return res.status(204).end()
+    }
+
+    if (isBypassed) {
+      return next()
+    }
+
+    const auth = config.m365Auth?.CheckTokens
+    if (typeof auth !== 'function') {
+      return next(createAppError(500, 'Authentication middleware is not configured'))
+    }
+
+    let nextCalled = false
+    const wrappedNext: express.NextFunction = (error?: unknown) => {
+      nextCalled = true
+      return next(error as never)
+    }
+
+    try {
+      const result = auth(req, res, wrappedNext)
+      if (result && typeof (result as Promise<unknown>).then === 'function') {
+        await result
+      }
+
+      if (!nextCalled && !res.headersSent) {
+        return next(createAppError(500, 'Authentication middleware did not complete'))
+      }
+    } catch (error) {
+      if (!nextCalled && !res.headersSent) {
+        return next(error as Error)
+      }
+    }
+  }
 }
 
 function parsePositiveInt(
@@ -173,6 +453,176 @@ function parseReviewFilters(value: Record<string, string | string[] | undefined>
     reviewTaggedOnly: parseBoolean(value.reviewTagged, false),
     reviewTag: normalizeText(value.reviewTag)
   }
+}
+
+function normalizeScopePath(value: unknown): string {
+  const text = String(value ?? '')
+    .trim()
+    .replace(/\\/g, '/')
+
+  if (!text || text === '.') {
+    return ''
+  }
+
+  const segments = text
+    .split('/')
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+
+  if (!segments.length || segments.some((segment) => segment === '..')) {
+    return ''
+  }
+
+  return segments.join('/')
+}
+
+function parseSearchScope(value: unknown): 'all' | 'search' | 'pst' {
+  const normalized = normalizeText(value).toLowerCase()
+  if (normalized === 'all' || normalized === 'search' || normalized === 'pst') {
+    return normalized
+  }
+  return 'pst'
+}
+
+function getScopeLabel(scopePath: string): string {
+  return scopePath ? scopePath.split('/').join(' / ') : 'PST root'
+}
+
+function sortSearchResults(
+  left: SearchResultItem,
+  right: SearchResultItem,
+  sort: string
+): number {
+  if (sort === 'order') {
+    if (left.scopeLabel !== right.scopeLabel) {
+      return left.scopeLabel.localeCompare(right.scopeLabel, undefined, { sensitivity: 'base' })
+    }
+    if (left.fileName !== right.fileName) {
+      return left.fileName.localeCompare(right.fileName, undefined, { sensitivity: 'base' })
+    }
+    if (left.folderPath !== right.folderPath) {
+      return left.folderPath.localeCompare(right.folderPath, undefined, { sensitivity: 'base' })
+    }
+    return left.order - right.order
+  }
+
+  const leftDate = left.sortDateMs ?? Number.MIN_SAFE_INTEGER
+  const rightDate = right.sortDateMs ?? Number.MIN_SAFE_INTEGER
+  if (leftDate !== rightDate) {
+    return rightDate - leftDate
+  }
+
+  if (left.scopeLabel !== right.scopeLabel) {
+    return left.scopeLabel.localeCompare(right.scopeLabel, undefined, { sensitivity: 'base' })
+  }
+  if (left.fileName !== right.fileName) {
+    return left.fileName.localeCompare(right.fileName, undefined, { sensitivity: 'base' })
+  }
+  if (left.folderPath !== right.folderPath) {
+    return left.folderPath.localeCompare(right.folderPath, undefined, { sensitivity: 'base' })
+  }
+  return left.order - right.order
+}
+
+function resolveCatalogScopeSelection(
+  rootPath: string,
+  requestedScopePath: string
+): ReturnType<typeof listPstMailboxFiles> {
+  const normalizedScopePath = normalizeScopePath(requestedScopePath)
+  const catalog = listPstMailboxFiles(rootPath, normalizedScopePath)
+
+  if (normalizedScopePath && !catalog.scopes.some((scope) => scope.scopePath === normalizedScopePath)) {
+    throw createAppError(404, 'Search scope not found')
+  }
+
+  if (normalizedScopePath && catalog.scopePath !== normalizedScopePath) {
+    throw createAppError(404, 'Search scope not found')
+  }
+
+  return catalog
+}
+
+function buildSearchResultItem(
+  summary: ReviewedMessageSummary,
+  context: {
+    scopePath: string
+    scopeLabel: string
+    fileName: string
+    mailboxName: string
+  }
+): SearchResultItem {
+  return {
+    ...summary,
+    scopePath: context.scopePath,
+    scopeLabel: context.scopeLabel,
+    fileName: context.fileName,
+    mailboxName: context.mailboxName
+  }
+}
+
+function isReviewMatch(
+  review: ReviewState | null,
+  options: {
+    flaggedOnly: boolean
+    taggedOnly: boolean
+    tag: string
+  }
+): boolean {
+  if (options.flaggedOnly && !review?.flagged) {
+    return false
+  }
+  if (options.taggedOnly && (!review || review.tags.length === 0)) {
+    return false
+  }
+  if (options.tag) {
+    const needle = options.tag.toLowerCase()
+    if (!review || !review.tags.some((value) => value.toLowerCase() === needle)) {
+      return false
+    }
+  }
+  return true
+}
+
+async function buildSessionSearchResults(
+  session: SessionRecord,
+  filters: ListFolderOptions,
+  reviewStore: ReviewStore,
+  context: {
+    scopePath: string
+    scopeLabel: string
+    fileName: string
+    mailboxName: string
+  }
+): Promise<SearchResultItem[]> {
+  const messages = listSessionMessages(session.index, {
+    query: filters.query,
+    mailOnly: filters.mailOnly,
+    sort: filters.sort
+  }) as ReviewedMessageSummary[]
+
+  const reviewMap = await reviewStore.getMany(
+    session.filePath,
+    messages.map((message) => message.id)
+  )
+
+  return messages
+    .map((message) => buildSearchResultItem(message, context))
+    .filter((message) =>
+      isReviewMatch(reviewMap.get(message.id) || null, {
+        flaggedOnly: filters.reviewFlaggedOnly,
+        taggedOnly: filters.reviewTaggedOnly,
+        tag: filters.reviewTag
+      })
+    )
+    .map((message) =>
+      buildSearchResultItem(
+        {
+          ...message,
+          review: reviewMap.get(message.id) || normalizeReviewState(null)
+        },
+        context
+      )
+    )
 }
 
 function createAttachmentBaseUrl(sessionId: string, messageId: string): string {
@@ -445,11 +895,24 @@ function createRouteErrorHandler(
   res: express.Response,
   error: unknown
 ): void {
-  const statusCode = typeof error === 'object' && error && 'statusCode' in error
-    ? Number((error as { statusCode?: number }).statusCode || 500)
-    : 500
+  const statusCode =
+    typeof error === 'object' && error && 'statusCode' in error
+      ? Number((error as { statusCode?: number }).statusCode || 500)
+      : isCatalogValidationError(error)
+        ? 400
+        : 500
   const message = error instanceof Error ? error.message : String(error)
   responseJson(res, statusCode, { error: message })
+}
+
+function isCatalogValidationError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return [
+    'Scope path must stay within the PST folder',
+    'Mailbox file name is required',
+    'Mailbox file name must not include a path',
+    'Only .pst and .ost files are supported'
+  ].some((needle) => message.includes(needle))
 }
 
 function safeDownloadName(name: string, fallback: string): string {
@@ -463,9 +926,147 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   const pstRootDir = options.pstRootDir || getDefaultPstRootDirectory()
   const reviewStore = options.reviewStore
 
+  async function searchMailboxSession(
+    session: SessionRecord,
+    filters: ListFolderOptions,
+    context: {
+      scopePath: string
+      scopeLabel: string
+      fileName: string
+      mailboxName: string
+    }
+  ): Promise<SearchResultItem[]> {
+    const messages = listSessionMessages(session.index, {
+      query: filters.query,
+      mailOnly: filters.mailOnly,
+      sort: filters.sort
+    })
+    const reviewMap = await reviewStore.getMany(
+      session.filePath,
+      messages.map((message) => message.id)
+    )
+    const reviewed = messages.map((message) =>
+      buildReviewedSummary(message, reviewMap.get(message.id) || null)
+    )
+    return reviewed
+      .filter((message) =>
+        isReviewMatch(reviewMap.get(message.id) || null, {
+          flaggedOnly: filters.reviewFlaggedOnly,
+          taggedOnly: filters.reviewTaggedOnly,
+          tag: filters.reviewTag
+        })
+      )
+      .map((message) => buildSearchResultItem(message, context))
+  }
+
+  async function searchCatalogScope(
+    scope: { scopePath: string; scopeLabel: string; files: Array<{ fileName: string }> },
+    filters: ListFolderOptions
+  ): Promise<SearchResultItem[]> {
+    const results: SearchResultItem[] = []
+    for (const file of scope.files) {
+      try {
+        const index = openPstMailbox(pstRootDir, scope.scopePath, file.fileName)
+        const session: SessionRecord = {
+          id: '',
+          index,
+          filePath: index.filePath,
+          fileName: index.fileName,
+          scopePath: scope.scopePath,
+          scopeLabel: scope.scopeLabel
+        }
+        const items = await searchMailboxSession(session, filters, {
+          scopePath: scope.scopePath,
+          scopeLabel: scope.scopeLabel,
+          fileName: file.fileName,
+          mailboxName: index.mailboxName
+        })
+        results.push(...items)
+      } catch (error) {
+        console.warn(
+          `Unable to search mailbox ${file.fileName} in ${scope.scopeLabel}:`,
+          error instanceof Error ? error.message : error
+        )
+      }
+    }
+    return results
+  }
+
+  async function buildSearchPage(
+    scope: 'all' | 'search' | 'pst',
+    filters: ListFolderOptions,
+    options: {
+      sessionId?: string
+      scopePath?: string
+    } = {}
+  ): Promise<SearchResultPage> {
+    let items: SearchResultItem[] = []
+    let scopePath = ''
+    let scopeLabel = 'All cases/searches'
+
+    if (scope === 'pst') {
+      const session = getSessionOrThrow(sessions, options.sessionId || '')
+      scopePath = session.scopePath
+      scopeLabel = session.scopeLabel || getScopeLabel(scopePath)
+      items = await searchMailboxSession(
+        session,
+        filters,
+        {
+          scopePath,
+          scopeLabel,
+          fileName: session.fileName,
+          mailboxName: session.index.mailboxName
+        }
+      )
+    } else {
+      const catalog =
+        scope === 'search'
+          ? resolveCatalogScopeSelection(pstRootDir, options.scopePath || '')
+          : listPstMailboxFiles(pstRootDir)
+      const catalogScopes =
+        scope === 'search'
+          ? catalog.scopes.filter((entry) => entry.scopePath === catalog.scopePath)
+          : catalog.scopes
+      scopePath = scope === 'search' ? catalog.scopePath : ''
+      scopeLabel = scope === 'search' ? catalog.scopeLabel : 'All cases/searches'
+
+      for (const catalogScope of catalogScopes) {
+        const scopeResults = await searchCatalogScope(catalogScope, filters)
+        items.push(...scopeResults)
+      }
+    }
+
+    items.sort((left, right) => sortSearchResults(left, right, filters.sort))
+
+    const total = items.length
+    const totalPages = Math.max(1, Math.ceil(total / filters.pageSize))
+    const page = Math.min(Math.max(filters.page, 1), totalPages)
+    const start = (page - 1) * filters.pageSize
+
+    return {
+      items: items.slice(start, start + filters.pageSize),
+      total,
+      page,
+      pageSize: filters.pageSize,
+      totalPages,
+      query: filters.query,
+      mailOnly: filters.mailOnly,
+      sort: filters.sort,
+      scope,
+      scopePath,
+      scopeLabel,
+      reviewFilters: {
+        flaggedOnly: filters.reviewFlaggedOnly,
+        taggedOnly: filters.reviewTaggedOnly,
+        tag: filters.reviewTag
+      }
+    }
+  }
+
   app.disable('x-powered-by')
   app.use(express.json({ limit: '2mb' }))
   app.use(express.static(publicDir))
+  app.use(createApiSecurityMiddleware(options.apiSecurity))
 
   app.get(API_ROUTES.openApiJson, (_req, res) => {
     responseJson(res, 200, options.openApiSpec)
@@ -481,35 +1082,67 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     res.status(200).type('html').send(buildDocsHtml())
   })
 
-  app.get(API_ROUTES.pstCatalog, (_req, res) => {
-    responseJson(res, 200, listPstMailboxFiles(pstRootDir))
+  app.get(API_ROUTES.pstCatalog, (req, res) => {
+    try {
+      const scopePath = typeof req.query.scopePath === 'string' ? normalizeText(req.query.scopePath) : ''
+      responseJson(res, 200, listPstMailboxFiles(pstRootDir, scopePath))
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
   })
 
   app.post(API_ROUTES.pstOpen, async (req, res) => {
     try {
       const body = (req.body || {}) as OpenMailboxRequestBody
+      const scopePath = normalizeText(body.scopePath)
       const fileName = normalizeText(body.fileName)
       if (!fileName) {
         throw createAppError(400, 'Mailbox file name is required')
       }
 
-      const index = openPstMailbox(pstRootDir, fileName)
+      const index = openPstMailbox(pstRootDir, scopePath, fileName)
       const sessionId = createSessionId()
+      const scopeLabel = scopePath ? scopePath.split('/').join(' / ') : 'PST root'
       const record: SessionRecord = {
         id: sessionId,
         index,
         filePath: index.filePath,
-        fileName: index.fileName
+        fileName: index.fileName,
+        scopePath,
+        scopeLabel
       }
       sessions.set(sessionId, record)
 
       const summary = buildSessionSummary(index)
       responseJson(res, 200, {
         sessionId,
+        scopePath,
+        scopeLabel,
         fileName,
         summary,
         tree: buildFolderTree(index)
       } satisfies SessionResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.search, async (req, res) => {
+    try {
+      const filters = parseReviewFilters(req.query as Record<string, string | string[] | undefined>)
+      const scope = parseSearchScope(req.query.scope)
+      const scopePath = normalizeScopePath(req.query.scopePath)
+      const sessionId = normalizeText(req.query.sessionId)
+      const page = await buildSearchPage(scope, filters, {
+        sessionId,
+        scopePath
+      })
+      responseJson(res, 200, {
+        scope,
+        scopePath: page.scopePath,
+        scopeLabel: page.scopeLabel,
+        page
+      })
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
@@ -775,7 +1408,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.use(
     (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    createRouteErrorHandler(res, err)
+      createRouteErrorHandler(res, err)
     }
   )
 

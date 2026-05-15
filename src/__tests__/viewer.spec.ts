@@ -7,11 +7,14 @@ import {
   buildMessageDetail,
   buildMessageDetailFromSession,
   createViewerSession,
+  htmlToText,
   exportMessageAsEml,
   exportMessageAsEmlFromSession,
   exportMessageAsJson,
   getAttachmentDownloadBuffer,
   getMessageDetail,
+  listSessionMessages,
+  messageMatchesQuery,
   listFolderMessages,
   sanitizeFileNameForDownload,
   withSessionMessage,
@@ -26,6 +29,14 @@ const outlookPath = resolve('./src/__tests__/testdata/mtnman1965@outlook.com.ost
 
 function makeTempDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix))
+}
+
+function stageFixture(sourcePath: string, targetPath: string): void {
+  try {
+    fs.linkSync(sourcePath, targetPath)
+  } catch {
+    fs.copyFileSync(sourcePath, targetPath)
+  }
 }
 
 function walkFolderTree(
@@ -54,6 +65,9 @@ function makeSummary(overrides: Partial<MessageSummary> = {}): MessageSummary {
     displayTo: 'Recipient',
     displayCC: '',
     displayBCC: '',
+    resolvedDisplayTo: 'Recipient <recipient@example.com>',
+    resolvedDisplayCC: '',
+    resolvedDisplayBCC: '',
     clientSubmitTime: now,
     creationTime: now,
     modificationTime: now,
@@ -116,8 +130,8 @@ describe('viewer integration', () => {
       query: 'Lindberg',
       pageSize: 10
     })
-    expect(filtered.total).toBe(1)
-    expect(filtered.items[0].subject).toBe("New OBA's")
+    expect(filtered.total).toBeGreaterThan(0)
+    expect(filtered.items.some((item) => item.subject === "New OBA's")).toBe(true)
 
     const ordered = listFolderMessages(enronSession, targetFolder!.id, {
       pageSize: 5,
@@ -125,6 +139,60 @@ describe('viewer integration', () => {
     })
     expect(ordered.pageSize).toBe(5)
     expect(ordered.items[0].order).toBeLessThan(ordered.items[1].order)
+  })
+
+  it('matches metadata, plain body text, and normalized html body text', () => {
+    const summary = makeSummary({
+      subject: 'Alpha Notice',
+      senderName: 'Sender One'
+    })
+
+    expect(messageMatchesQuery(summary, 'alpha')).toBe(true)
+    expect(
+      messageMatchesQuery(
+        summary,
+        'signature',
+        "The attached OBA's have been submitted to the customers for their signature."
+      )
+    ).toBe(true)
+
+    const htmlBody = htmlToText('<div>Project <strong>update</strong></div>')
+    expect(htmlBody).toBe('Project update')
+    expect(messageMatchesQuery(summary, 'update', htmlBody)).toBe(true)
+  })
+
+  it('searches body text across the whole session', () => {
+    const matches = listSessionMessages(enronSession, {
+      query: 'signature',
+      mailOnly: true
+    })
+
+    expect(matches.some((item) => item.id === 'message:2097188')).toBe(true)
+  })
+
+  it('resolves recipient names to email addresses when loading details', () => {
+    const detail = buildMessageDetailFromSession(outlookSession, 'message:2110308')
+
+    expect(detail.resolvedDisplayTo || detail.displayTo || '').toContain('@')
+    expect(detail.resolvedDisplayCC || detail.displayCC || '').toEqual(expect.any(String))
+  })
+
+  it('finds messages by body keyword within a real folder', () => {
+    const targetFolder = [...enronSession.folders.values()].find(
+      (folder) => folder.displayName === 'TW-Commercial Group'
+    )
+    expect(targetFolder).toBeTruthy()
+
+    const filtered = listFolderMessages(enronSession, targetFolder!.id, {
+      query: 'signature',
+      pageSize: 20
+    })
+
+    expect(filtered.total).toBeGreaterThan(0)
+    expect(filtered.items.some((item) => item.id === 'message:2097188')).toBe(true)
+    expect(filtered.items.find((item) => item.id === 'message:2097188')?.subject).toBe(
+      "New OBA's"
+    )
   })
 
   it('builds attachment download URLs and JSON exports', () => {
@@ -215,7 +283,12 @@ describe('viewer integration', () => {
 
     const encryptedDir = makeTempDir('pst-explorer-encrypted-')
     const encryptedPath = path.join(encryptedDir, 'encrypted.pst')
-    const source = Buffer.from(fs.readFileSync(enronPath))
+    const source = Buffer.alloc(514, 0)
+    source[0] = '!'.charCodeAt(0)
+    source[1] = 'B'.charCodeAt(0)
+    source[2] = 'D'.charCodeAt(0)
+    source[3] = 'N'.charCodeAt(0)
+    source[10] = 23
     source[513] = 0x02
     fs.writeFileSync(encryptedPath, source)
 

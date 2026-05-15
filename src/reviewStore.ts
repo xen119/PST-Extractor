@@ -102,7 +102,10 @@ export function buildReviewContext(
     senderEmailAddress: normalizeText(summary.senderEmailAddress),
     displayTo: normalizeText(summary.displayTo),
     displayCC: normalizeText(summary.displayCC),
-    displayBCC: normalizeText(summary.displayBCC)
+    displayBCC: normalizeText(summary.displayBCC),
+    resolvedDisplayTo: normalizeText(summary.resolvedDisplayTo),
+    resolvedDisplayCC: normalizeText(summary.resolvedDisplayCC),
+    resolvedDisplayBCC: normalizeText(summary.resolvedDisplayBCC)
   }
 }
 
@@ -146,6 +149,9 @@ export function buildReviewSearchFilter(
         { displayTo: regex },
         { displayCC: regex },
         { displayBCC: regex },
+        { resolvedDisplayTo: regex },
+        { resolvedDisplayCC: regex },
+        { resolvedDisplayBCC: regex },
         { messageClass: regex },
         { tags: regex }
       ]
@@ -184,6 +190,9 @@ function matchesReviewSearch(record: ReviewRecord, options: ReviewSearchOptions 
       record.displayTo,
       record.displayCC,
       record.displayBCC,
+      record.resolvedDisplayTo,
+      record.resolvedDisplayCC,
+      record.resolvedDisplayBCC,
       record.messageClass,
       record.tags.join(' ')
     ]
@@ -271,6 +280,9 @@ export class MemoryReviewStore implements ReviewStore {
       displayTo: normalizeText(input.displayTo),
       displayCC: normalizeText(input.displayCC),
       displayBCC: normalizeText(input.displayBCC),
+      resolvedDisplayTo: normalizeText(input.resolvedDisplayTo),
+      resolvedDisplayCC: normalizeText(input.resolvedDisplayCC),
+      resolvedDisplayBCC: normalizeText(input.resolvedDisplayBCC),
       flagged,
       tags,
       createdAt: existing?.createdAt || now,
@@ -375,6 +387,9 @@ export class MongoReviewStore implements ReviewStore {
       displayTo: normalizeText(input.displayTo),
       displayCC: normalizeText(input.displayCC),
       displayBCC: normalizeText(input.displayBCC),
+      resolvedDisplayTo: normalizeText(input.resolvedDisplayTo),
+      resolvedDisplayCC: normalizeText(input.resolvedDisplayCC),
+      resolvedDisplayBCC: normalizeText(input.resolvedDisplayBCC),
       flagged,
       tags,
       createdAt: existing?.createdAt || now,

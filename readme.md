@@ -38,13 +38,24 @@ cd example
 yarn start
 ```
 
-The viewer reads whichever `.pst` or `.ost` files you place in the project `PST/` folder.
+The viewer reads whichever `.pst` or `.ost` files you place under the project `PST/` folder.
 
 ### Web viewer
 
 The `example/` package now starts a local PST mail explorer in your browser.
 
-Put the mailbox files you want to browse in the project root `PST/` folder, then run:
+Put the mailbox files you want to browse in the project `PST/` folder using a case/search structure such as:
+
+```text
+PST/
+  Case 1/
+    Search 1/
+      mailbox.pst
+```
+
+If you place files directly in `PST/`, they appear under the `PST root` scope as a fallback.
+
+Then run:
 
 ```bash
 npm install
@@ -53,11 +64,11 @@ npm install
 npm start
 ```
 
-You can set `HOST`, `PORT`, `MONGODB_URI`, and `MONGODB_DB` in `example/.env` and the server will load them automatically. A sample file is provided at [example/.env.example](example/.env.example).
+You can set `HOST`, `PORT`, `MONGODB_URI`, `MONGODB_DB`, `M365_AUTH_BYPASS_IPS`, and `CORS_ALLOWED_ORIGINS` in `example/.env` and the server will load them automatically. A sample file is provided at [example/.env.example](example/.env.example).
 
 Open the address printed by the server, then:
 
-1. Pick a `.pst` or `.ost` file from the mailbox list in the left pane.
+1. Pick a case/search scope from the dropdown in the left pane, then pick a `.pst` or `.ost` file from the mailbox list.
 2. Browse the folder tree, message list, and reading pane.
 3. Search and filter by message metadata, switch between newest-first and folder-order sorting, and page through large folders.
 4. Flag or tag mail items from the reading pane for later review.
@@ -68,7 +79,11 @@ Swagger docs are available at `/api/docs`, and the OpenAPI JSON is served at `/a
 
 If you set `MONGODB_URI`, review state is stored in MongoDB. You can optionally set `MONGODB_DB=pst-extractor` to override the database name.
 
-Refreshing the tab will reopen the last selected PST from `PST/` while the server process is still running.
+`M365_AUTH_BYPASS_IPS` is a comma-separated list of IPs that can skip the M365 auth middleware. It defaults to the usual loopback addresses for local testing.
+
+`CORS_ALLOWED_ORIGINS` is a comma-separated allowlist for cross-origin browser access to the `/api` routes. Same-origin requests to the built-in UI do not need to be listed.
+
+Refreshing the tab will reopen the last selected case/search and mailbox from `PST/` while the server process is still running.
 
 A simple script looks like this:
 

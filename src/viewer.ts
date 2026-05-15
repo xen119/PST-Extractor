@@ -25,6 +25,7 @@ export interface ViewerSessionIndex {
   rootFolderId: string
   folders: Map<string, FolderSummary>
   messages: Map<string, MessageSummary>
+  searchTextByMessageId: Map<string, string>
 }
 
 export interface FolderSummary {
@@ -62,6 +63,9 @@ export interface MessageSummary {
   displayTo: string
   displayCC: string
   displayBCC: string
+  resolvedDisplayTo: string
+  resolvedDisplayCC: string
+  resolvedDisplayBCC: string
   clientSubmitTime: string | null
   creationTime: string | null
   modificationTime: string | null
@@ -256,6 +260,210 @@ function collapseWhitespace(value: string): string {
   return value.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
+function normalizeSearchableText(...parts: Array<string | null | undefined>): string {
+  return collapseWhitespace(parts.map((part) => safeString(part)).join(' ')).toLowerCase()
+}
+
+function normalizeRecipientKey(value: string): string {
+  return collapseWhitespace(value)
+    .replace(/[<>"']/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+}
+
+function splitRecipientEntries(value: string): string[] {
+  const text = collapseWhitespace(value)
+  if (!text) {
+    return []
+  }
+  if (text.includes(';')) {
+    return text.split(';')
+  }
+  if (text.includes(',') && text.includes('<')) {
+    return text.split(',')
+  }
+  return [text]
+}
+
+function parseRecipientToken(value: string): { name: string; email: string } {
+  const text = collapseWhitespace(value)
+  if (!text) {
+    return { name: '', email: '' }
+  }
+
+  const angleMatch = text.match(/^(.*?)\s*<([^>]+)>$/)
+  if (angleMatch) {
+    return {
+      name: collapseWhitespace(angleMatch[1]).replace(/^["']|["']$/g, ''),
+      email: collapseWhitespace(angleMatch[2])
+    }
+  }
+
+  const emailMatch = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
+  if (emailMatch) {
+    return {
+      name: collapseWhitespace(text.replace(emailMatch[0], '')).replace(/^["']|["']$/g, ''),
+      email: emailMatch[0]
+    }
+  }
+
+  return { name: text, email: '' }
+}
+
+function appendRecipientLookup(
+  lookup: Map<string, string>,
+  name: string,
+  email: string
+): void {
+  const cleanName = collapseWhitespace(name)
+  const cleanEmail = collapseWhitespace(email)
+  if (!cleanEmail) {
+    return
+  }
+
+  if (cleanName) {
+    const nameKey = normalizeRecipientKey(cleanName)
+    if (nameKey && !lookup.has(nameKey)) {
+      lookup.set(nameKey, cleanEmail)
+    }
+  }
+
+  const emailKey = normalizeRecipientKey(cleanEmail)
+  if (emailKey && !lookup.has(emailKey)) {
+    lookup.set(emailKey, cleanEmail)
+  }
+}
+
+function getHeaderValue(headers: string, headerName: string): string {
+  if (!headers) {
+    return ''
+  }
+
+  const normalized = headers.replace(/\r\n[ \t]+/g, ' ')
+  const lines = normalized.split(/\r?\n/)
+  const needle = `${headerName.toLowerCase()}:`
+
+  for (const line of lines) {
+    const trimmed = collapseWhitespace(line)
+    if (trimmed.toLowerCase().startsWith(needle)) {
+      return collapseWhitespace(trimmed.slice(needle.length))
+    }
+  }
+
+  return ''
+}
+
+function buildRecipientLookup(message: PSTMessage): Map<string, string> {
+  const lookup = new Map<string, string>()
+
+  try {
+    const recipientCount = message.numberOfRecipients
+    for (let index = 0; index < recipientCount; index++) {
+      try {
+        const recipient = message.getRecipient(index)
+        if (!recipient) {
+          continue
+        }
+        appendRecipientLookup(
+          lookup,
+          safeString(recipient.displayName || recipient.emailAddress || ''),
+          safeString(recipient.smtpAddress || recipient.emailAddress || '')
+        )
+      } catch {
+        continue
+      }
+    }
+  } catch {
+    // Best effort only.
+  }
+
+  const headers = safeString(message.transportMessageHeaders)
+  if (headers) {
+    for (const headerName of ['To', 'Cc', 'Bcc']) {
+      const headerValue = getHeaderValue(headers, headerName)
+      if (!headerValue) {
+        continue
+      }
+      for (const token of splitRecipientEntries(headerValue)) {
+        const parsed = parseRecipientToken(token)
+        if (parsed.name || parsed.email) {
+          appendRecipientLookup(lookup, parsed.name || parsed.email, parsed.email || '')
+        }
+      }
+    }
+  }
+
+  return lookup
+}
+
+function resolveRecipientList(value: string, lookup: Map<string, string>): string {
+  const entries = splitRecipientEntries(value)
+  const resolved: string[] = []
+
+  for (const entry of entries) {
+    const cleaned = collapseWhitespace(entry)
+    if (!cleaned) {
+      continue
+    }
+
+    const parsed = parseRecipientToken(cleaned)
+    const name = parsed.name || cleaned
+    const email =
+      parsed.email ||
+      lookup.get(normalizeRecipientKey(name)) ||
+      lookup.get(normalizeRecipientKey(cleaned)) ||
+      ''
+
+    resolved.push(formatAddress(name, email))
+  }
+
+  return resolved.join('; ')
+}
+
+function buildResolvedRecipientFields(message: PSTMessage): {
+  resolvedDisplayTo: string
+  resolvedDisplayCC: string
+  resolvedDisplayBCC: string
+  recipientText: string
+} {
+  const lookup = buildRecipientLookup(message)
+  const rawTo = safeString(message.displayTo)
+  const rawCC = safeString(message.displayCC)
+  const rawBCC = safeString(message.displayBCC)
+  const rawOriginalTo = safeString(message.originalDisplayTo)
+  const rawOriginalCC = safeString(message.originalDisplayCc)
+  const rawOriginalBCC = safeString(message.originalDisplayBcc)
+
+  const resolvedDisplayTo =
+    resolveRecipientList(rawTo, lookup) ||
+    resolveRecipientList(rawOriginalTo, lookup) ||
+    rawTo ||
+    rawOriginalTo
+  const resolvedDisplayCC =
+    resolveRecipientList(rawCC, lookup) ||
+    resolveRecipientList(rawOriginalCC, lookup) ||
+    rawCC ||
+    rawOriginalCC
+  const resolvedDisplayBCC =
+    resolveRecipientList(rawBCC, lookup) ||
+    resolveRecipientList(rawOriginalBCC, lookup) ||
+    rawBCC ||
+    rawOriginalBCC
+
+  const recipientText = [resolvedDisplayTo, resolvedDisplayCC, resolvedDisplayBCC]
+    .map((value) => collapseWhitespace(value))
+    .filter(Boolean)
+    .join(' | ')
+
+  return {
+    resolvedDisplayTo,
+    resolvedDisplayCC,
+    resolvedDisplayBCC,
+    recipientText
+  }
+}
+
 function dateToIso(value: Date | null | undefined): string | null {
   if (!value) {
     return null
@@ -403,10 +611,7 @@ function buildSummaryFromMessage(
   const displayTo = safeString(message.displayTo)
   const displayCC = safeString(message.displayCC)
   const displayBCC = safeString(message.displayBCC)
-  const recipientText = [displayTo, displayCC, displayBCC]
-    .map((value) => collapseWhitespace(value))
-    .filter(Boolean)
-    .join(' | ')
+  const resolvedRecipients = buildResolvedRecipientFields(message)
   const subject = collapseWhitespace(
     firstNonEmpty(
       safeString(message.subject),
@@ -437,10 +642,13 @@ function buildSummaryFromMessage(
     subject,
     senderName,
     senderEmailAddress,
-    recipientText,
+    recipientText: resolvedRecipients.recipientText,
     displayTo,
     displayCC,
     displayBCC,
+    resolvedDisplayTo: resolvedRecipients.resolvedDisplayTo,
+    resolvedDisplayCC: resolvedRecipients.resolvedDisplayCC,
+    resolvedDisplayBCC: resolvedRecipients.resolvedDisplayBCC,
     clientSubmitTime,
     creationTime,
     modificationTime,
@@ -452,6 +660,14 @@ function buildSummaryFromMessage(
     isRead: message.isRead,
     isMailLike
   }
+}
+
+function buildBodySearchText(message: PSTMessage): string {
+  return normalizeSearchableText(
+    safeString(message.bodyPrefix),
+    safeString(message.body),
+    htmlToText(safeString(message.bodyHTML))
+  )
 }
 
 function buildEmbeddedDetailId(parentId: string, attachmentIndex: number): string {
@@ -478,7 +694,7 @@ function readNodeInputStreamToBuffer(stream: PSTNodeInputStream): Buffer {
   return Buffer.concat(chunks)
 }
 
-function htmlToText(html: string): string {
+export function htmlToText(html: string): string {
   if (!html) {
     return ''
   }
@@ -694,9 +910,9 @@ function buildAttachmentPart(attachment: AttachmentDetail): string {
 export function buildMessageEmlFromDetail(detail: MessageDetail): string {
   const headers: string[] = []
   const fromAddress = formatAddress(detail.senderName, detail.senderEmailAddress)
-  const toAddress = detail.displayTo.trim()
-  const ccAddress = detail.displayCC.trim()
-  const bccAddress = detail.displayBCC.trim()
+  const toAddress = (detail.resolvedDisplayTo || detail.displayTo).trim()
+  const ccAddress = (detail.resolvedDisplayCC || detail.displayCC).trim()
+  const bccAddress = (detail.resolvedDisplayBCC || detail.displayBCC).trim()
   const subject = encodeHeaderValue(detail.subject || '(no subject)')
   const dateHeader = detail.clientSubmitTime || detail.messageDeliveryTime || detail.creationTime
   const messageId = detail.internetMessageId || ''
@@ -823,9 +1039,9 @@ export function buildMessageEmlFromMessage(
       safeString(message.emailAddress)
     )
   )
-  const toAddress = safeString(message.displayTo).trim()
-  const ccAddress = safeString(message.displayCC).trim()
-  const bccAddress = safeString(message.displayBCC).trim()
+  const toAddress = safeString(summary.resolvedDisplayTo || message.displayTo).trim()
+  const ccAddress = safeString(summary.resolvedDisplayCC || message.displayCC).trim()
+  const bccAddress = safeString(summary.resolvedDisplayBCC || message.displayBCC).trim()
   const subject = encodeHeaderValue(summary.subject || '(no subject)')
   const dateHeader =
     summary.clientSubmitTime ||
@@ -1172,11 +1388,15 @@ export function isMailLikeSummary(summary: MessageSummary): boolean {
   return summary.isMailLike
 }
 
-export function messageMatchesQuery(summary: MessageSummary, query: string): boolean {
+export function messageMatchesQuery(
+  summary: MessageSummary,
+  query: string,
+  searchText = ''
+): boolean {
   if (!query) {
     return true
   }
-  const haystack = [
+  const haystack = normalizeSearchableText(
     summary.subject,
     summary.senderName,
     summary.senderEmailAddress,
@@ -1185,11 +1405,10 @@ export function messageMatchesQuery(summary: MessageSummary, query: string): boo
     summary.displayBCC,
     summary.recipientText,
     summary.messageClass,
-    summary.kind
-  ]
-    .map((value) => value.toLowerCase())
-    .join(' ')
-  return haystack.includes(query.toLowerCase())
+    summary.kind,
+    searchText
+  )
+  return haystack.includes(normalizeSearchableText(query))
 }
 
 export function sortMessageSummaries(messages: MessageSummary[], sort: string): MessageSummary[] {
@@ -1205,6 +1424,28 @@ export function sortMessageSummaries(messages: MessageSummary[], sort: string): 
     }
     return a.order - b.order
   })
+}
+
+export function listSessionMessages(
+  session: ViewerSessionIndex,
+  options: {
+    query?: string
+    mailOnly?: boolean
+    sort?: string
+  } = {}
+): MessageSummary[] {
+  const query = safeString(options.query).trim()
+  const mailOnly = options.mailOnly !== false
+  const sort = options.sort || 'date-desc'
+
+  return sortMessageSummaries(
+    [...session.messages.values()]
+      .filter((message) => (mailOnly ? isMailLikeSummary(message) : true))
+      .filter((message) =>
+        messageMatchesQuery(message, query, session.searchTextByMessageId.get(message.id) || '')
+      ),
+    sort
+  )
 }
 
 function makeFolderSummaryCopy(folder: FolderSummary): FolderSummary {
@@ -1352,6 +1593,7 @@ function indexFolder(
     try {
       const summary = buildSummaryFromMessage(child, folderId, pathName, order, messageId)
       session.messages.set(messageId, summary)
+      session.searchTextByMessageId.set(messageId, buildBodySearchText(child))
       folderSummary.messageIds.push(messageId)
       folderSummary.indexedMessageCount += 1
       if (summary.isMailLike) {
@@ -1377,6 +1619,9 @@ function indexFolder(
         displayTo: '',
         displayCC: '',
         displayBCC: '',
+        resolvedDisplayTo: '',
+        resolvedDisplayCC: '',
+        resolvedDisplayBCC: '',
         clientSubmitTime: null,
         creationTime: null,
         modificationTime: null,
@@ -1390,6 +1635,7 @@ function indexFolder(
         parseError
       }
       session.messages.set(messageId, fallbackSummary)
+      session.searchTextByMessageId.set(messageId, '')
       folderSummary.messageIds.push(messageId)
       folderSummary.indexedMessageCount += 1
     }
@@ -1448,7 +1694,8 @@ export function createViewerSession(filePath: string, fileName: string): ViewerS
       },
       rootFolderId: '',
       folders: new Map<string, FolderSummary>(),
-      messages: new Map<string, MessageSummary>()
+      messages: new Map<string, MessageSummary>(),
+      searchTextByMessageId: new Map<string, string>()
     }
 
     const rootFolder = pstFile.getRootFolder()
@@ -1513,7 +1760,9 @@ export function listFolderMessages(
     .map((messageId) => session.messages.get(messageId))
     .filter((message): message is MessageSummary => Boolean(message))
     .filter((message) => (mailOnly ? isMailLikeSummary(message) : true))
-    .filter((message) => messageMatchesQuery(message, query))
+    .filter((message) =>
+      messageMatchesQuery(message, query, session.searchTextByMessageId.get(message.id) || '')
+    )
   const sortedMessages = sortMessageSummaries(messages, sort)
   const total = sortedMessages.length
   const totalPages = Math.max(1, Math.ceil(total / pageSize))

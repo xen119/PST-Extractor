@@ -110,33 +110,6 @@ textarea:focus-visible {
   overflow: hidden;
 }
 
-.navigator-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 14px 14px 10px;
-  border-bottom: 1px solid var(--line);
-  background: linear-gradient(180deg, var(--surface), var(--surface-soft));
-}
-
-.navigator-header h1 {
-  margin: 0;
-  font-size: 1.18rem;
-  line-height: 1.2;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.eyebrow {
-  margin: 0 0 4px;
-  color: var(--accent);
-  font-size: 0.7rem;
-  font-weight: 700;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-}
-
 .sidebar-section {
   display: flex;
   flex-direction: column;
@@ -234,12 +207,7 @@ textarea:focus-visible {
 }
 
 .summary-card {
-  margin: 10px 12px;
-  padding: 12px 12px 10px;
-  background: linear-gradient(180deg, #ffffff, #f7fafc);
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  display: none;
 }
 
 .summary-empty {
@@ -353,8 +321,30 @@ textarea:focus-visible {
   gap: 1px;
   overflow: auto;
   padding: 8px 0 10px;
-  max-height: 260px;
   background: var(--surface);
+}
+
+.mailboxes-section {
+  flex: 1.2 1 0;
+}
+
+.mailboxes-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mailboxes-section .pst-list {
+  flex: 1;
+  max-height: none;
+}
+
+.mailboxes-section .panel-empty {
+  flex: 1;
+}
+
+.folders-section {
+  flex: 1.25 1 0;
 }
 
 .pst-item {
@@ -410,6 +400,10 @@ textarea:focus-visible {
   padding: 0 0 0 10px;
 }
 
+.folder-list.flat-folder-list {
+  padding-left: 0;
+}
+
 .folder-item {
   margin: 0;
   padding: 0;
@@ -422,6 +416,7 @@ textarea:focus-visible {
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
+  padding-left: calc(12px + (var(--folder-depth, 0) * 10px));
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -511,6 +506,30 @@ textarea:focus-visible {
   min-width: 118px;
 }
 
+.scope-field {
+  padding: 10px 14px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.case-field {
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.case-name-label {
+  padding: 0 14px 10px;
+  color: var(--accent-strong);
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.search-scope-field {
+  flex: 0 1 150px;
+  min-width: 126px;
+}
+
 .search-field input,
 .select-field select {
   width: 100%;
@@ -523,6 +542,11 @@ textarea:focus-visible {
 
 .search-field input::placeholder {
   color: var(--soft);
+}
+
+.scope-field select:disabled {
+  color: var(--soft);
+  background: #f8fafc;
 }
 
 .toggle-field {
@@ -635,6 +659,39 @@ textarea:focus-visible {
   align-items: center;
   color: var(--muted);
   font-size: 0.76rem;
+}
+
+.search-result-row .message-row-meta {
+  align-items: flex-start;
+}
+
+.message-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: var(--accent-strong);
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+.message-context span + span::before {
+  content: '·';
+  color: var(--line-strong);
+  margin-right: 6px;
+}
+
+.search-result-context {
+  color: var(--accent-strong);
+  font-size: 0.74rem;
+  line-height: 1.35;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.search-result-context span {
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted);
 }
 
 .chip {

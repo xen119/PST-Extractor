@@ -11,23 +11,39 @@
     <div class="app-shell">
       <main class="workspace">
         <aside class="panel navigator-panel" aria-label="Mailbox navigation">
-          <div class="navigator-header">
-            <div>
-              <p class="eyebrow">PST Browser</p>
-              <h1>PST Mail Explorer</h1>
+          <section class="sidebar-section" aria-label="Case and search selection">
+            <div class="panel-head slim">
+              <h2>Case / Search</h2>
+              <span id="scope-count-badge" class="badge">0</span>
             </div>
-            <button id="refresh-catalog" class="ghost-button small" type="button">
-              Refresh
-            </button>
-          </div>
+            <label class="select-field case-field" for="case-select">
+              <span>Case</span>
+              <select id="case-select">
+                <option value="">Loading cases...</option>
+              </select>
+            </label>
+            <div id="case-name-label" class="case-name-label">Current case</div>
+            <label class="select-field scope-field" for="scope-select">
+              <span>Search</span>
+              <select id="scope-select">
+                <option value="">Loading searches...</option>
+              </select>
+            </label>
+          </section>
 
-          <section class="sidebar-section" aria-label="Mailbox list">
+          <section class="sidebar-section mailboxes-section" aria-label="Mailbox list">
             <div class="panel-head slim">
               <h2>Mailboxes</h2>
-              <span id="pst-count-badge" class="badge">0</span>
+              <div class="mailboxes-head-actions">
+                <span id="pst-count-badge" class="badge">0</span>
+                <button id="refresh-catalog" class="ghost-button small" type="button">
+                  Refresh
+                </button>
+              </div>
             </div>
             <div id="pst-empty" class="panel-empty">
-              No PST files found. Put .pst or .ost files in the project <code>PST/</code> folder.
+              No case / search folders found. Put .pst or .ost files inside
+              <code>PST/&lt;case&gt;/&lt;search&gt;/</code> folders.
             </div>
             <div id="pst-list" class="pst-list" aria-live="polite"></div>
           </section>
@@ -44,7 +60,7 @@
               <span id="folder-count-badge" class="badge">0</span>
             </div>
             <div id="folder-tree" class="folder-tree panel-empty">
-              Select a PST file to load folders.
+              Select a mailbox to load folders with content.
             </div>
           </section>
         </aside>
@@ -62,14 +78,22 @@
           </div>
 
           <div class="filters compact">
-            <label class="search-field">
-              <span>Search</span>
-              <input
-                id="message-search"
-                type="search"
-                placeholder="Subject, sender, recipient"
-                autocomplete="off"
-              />
+              <label class="search-field">
+                <span>Search</span>
+                <input
+                  id="message-search"
+                  type="search"
+                  placeholder="Keyword, body, recipients, subject"
+                  autocomplete="off"
+                />
+              </label>
+            <label class="select-field search-scope-field">
+              <span>Scope</span>
+              <select id="search-scope-select">
+                <option value="pst">Selected PST</option>
+                <option value="search">Selected search</option>
+                <option value="all">All cases/searches</option>
+              </select>
             </label>
             <label class="toggle-field">
               <input id="mail-only-toggle" type="checkbox" checked />
@@ -124,7 +148,7 @@
       </main>
 
       <footer id="status-bar" class="status-bar" aria-live="polite">
-        Select a PST file from the list on the left.
+        Select a mailbox from the list on the left.
       </footer>
     </div>
 

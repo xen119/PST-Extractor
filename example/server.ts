@@ -3,7 +3,7 @@ import * as fs from 'fs'
 import * as http from 'http'
 import * as path from 'path'
 import { buildOpenApiDocument } from '../src/openApi'
-import { createPstReviewApp } from '../src/pstReviewApp'
+import { createPstReviewApp, type ApiSecurityConfig } from '../src/pstReviewApp'
 import { createReviewStoreFromEnv } from '../src/reviewStore'
 import { getDefaultPstRootDirectory } from '../src/pstCatalog'
 
@@ -20,11 +20,71 @@ function loadEnvFile(filePath: string): void {
   }
 }
 
+function parseList(value: string | undefined): string[] {
+  if (!value) {
+    return []
+  }
+
+  return value
+    .split(/[,\n;]/g)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function getFallbackRequestInfo(req: any) {
+  const headers = req.headers || {}
+  const forwardedFor = typeof headers['x-forwarded-for'] === 'string' ? headers['x-forwarded-for'] : ''
+  return {
+    origin: typeof headers.origin === 'string' ? headers.origin : '',
+    referer: typeof headers.referer === 'string' ? headers.referer : '',
+    ip: forwardedFor.split(',')[0].trim() || req.ip || req.socket?.remoteAddress || '',
+    method: req.method || '',
+    url: req.originalUrl || req.url || '',
+    contentType: typeof headers['content-type'] === 'string' ? headers['content-type'] : '',
+    tenantId: typeof headers['x-tenantid'] === 'string' ? headers['x-tenantid'] : ''
+  }
+}
+
+function loadOptionalModule<T>(modulePath: string, fallback: T, label: string): T {
+  try {
+    return require(modulePath) as T
+  } catch (error) {
+    console.warn(`Unable to load ${label} from ${modulePath}:`, error)
+    return fallback
+  }
+}
+
 loadEnvFile(path.join(__dirname, '.env'))
 loadEnvFile(path.join(__dirname, '..', '.env'))
 
 const host = process.env.HOST || '127.0.0.1'
 const port = Number(process.env.PORT || 3030)
+const webChecks = loadOptionalModule(
+  'C:\\Coding\\NodeFunctions\\httpSecurity.js',
+  {
+    getRequestInfo: getFallbackRequestInfo
+  },
+  'webChecks'
+)
+const m365Auth = loadOptionalModule(
+  'C:\\Coding\\NodeFunctions\\m365-auth.js',
+  {
+    CheckTokens: async (_req: any, res: any) => {
+      return res.status(500).json({
+        success: false,
+        message: 'M365 auth middleware is not available on this host.'
+      })
+    }
+  },
+  'm365Auth'
+)
+
+const apiSecurity: ApiSecurityConfig = {
+  webChecks,
+  m365Auth,
+  bypassIps: parseList(process.env.M365_AUTH_BYPASS_IPS),
+  allowedOrigins: parseList(process.env.CORS_ALLOWED_ORIGINS)
+}
 
 let server: http.Server | null = null
 let reviewStore = null as Awaited<ReturnType<typeof createReviewStoreFromEnv>> | null
@@ -76,7 +136,8 @@ async function main(): Promise<void> {
     publicDir,
     pstRootDir: getDefaultPstRootDirectory(),
     reviewStore,
-    openApiSpec
+    openApiSpec,
+    apiSecurity
   })
 
   server = app.listen(port, host, () => {

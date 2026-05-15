@@ -23,6 +23,9 @@ export interface ReviewRecord extends ReviewState {
   displayTo: string
   displayCC: string
   displayBCC: string
+  resolvedDisplayTo: string
+  resolvedDisplayCC: string
+  resolvedDisplayBCC: string
 }
 
 export interface ReviewContext {
@@ -41,6 +44,9 @@ export interface ReviewContext {
   displayTo: string
   displayCC: string
   displayBCC: string
+  resolvedDisplayTo: string
+  resolvedDisplayCC: string
+  resolvedDisplayBCC: string
 }
 
 export interface ReviewPatchInput extends ReviewContext {
@@ -55,4 +61,3 @@ export interface ReviewSearchOptions {
   tag?: string
   messageIds?: string[]
 }
-

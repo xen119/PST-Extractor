@@ -17,6 +17,36 @@ function jsonResponse(schema: Record<string, unknown>, description = 'OK'): Reco
   }
 }
 
+function pstCatalogEntrySchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['fileName', 'size', 'modifiedAt'],
+    properties: {
+      fileName: { type: 'string' },
+      size: { type: 'integer' },
+      modifiedAt: { type: ['string', 'null'] }
+    }
+  }
+}
+
+function pstCatalogScopeSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['scopePath', 'scopeLabel', 'fileCount', 'files'],
+    properties: {
+      scopePath: { type: 'string' },
+      scopeLabel: { type: 'string' },
+      fileCount: { type: 'integer' },
+      files: {
+        type: 'array',
+        items: pstCatalogEntrySchema()
+      }
+    }
+  }
+}
+
 function errorResponse(statusCode: number, description: string): Record<string, unknown> {
   return {
     [String(statusCode)]: jsonResponse(
@@ -52,6 +82,9 @@ function messageSummarySchema(): Record<string, unknown> {
       displayTo: { type: 'string' },
       displayCC: { type: 'string' },
       displayBCC: { type: 'string' },
+      resolvedDisplayTo: { type: 'string' },
+      resolvedDisplayCC: { type: 'string' },
+      resolvedDisplayBCC: { type: 'string' },
       clientSubmitTime: { type: ['string', 'null'] },
       creationTime: { type: ['string', 'null'] },
       modificationTime: { type: ['string', 'null'] },
@@ -118,10 +151,57 @@ function reviewRecordSchema(): Record<string, unknown> {
           senderEmailAddress: { type: 'string' },
           displayTo: { type: 'string' },
           displayCC: { type: 'string' },
-          displayBCC: { type: 'string' }
+          displayBCC: { type: 'string' },
+          resolvedDisplayTo: { type: 'string' },
+          resolvedDisplayCC: { type: 'string' },
+          resolvedDisplayBCC: { type: 'string' }
         }
       }
     ]
+  }
+}
+
+function searchResultItemSchema(): Record<string, unknown> {
+  return {
+    allOf: [
+      messageSummarySchema(),
+      {
+        type: 'object',
+        additionalProperties: true,
+        required: ['scopePath', 'scopeLabel', 'fileName', 'mailboxName'],
+        properties: {
+          scopePath: { type: 'string' },
+          scopeLabel: { type: 'string' },
+          fileName: { type: 'string' },
+          mailboxName: { type: 'string' }
+        }
+      }
+    ]
+  }
+}
+
+function searchPageSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['items', 'total', 'page', 'pageSize', 'totalPages', 'query', 'mailOnly', 'sort', 'scope', 'scopePath', 'scopeLabel'],
+    properties: {
+      items: {
+        type: 'array',
+        items: searchResultItemSchema()
+      },
+      total: { type: 'integer' },
+      page: { type: 'integer' },
+      pageSize: { type: 'integer' },
+      totalPages: { type: 'integer' },
+      query: { type: 'string' },
+      mailOnly: { type: 'boolean' },
+      sort: { type: 'string' },
+      scope: { type: 'string' },
+      scopePath: { type: 'string' },
+      scopeLabel: { type: 'string' },
+      reviewFilters: { type: 'object', additionalProperties: true }
+    }
   }
 }
 
@@ -181,27 +261,36 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
       [openApiPath(API_ROUTES.pstCatalog)]: {
         get: {
           tags: ['PST catalog'],
-          summary: 'List PST/OST files from the project PST folder',
+          summary: 'List case/search scopes and PST/OST files from the project PST folder',
+          parameters: [
+            {
+              name: 'scopePath',
+              in: 'query',
+              required: false,
+              schema: { type: 'string' },
+              description: 'Relative PST scope path such as Case1/Search1. Empty selects PST root.'
+            }
+          ],
           responses: {
+            ...errorResponse(400, 'Invalid scope path'),
             ...errorResponse(404, 'PST folder missing'),
             200: jsonResponse({
               type: 'object',
               additionalProperties: true,
+              required: ['rootPath', 'rootExists', 'scopes', 'scopePath', 'scopeLabel', 'files', 'message'],
               properties: {
                 rootPath: { type: 'string' },
                 rootExists: { type: 'boolean' },
                 message: { type: 'string' },
+                scopePath: { type: 'string' },
+                scopeLabel: { type: 'string' },
+                scopes: {
+                  type: 'array',
+                  items: pstCatalogScopeSchema()
+                },
                 files: {
                   type: 'array',
-                  items: {
-                    type: 'object',
-                    additionalProperties: true,
-                    properties: {
-                      fileName: { type: 'string' },
-                      size: { type: 'integer' },
-                      modifiedAt: { type: ['string', 'null'] }
-                    }
-                  }
+                  items: pstCatalogEntrySchema()
                 }
               }
             })
@@ -211,7 +300,7 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
       [openApiPath(API_ROUTES.pstOpen)]: {
         post: {
           tags: ['PST catalog'],
-          summary: 'Open a PST/OST file from the project folder',
+          summary: 'Open a PST/OST file from a PST case/search folder',
           requestBody: {
             required: true,
             content: {
@@ -220,6 +309,10 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
                   type: 'object',
                   required: ['fileName'],
                   properties: {
+                    scopePath: {
+                      type: 'string',
+                      description: 'Relative PST scope path. Use an empty string for PST root.'
+                    },
                     fileName: { type: 'string' }
                   }
                 }
@@ -230,15 +323,56 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
             200: jsonResponse({
               type: 'object',
               additionalProperties: true,
-              required: ['sessionId', 'fileName', 'summary', 'tree'],
+              required: ['sessionId', 'scopePath', 'scopeLabel', 'fileName', 'summary', 'tree'],
               properties: {
                 sessionId: { type: 'string' },
+                scopePath: { type: 'string' },
+                scopeLabel: { type: 'string' },
                 fileName: { type: 'string' },
                 summary: { type: 'object', additionalProperties: true },
                 tree: { type: 'object', additionalProperties: true }
               }
             }),
-            ...errorResponse(400, 'Invalid mailbox name')
+            ...errorResponse(400, 'Invalid mailbox or scope path')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.search)]: {
+        get: {
+          tags: ['Extraction'],
+          summary: 'Search across the selected PST, selected search folder, or all case/search folders',
+          parameters: [
+            {
+              name: 'scope',
+              in: 'query',
+              required: false,
+              schema: { type: 'string', enum: ['pst', 'search', 'all'] },
+              description: 'Search within the selected PST, selected search folder, or all cases/searches.'
+            },
+            { name: 'scopePath', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'sessionId', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'query', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'mailOnly', in: 'query', required: false, schema: { type: 'boolean' } },
+            { name: 'sort', in: 'query', required: false, schema: { type: 'string', enum: ['date-desc', 'order'] } },
+            { name: 'page', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
+            { name: 'pageSize', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 200 } },
+            { name: 'reviewFlagged', in: 'query', required: false, schema: { type: 'boolean' } },
+            { name: 'reviewTagged', in: 'query', required: false, schema: { type: 'boolean' } },
+            { name: 'reviewTag', in: 'query', required: false, schema: { type: 'string' } }
+          ],
+          responses: {
+            ...errorResponse(404, 'Search scope not found'),
+            200: jsonResponse({
+              type: 'object',
+              additionalProperties: true,
+              required: ['scope', 'scopePath', 'scopeLabel', 'page'],
+              properties: {
+                scope: { type: 'string' },
+                scopePath: { type: 'string' },
+                scopeLabel: { type: 'string' },
+                page: searchPageSchema()
+              }
+            })
           }
         }
       },

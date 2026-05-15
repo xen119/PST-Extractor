@@ -1,6 +1,7 @@
 export const API_ROUTES = {
   pstCatalog: '/api/psts',
   pstOpen: '/api/psts/open',
+  search: '/api/search',
   sessionSummary: '/api/sessions/:sessionId',
   sessionTree: '/api/sessions/:sessionId/tree',
   folderMessages: '/api/sessions/:sessionId/folders/:folderId/messages',
@@ -19,4 +20,3 @@ export const API_ROUTES = {
 export function toOpenApiPath(pathTemplate: string): string {
   return pathTemplate.replace(/:([A-Za-z0-9_]+)/g, '{$1}')
 }
-

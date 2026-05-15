@@ -1,9 +1,12 @@
 (function () {
   const STORAGE_KEYS = {
+    casePath: 'pst-mail-explorer.casePath',
+    scopePath: 'pst-mail-explorer.scopePath',
     pstFileName: 'pst-mail-explorer.pstFileName',
     folderId: 'pst-mail-explorer.folderId',
     messageId: 'pst-mail-explorer.messageId',
     query: 'pst-mail-explorer.query',
+    searchScope: 'pst-mail-explorer.searchScope',
     mailOnly: 'pst-mail-explorer.mailOnly',
     sort: 'pst-mail-explorer.sort',
     reviewFlaggedOnly: 'pst-mail-explorer.reviewFlaggedOnly',
@@ -12,18 +15,24 @@
 
   const state = {
     sessionId: null,
+    catalogScopes: [],
     catalog: [],
     catalogLoaded: false,
     catalogMessage: '',
+    selectedCasePath: null,
+    selectedScopePath: null,
+    selectedScopeLabel: '',
     selectedPstFileName: null,
     summary: null,
     tree: null,
     folderMap: new Map(),
     currentFolderId: null,
     currentFolderPage: null,
+    currentSearchPage: null,
     currentMessageDetail: null,
     selectedMessageId: null,
     query: '',
+    searchScope: 'pst',
     mailOnly: true,
     sort: 'date-desc',
     reviewFlaggedOnly: false,
@@ -66,6 +75,99 @@
 
   function hasText(value) {
     return Boolean(String(value ?? '').trim())
+  }
+
+  function normalizeScopePath(value) {
+    const text = String(value ?? '').trim().replace(/\\/g, '/')
+    if (!text || text === '.') {
+      return ''
+    }
+
+    const parts = text
+      .split('/')
+      .map((part) => part.trim())
+      .filter(Boolean)
+
+    if (!parts.length || parts.some((part) => part === '..')) {
+      return ''
+    }
+
+    return parts.join('/')
+  }
+
+  function getCasePathFromScopePath(scopePath) {
+    const normalized = normalizeScopePath(scopePath)
+    if (!normalized) {
+      return ''
+    }
+
+    return normalized.split('/')[0] || ''
+  }
+
+  function getCaseLabel(casePath) {
+    return casePath ? String(casePath).split('/').join(' / ') : 'PST root'
+  }
+
+  function getSearchLabel(scopePath) {
+    const normalized = normalizeScopePath(scopePath)
+    if (!normalized) {
+      return 'PST root'
+    }
+
+    const parts = normalized.split('/')
+    return parts[parts.length - 1] || 'PST root'
+  }
+
+  function getScopeLabel(scopePath) {
+    return scopePath ? String(scopePath).split('/').join(' / ') : 'PST root'
+  }
+
+  function getCatalogScope(scopePath) {
+    const normalized = normalizeScopePath(scopePath)
+    return (
+      state.catalogScopes.find((scope) => normalizeScopePath(scope.scopePath) === normalized) ||
+      null
+    )
+  }
+
+  function getCatalogCases() {
+    const cases = new Map()
+    for (const scope of Array.isArray(state.catalogScopes) ? state.catalogScopes : []) {
+      const casePath = getCasePathFromScopePath(scope.scopePath)
+      const caseLabel = getCaseLabel(casePath)
+      if (!cases.has(casePath)) {
+        cases.set(casePath, {
+          casePath,
+          caseLabel,
+          searches: []
+        })
+      }
+      cases.get(casePath).searches.push(scope)
+    }
+
+    return [...cases.values()].sort((left, right) => {
+      if (left.casePath === right.casePath) {
+        return 0
+      }
+      if (left.casePath === '') {
+        return -1
+      }
+      if (right.casePath === '') {
+        return 1
+      }
+      return left.caseLabel.localeCompare(right.caseLabel, undefined, { sensitivity: 'base' })
+    })
+  }
+
+  function getSearchesForCase(casePath) {
+    const normalizedCasePath = normalizeScopePath(casePath)
+    return (Array.isArray(state.catalogScopes) ? state.catalogScopes : [])
+      .filter((scope) => getCasePathFromScopePath(scope.scopePath) === normalizedCasePath)
+      .sort((left, right) =>
+        getSearchLabel(left.scopePath).localeCompare(getSearchLabel(right.scopePath), undefined, {
+          sensitivity: 'base'
+        })
+      )
   }
 
   function formatDate(value) {
@@ -255,6 +357,20 @@
         )
       }
     }
+
+    if (state.currentSearchPage && Array.isArray(state.currentSearchPage.items)) {
+      state.currentSearchPage = {
+        ...state.currentSearchPage,
+        items: state.currentSearchPage.items.map((item) =>
+          item.id === messageId
+            ? {
+                ...item,
+                review: normalized
+              }
+            : item
+        )
+      }
+    }
   }
 
   async function saveReviewState(messageId, reviewPatch, options = {}) {
@@ -357,6 +473,18 @@
   }
 
   function saveState() {
+    if (state.selectedCasePath) {
+      localStorage.setItem(STORAGE_KEYS.casePath, state.selectedCasePath)
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.casePath)
+    }
+
+    if (state.selectedScopePath) {
+      localStorage.setItem(STORAGE_KEYS.scopePath, state.selectedScopePath)
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.scopePath)
+    }
+
     if (state.selectedPstFileName) {
       localStorage.setItem(STORAGE_KEYS.pstFileName, state.selectedPstFileName)
     } else {
@@ -386,6 +514,7 @@
       STORAGE_KEYS.reviewTaggedOnly,
       state.reviewTaggedOnly ? '1' : '0'
     )
+    localStorage.setItem(STORAGE_KEYS.searchScope, state.searchScope)
   }
 
   function applyStateToControls() {
@@ -394,6 +523,7 @@
     ui.sortSelect.value = state.sort
     ui.reviewFlaggedToggle.checked = state.reviewFlaggedOnly
     ui.reviewTaggedToggle.checked = state.reviewTaggedOnly
+    ui.searchScopeSelect.value = state.searchScope
   }
 
   function resetSessionState(message = 'Select a PST file from the list on the left.') {
@@ -403,6 +533,7 @@
     state.folderMap = new Map()
     state.currentFolderId = null
     state.currentFolderPage = null
+    state.currentSearchPage = null
     state.currentMessageDetail = null
     state.selectedMessageId = null
     ui.folderTree.innerHTML = '<div class="panel-empty tree-empty">No mailbox loaded.</div>'
@@ -495,12 +626,62 @@
 
   function renderPstCatalog() {
     const files = Array.isArray(state.catalog) ? state.catalog : []
+    const cases = getCatalogCases()
+    const selectedCase =
+      cases.find((entry) => normalizeScopePath(entry.casePath) === normalizeScopePath(state.selectedCasePath)) ||
+      cases[0] ||
+      null
+    const searches = selectedCase ? getSearchesForCase(selectedCase.casePath) : []
+    const selectedSearch =
+      searches.find((entry) => normalizeScopePath(entry.scopePath) === normalizeScopePath(state.selectedScopePath)) ||
+      searches[0] ||
+      null
+
+    state.selectedCasePath = selectedCase ? selectedCase.casePath : ''
+    state.selectedScopePath = selectedSearch ? selectedSearch.scopePath : ''
+    state.selectedScopeLabel = selectedSearch ? selectedSearch.scopeLabel : getScopeLabel(state.selectedScopePath)
+
+    ui.scopeCountBadge.textContent = String(searches.length)
+    ui.caseSelect.innerHTML = cases.length
+      ? cases
+          .map((entry) => {
+            const isSelected =
+              normalizeScopePath(entry.casePath) === normalizeScopePath(state.selectedCasePath)
+            const label = `${entry.caseLabel} (${entry.searches.length})`
+            return `<option value="${escapeAttr(entry.casePath)}"${
+              isSelected ? ' selected' : ''
+            }>${escapeHtml(label)}</option>`
+          })
+          .join('')
+      : '<option value="">No cases found</option>'
+
+    ui.caseNameLabel.textContent = `Current case: ${selectedCase ? selectedCase.caseLabel : 'PST root'}`
+    ui.scopeSelect.innerHTML = searches.length
+      ? searches
+          .map((entry) => {
+            const isSelected =
+              normalizeScopePath(entry.scopePath) === normalizeScopePath(state.selectedScopePath)
+            const label = `${getSearchLabel(entry.scopePath)} (${entry.fileCount})`
+            return `<option value="${escapeAttr(entry.scopePath)}"${
+              isSelected ? ' selected' : ''
+            }>${escapeHtml(label)}</option>`
+          })
+          .join('')
+      : '<option value="">No searches available</option>'
+
     ui.pstCountBadge.textContent = String(files.length)
 
     if (!state.catalogLoaded) {
       ui.pstEmpty.classList.remove('hidden')
       ui.pstEmpty.innerHTML =
         '<strong>Loading PST files...</strong> Scanning the project <code>PST/</code> folder.'
+      ui.pstList.innerHTML = ''
+      return
+    }
+
+    if (!searches.length) {
+      ui.pstEmpty.classList.remove('hidden')
+      ui.pstEmpty.innerHTML = escapeHtml(state.catalogMessage || 'No searches available.')
       ui.pstList.innerHTML = ''
       return
     }
@@ -532,35 +713,27 @@
       .join('')
   }
 
-  function renderFolderNode(node) {
-    const isActive = node.id === state.currentFolderId ? ' active' : ''
-    const hasChildren = Array.isArray(node.children) && node.children.length > 0
-    const badges = [
-      `<span class="folder-badge" title="Indexed messages">${escapeHtml(
-        String(node.indexedMessageCount ?? 0)
-      )}</span>`,
-      `<span class="folder-badge" title="Mail-like messages">${escapeHtml(
-        String(node.mailMessageCount ?? 0)
-      )}</span>`
-    ].join('')
+  function collectFoldersWithContent(node, depth = 0, output = []) {
+    if (!node) {
+      return output
+    }
 
-    return `
-      <li class="folder-item">
-        <button
-          class="folder-button${isActive}"
-          data-folder-id="${escapeAttr(node.id)}"
-          title="${escapeAttr(node.path || node.displayName)}"
-        >
-          <span class="folder-name">${escapeHtml(node.displayName || '(untitled)')}</span>
-          <span class="folder-badges">${badges}</span>
-        </button>
-        ${
-          hasChildren
-            ? `<ul class="folder-children">${node.children.map((child) => renderFolderNode(child)).join('')}</ul>`
-            : ''
-        }
-      </li>
-    `
+    if (Number(node.indexedMessageCount || 0) > 0) {
+      output.push({
+        id: node.id,
+        displayName: node.displayName,
+        path: node.path,
+        indexedMessageCount: node.indexedMessageCount || 0,
+        mailMessageCount: node.mailMessageCount || 0,
+        depth
+      })
+    }
+
+    for (const child of node.children || []) {
+      collectFoldersWithContent(child, depth + 1, output)
+    }
+
+    return output
   }
 
   function renderFolderTree() {
@@ -570,11 +743,49 @@
       return
     }
 
-    ui.folderTree.innerHTML = `<ul class="folder-list">${renderFolderNode(state.tree)}</ul>`
+    const folders = collectFoldersWithContent(state.tree)
+    if (!folders.length) {
+      ui.folderTree.innerHTML =
+        '<div class="panel-empty tree-empty">No folders with content were found.</div>'
+      return
+    }
+
+    ui.folderTree.innerHTML = `
+      <ul class="folder-list flat-folder-list">
+        ${folders
+          .map((node) => {
+            const isActive = node.id === state.currentFolderId ? ' active' : ''
+            const badges = [
+              `<span class="folder-badge" title="Indexed messages">${escapeHtml(
+                String(node.indexedMessageCount ?? 0)
+              )}</span>`,
+              `<span class="folder-badge" title="Mail-like messages">${escapeHtml(
+                String(node.mailMessageCount ?? 0)
+              )}</span>`
+            ].join('')
+
+            return `
+              <li class="folder-item">
+                <button
+                  class="folder-button${isActive}"
+                  style="--folder-depth:${Number(node.depth || 0)}"
+                  data-folder-id="${escapeAttr(node.id)}"
+                  title="${escapeAttr(node.path || node.displayName)}"
+                >
+                  <span class="folder-name">${escapeHtml(node.displayName || '(untitled)')}</span>
+                  <span class="folder-badges">${badges}</span>
+                </button>
+              </li>
+            `
+          })
+          .join('')}
+      </ul>
+    `
   }
 
   function renderMessageRow(item) {
     const isActive = item.id === state.selectedMessageId ? ' active' : ''
+    const isSearchResult = item.scopeLabel ? ' search-result-row' : ''
     const sender = item.senderName || item.senderEmailAddress || '(unknown sender)'
     const time = item.sortDate || item.creationTime || item.clientSubmitTime
     const review = normalizeReviewState(item.review)
@@ -589,14 +800,39 @@
     ]
       .filter(Boolean)
       .join('')
+    const contextLine =
+      item.scopeLabel || item.fileName
+        ? `
+          <div class="message-context">
+            ${item.scopeLabel ? `<span>${escapeHtml(item.scopeLabel)}</span>` : ''}
+            ${
+              item.fileName
+                ? `<span>${escapeHtml(item.fileName)}</span>`
+                : ''
+            }
+            ${
+              item.folderPath
+                ? `<span>${escapeHtml(item.folderPath)}</span>`
+                : ''
+            }
+          </div>
+        `
+        : ''
 
     return `
-      <button class="message-row${isActive}" data-message-id="${escapeAttr(item.id)}">
+      <button
+        class="message-row${isActive}${isSearchResult}"
+        data-message-id="${escapeAttr(item.id)}"
+        ${item.scopePath ? `data-scope-path="${escapeAttr(item.scopePath)}"` : ''}
+        ${item.fileName ? `data-file-name="${escapeAttr(item.fileName)}"` : ''}
+        ${item.folderId ? `data-folder-id="${escapeAttr(item.folderId)}"` : ''}
+      >
         <div class="message-row-top">
           <div class="message-subject">${escapeHtml(item.subject || '(no subject)')}</div>
           <div class="message-date">${escapeHtml(formatDate(time))}</div>
         </div>
         <div class="message-sender">${escapeHtml(sender)}</div>
+        ${contextLine}
         <div class="message-row-meta">
           ${chips}
           <span>${escapeHtml(item.recipientText || item.displayTo || 'No recipients')}</span>
@@ -605,8 +841,16 @@
     `
   }
 
+  function getActivePage() {
+    return state.currentSearchPage || state.currentFolderPage
+  }
+
+  function isSearchResultsActive() {
+    return Boolean(state.currentSearchPage)
+  }
+
   function updatePagingButtons() {
-    const page = state.currentFolderPage
+    const page = getActivePage()
     const hasPage = Boolean(page)
     ui.pagePrev.disabled = !hasPage || page.page <= 1
     ui.pageNext.disabled = !hasPage || page.page >= page.totalPages
@@ -625,7 +869,7 @@
   }
 
   function renderMessageList() {
-    const page = state.currentFolderPage
+    const page = getActivePage()
     if (!page) {
       ui.messageList.innerHTML =
         '<div class="panel-empty">Select a folder to view messages.</div>'
@@ -640,7 +884,7 @@
       ? page.items.map((item) => renderMessageRow(item)).join('')
       : '<div class="panel-empty">No messages match the current filters.</div>'
 
-    const folderName = page.folder?.displayName || 'folder'
+    const folderName = page.folder?.displayName || page.scopeLabel || 'folder'
     const queryLabel = page.query ? ` filtered by "${page.query}"` : ''
     ui.messageResultCount.textContent = page.items.length
       ? `Showing ${page.items.length} of ${page.total} messages in ${folderName}${queryLabel}.`
@@ -789,9 +1033,9 @@
         ? detail.senderEmailAddress
         : ''
     const recipientLines = [
-      detail.displayTo ? `To ${detail.displayTo}` : '',
-      detail.displayCC ? `Cc ${detail.displayCC}` : '',
-      detail.displayBCC ? `Bcc ${detail.displayBCC}` : ''
+      detail.resolvedDisplayTo || detail.displayTo ? `To ${detail.resolvedDisplayTo || detail.displayTo}` : '',
+      detail.resolvedDisplayCC || detail.displayCC ? `Cc ${detail.resolvedDisplayCC || detail.displayCC}` : '',
+      detail.resolvedDisplayBCC || detail.displayBCC ? `Bcc ${detail.resolvedDisplayBCC || detail.displayBCC}` : ''
     ]
       .filter(Boolean)
       .join(' · ')
@@ -886,6 +1130,7 @@
     if (showBusy) {
       setBodyBusy(true)
     }
+    const scopePath = normalizeScopePath(options.scopePath || state.selectedScopePath || '')
     setStatus(`Opening ${fileName}...`)
     try {
       const response = await fetchJson('/api/psts/open', {
@@ -893,11 +1138,17 @@
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ fileName })
+        body: JSON.stringify({
+          scopePath,
+          fileName
+        })
       })
 
       state.sessionId = response.sessionId
       state.selectedPstFileName = response.fileName || fileName
+      state.selectedCasePath = getCasePathFromScopePath(response.scopePath || scopePath)
+      state.selectedScopePath = normalizeScopePath(response.scopePath || scopePath)
+      state.selectedScopeLabel = response.scopeLabel || getScopeLabel(state.selectedScopePath)
       state.summary = response.summary
       state.tree = response.tree
       state.folderMap = new Map()
@@ -910,6 +1161,7 @@
           ? restoreFolderId
           : state.summary.rootFolderId || state.tree.id
       state.currentFolderPage = null
+      state.currentSearchPage = null
       state.currentMessageDetail = null
       state.selectedMessageId = restoreMessageId || null
       renderSummary()
@@ -948,10 +1200,28 @@
     }
     setStatus('Loading PST catalog...')
     try {
-      const response = await fetchJson('/api/psts')
+      const casePath = normalizeScopePath(
+        options.casePath ||
+          state.selectedCasePath ||
+          localStorage.getItem(STORAGE_KEYS.casePath) ||
+          ''
+      )
+      const scopePath = normalizeScopePath(
+        options.scopePath ||
+          state.selectedScopePath ||
+          localStorage.getItem(STORAGE_KEYS.scopePath) ||
+          ''
+      )
+      const response = await fetchJson(
+        `/api/psts${scopePath ? `?scopePath=${encodeURIComponent(scopePath)}` : ''}`
+      )
       state.catalogLoaded = true
       state.catalogMessage = response.message || ''
+      state.catalogScopes = Array.isArray(response.scopes) ? response.scopes : []
       state.catalog = Array.isArray(response.files) ? response.files : []
+      state.selectedCasePath = normalizeScopePath(casePath || getCasePathFromScopePath(response.scopePath))
+      state.selectedScopePath = normalizeScopePath(response.scopePath || scopePath)
+      state.selectedScopeLabel = response.scopeLabel || getScopeLabel(state.selectedScopePath)
       renderPstCatalog()
 
       const preferredFileName =
@@ -979,6 +1249,7 @@
 
       await openMailbox(nextMailbox.fileName, {
         showBusy: false,
+        scopePath: state.selectedScopePath || scopePath || '',
         restoreFolderId: localStorage.getItem(STORAGE_KEYS.folderId) || undefined,
         restoreMessageId: localStorage.getItem(STORAGE_KEYS.messageId) || undefined
       })
@@ -1037,6 +1308,7 @@
         return
       }
 
+      state.currentSearchPage = null
       state.currentFolderPage = response.page
       renderMessageList()
 
@@ -1073,6 +1345,99 @@
         </div>
       `
     }
+  }
+
+  async function loadSearchResults(page = 1, options = {}) {
+    const query = state.query.trim()
+    if (!query) {
+      state.currentSearchPage = null
+      return loadFolderPage(page, options)
+    }
+
+    const scope = state.searchScope || 'pst'
+    if (scope === 'pst' && !state.sessionId) {
+      return
+    }
+    const params = new URLSearchParams()
+    params.set('scope', scope)
+    params.set('query', query)
+    params.set('page', String(page))
+    params.set('pageSize', String(state.pageSize))
+    params.set('mailOnly', state.mailOnly ? '1' : '0')
+    params.set('sort', state.sort)
+    if (state.reviewFlaggedOnly) {
+      params.set('reviewFlagged', '1')
+    }
+    if (state.reviewTaggedOnly) {
+      params.set('reviewTagged', '1')
+    }
+    if (state.selectedScopePath) {
+      params.set('scopePath', state.selectedScopePath)
+    }
+    if (scope === 'pst' && state.sessionId) {
+      params.set('sessionId', state.sessionId)
+    }
+
+    setStatus(
+      `Searching ${
+        scope === 'all'
+          ? 'all cases/searches'
+          : scope === 'search'
+            ? state.selectedScopeLabel || 'selected search'
+            : 'selected PST'
+      }...`
+    )
+    try {
+      const response = await fetchJson(`/api/search?${params.toString()}`)
+      state.currentFolderPage = null
+      state.currentSearchPage = response.page
+      renderMessageList()
+
+      const pageItems = response.page?.items || []
+      const preferredMessageId =
+        options.preferredMessageId || localStorage.getItem(STORAGE_KEYS.messageId) || null
+      const preferredVisible = preferredMessageId
+        ? pageItems.find((item) => item.id === preferredMessageId)
+        : null
+
+      if (scope === 'pst' && preferredVisible) {
+        await selectMessage(preferredVisible.id, { refresh: true })
+      } else if (
+        scope === 'pst' &&
+        options.selectPreferred !== false &&
+        pageItems.length &&
+        pageItems[0].fileName === state.selectedPstFileName
+      ) {
+        await selectMessage(pageItems[0].id, { refresh: true })
+      } else {
+        state.selectedMessageId = null
+        state.currentMessageDetail = null
+        ui.messageDetail.innerHTML =
+          '<div class="panel-empty">Select a result to inspect it.</div>'
+        renderMessageList()
+      }
+
+      setStatus(
+        `Search completed: ${response.page?.total ?? 0} message(s) found in ${
+          response.page?.scopeLabel || 'selected scope'
+        }.`,
+        'success'
+      )
+    } catch (error) {
+      setStatus(`Unable to search messages: ${error.message}`, 'error')
+      ui.messageList.innerHTML = `
+        <div class="panel-empty">
+          <strong>Unable to search messages.</strong> ${escapeHtml(error.message)}
+        </div>
+      `
+    }
+  }
+
+  async function loadVisibleMessages(page = 1, options = {}) {
+    if (state.query.trim()) {
+      return loadSearchResults(page, options)
+    }
+    return loadFolderPage(page, options)
   }
 
   async function selectMessage(messageId, options = {}) {
@@ -1128,22 +1493,24 @@
   }
 
   async function navigateFolderPage(delta) {
-    if (!state.currentFolderPage) {
+    const page = getActivePage()
+    if (!page) {
       return
     }
-    const nextPage = state.currentFolderPage.page + delta
-    if (nextPage < 1 || nextPage > state.currentFolderPage.totalPages) {
+    const nextPage = page.page + delta
+    if (nextPage < 1 || nextPage > page.totalPages) {
       return
     }
-    await loadFolderPage(nextPage, { selectPreferred: true })
+    await loadVisibleMessages(nextPage, { selectPreferred: true })
   }
 
   async function navigateMessage(delta) {
-    if (!state.currentFolderPage || !state.selectedMessageId) {
+    const page = getActivePage()
+    if (!page || !state.selectedMessageId) {
       return
     }
 
-    const items = state.currentFolderPage.items || []
+    const items = page.items || []
     const index = items.findIndex((item) => item.id === state.selectedMessageId)
     if (index >= 0) {
       const targetIndex = index + delta
@@ -1153,47 +1520,39 @@
       }
     }
 
-    const nextPage = state.currentFolderPage.page + (delta > 0 ? 1 : -1)
-    if (nextPage < 1 || nextPage > state.currentFolderPage.totalPages) {
+    const nextPage = page.page + (delta > 0 ? 1 : -1)
+    if (nextPage < 1 || nextPage > page.totalPages) {
       return
     }
 
-    const token = (state.folderLoadToken = (state.folderLoadToken || 0) + 1)
-    const folderId = state.currentFolderId
-    const params = new URLSearchParams()
-    params.set('page', String(nextPage))
-    params.set('pageSize', String(state.pageSize))
-    params.set('mailOnly', state.mailOnly ? '1' : '0')
-    params.set('sort', state.sort)
-    if (state.reviewFlaggedOnly) {
-      params.set('reviewFlagged', '1')
-    }
-    if (state.reviewTaggedOnly) {
-      params.set('reviewTagged', '1')
-    }
-    if (state.query.trim()) {
-      params.set('q', state.query.trim())
+    await loadVisibleMessages(nextPage, { selectPreferred: true })
+  }
+
+  async function openSearchResult(item) {
+    if (!item || !item.fileName || !item.id) {
+      return
     }
 
-    try {
-      const response = await fetchJson(
-        `/api/sessions/${encodeURIComponent(state.sessionId)}/folders/${encodeURIComponent(
-          folderId
-        )}/messages?${params.toString()}`
-      )
-      if (token !== state.folderLoadToken) {
-        return
-      }
-      state.currentFolderPage = response.page
-      renderMessageList()
-      const pageItems = response.page?.items || []
-      const target = delta > 0 ? pageItems[0] : pageItems[pageItems.length - 1]
-      if (target) {
-        await selectMessage(target.id, { refresh: true })
-      }
-    } catch (error) {
-      setStatus(`Unable to navigate messages: ${error.message}`, 'error')
+    const currentScopePath = normalizeScopePath(state.selectedScopePath || '')
+    const targetScopePath = normalizeScopePath(item.scopePath || '')
+    const isCurrentMailbox =
+      state.sessionId &&
+      item.fileName === state.selectedPstFileName &&
+      targetScopePath === currentScopePath
+
+    if (isCurrentMailbox) {
+      state.currentSearchPage = null
+      await selectMessage(item.id, { refresh: true })
+      return
     }
+
+    await openMailbox(item.fileName, {
+      showBusy: true,
+      scopePath: targetScopePath,
+      restoreFolderId: item.folderId,
+      restoreMessageId: item.id
+    })
+    await selectMessage(item.id, { refresh: true })
   }
 
   async function chooseFolder(folderId) {
@@ -1202,6 +1561,7 @@
     }
     state.currentFolderId = folderId
     state.currentFolderPage = null
+    state.currentSearchPage = null
     state.currentMessageDetail = null
     state.selectedMessageId = null
     renderFolderTree()
@@ -1218,7 +1578,50 @@
 
   function wireEvents() {
     ui.refreshCatalog.addEventListener('click', () => {
-      void loadMailboxCatalog({ showBusy: true })
+      void loadMailboxCatalog({
+        showBusy: true,
+        casePath: state.selectedCasePath || undefined,
+        scopePath: state.selectedScopePath || undefined,
+        preferredFileName: state.selectedPstFileName || undefined
+      })
+    })
+
+    ui.caseSelect.addEventListener('change', () => {
+      const nextCasePath = normalizeScopePath(ui.caseSelect.value)
+      const nextSearch = getSearchesForCase(nextCasePath)[0] || null
+      state.selectedCasePath = nextCasePath
+      state.selectedScopePath = nextSearch ? nextSearch.scopePath : ''
+      state.selectedScopeLabel = nextSearch ? nextSearch.scopeLabel : getScopeLabel(state.selectedScopePath)
+      saveState()
+      void loadMailboxCatalog({
+        showBusy: true,
+        casePath: state.selectedCasePath || undefined,
+        scopePath: state.selectedScopePath || undefined,
+        preferredFileName: state.selectedPstFileName || undefined
+      })
+    })
+
+    ui.scopeSelect.addEventListener('change', () => {
+      const nextScopePath = normalizeScopePath(ui.scopeSelect.value)
+      const nextScope = getCatalogScope(nextScopePath)
+      state.selectedScopePath = nextScopePath
+      state.selectedCasePath = getCasePathFromScopePath(nextScopePath)
+      state.selectedScopeLabel = nextScope ? nextScope.scopeLabel : getScopeLabel(nextScopePath)
+      saveState()
+      void loadMailboxCatalog({
+        showBusy: true,
+        casePath: state.selectedCasePath || undefined,
+        scopePath: state.selectedScopePath || undefined,
+        preferredFileName: state.selectedPstFileName || undefined
+      })
+    })
+
+    ui.searchScopeSelect.addEventListener('change', () => {
+      state.searchScope = ui.searchScopeSelect.value || 'pst'
+      saveState()
+      if (state.query.trim()) {
+        void loadVisibleMessages(1, { selectPreferred: true })
+      }
     })
 
     ui.pstList.addEventListener('click', (event) => {
@@ -1244,6 +1647,16 @@
     ui.messageList.addEventListener('click', (event) => {
       const button = event.target.closest('[data-message-id]')
       if (!button) {
+        return
+      }
+      if (button.dataset.fileName && button.dataset.scopePath) {
+        void openSearchResult({
+          id: button.dataset.messageId,
+          fileName: button.dataset.fileName,
+          scopePath: button.dataset.scopePath,
+          folderId: button.dataset.folderId || '',
+          displayName: ''
+        })
         return
       }
       void selectMessage(button.dataset.messageId, { refresh: true })
@@ -1286,8 +1699,8 @@
       debounce(() => {
         state.query = ui.searchInput.value.trim()
         saveState()
-        if (state.sessionId && state.currentFolderId) {
-          void loadFolderPage(1, { selectPreferred: true })
+        if (state.sessionId && (state.currentFolderId || state.query.trim())) {
+          void loadVisibleMessages(1, { selectPreferred: true })
         }
       }, 250)
     )
@@ -1295,32 +1708,32 @@
     ui.mailOnlyToggle.addEventListener('change', () => {
       state.mailOnly = ui.mailOnlyToggle.checked
       saveState()
-      if (state.sessionId && state.currentFolderId) {
-        void loadFolderPage(1, { selectPreferred: true })
+      if (state.sessionId && (state.currentFolderId || state.query.trim())) {
+        void loadVisibleMessages(1, { selectPreferred: true })
       }
     })
 
     ui.reviewFlaggedToggle.addEventListener('change', () => {
       state.reviewFlaggedOnly = ui.reviewFlaggedToggle.checked
       saveState()
-      if (state.sessionId && state.currentFolderId) {
-        void loadFolderPage(1, { selectPreferred: true })
+      if (state.sessionId && (state.currentFolderId || state.query.trim())) {
+        void loadVisibleMessages(1, { selectPreferred: true })
       }
     })
 
     ui.reviewTaggedToggle.addEventListener('change', () => {
       state.reviewTaggedOnly = ui.reviewTaggedToggle.checked
       saveState()
-      if (state.sessionId && state.currentFolderId) {
-        void loadFolderPage(1, { selectPreferred: true })
+      if (state.sessionId && (state.currentFolderId || state.query.trim())) {
+        void loadVisibleMessages(1, { selectPreferred: true })
       }
     })
 
     ui.sortSelect.addEventListener('change', () => {
       state.sort = ui.sortSelect.value
       saveState()
-      if (state.sessionId && state.currentFolderId) {
-        void loadFolderPage(1, { selectPreferred: true })
+      if (state.sessionId && (state.currentFolderId || state.query.trim())) {
+        void loadVisibleMessages(1, { selectPreferred: true })
       }
     })
 
@@ -1360,7 +1773,12 @@
     ui.folderTree = getElement('folder-tree')
     ui.folderCountBadge = getElement('folder-count-badge')
     ui.messageCountBadge = getElement('message-count-badge')
+    ui.scopeCountBadge = getElement('scope-count-badge')
+    ui.caseSelect = getElement('case-select')
+    ui.caseNameLabel = getElement('case-name-label')
+    ui.scopeSelect = getElement('scope-select')
     ui.searchInput = getElement('message-search')
+    ui.searchScopeSelect = getElement('search-scope-select')
     ui.mailOnlyToggle = getElement('mail-only-toggle')
     ui.reviewFlaggedToggle = getElement('review-flagged-toggle')
     ui.reviewTaggedToggle = getElement('review-tagged-toggle')
@@ -1376,6 +1794,14 @@
     ui.statusBar = getElement('status-bar')
 
     state.query = localStorage.getItem(STORAGE_KEYS.query) || ''
+    state.searchScope = ['pst', 'search', 'all'].includes(
+      localStorage.getItem(STORAGE_KEYS.searchScope) || ''
+    )
+      ? localStorage.getItem(STORAGE_KEYS.searchScope) || 'pst'
+      : 'pst'
+    state.selectedCasePath = normalizeScopePath(localStorage.getItem(STORAGE_KEYS.casePath) || '')
+    state.selectedScopePath = normalizeScopePath(localStorage.getItem(STORAGE_KEYS.scopePath) || '')
+    state.selectedScopeLabel = getScopeLabel(state.selectedScopePath)
     state.mailOnly = readStorageBool(STORAGE_KEYS.mailOnly, true)
     state.sort = localStorage.getItem(STORAGE_KEYS.sort) || 'date-desc'
     state.reviewFlaggedOnly = readStorageBool(STORAGE_KEYS.reviewFlaggedOnly, false)
@@ -1386,6 +1812,8 @@
     renderPstCatalog()
     await loadMailboxCatalog({
       showBusy: true,
+      casePath: state.selectedCasePath || undefined,
+      scopePath: state.selectedScopePath || undefined,
       preferredFileName: state.selectedPstFileName || undefined
     })
   }
