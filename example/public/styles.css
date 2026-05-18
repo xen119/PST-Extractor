@@ -608,6 +608,21 @@ textarea:focus-visible {
   gap: 8px;
 }
 
+.bundle-toolbar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 14px 10px;
+  border-bottom: 1px solid var(--line);
+  background: #fafcff;
+}
+
+.bundle-scope-field {
+  flex: 0 1 180px;
+  min-width: 154px;
+}
+
 .search-field,
 .select-field,
 .toggle-field {
@@ -637,6 +652,11 @@ textarea:focus-visible {
 .navigator-panel .select-field {
   flex: 0 0 auto;
   min-width: 0;
+}
+
+.bundle-toolbar .select-field {
+  padding: 0;
+  border-bottom: 0;
 }
 
 .scope-field {

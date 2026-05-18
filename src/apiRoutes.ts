@@ -16,6 +16,7 @@ export const API_ROUTES = {
   messageExportEml: '/api/sessions/:sessionId/messages/:messageId/export.eml',
   messageAttachment: '/api/sessions/:sessionId/messages/:messageId/attachments/:attachmentIndex',
   mailboxReviewQueue: '/api/sessions/:sessionId/review',
+  flaggedBundleExport: '/api/exports/flagged.zip',
   openApiJson: '/api/openapi.json',
   docs: '/api/docs'
 } as const

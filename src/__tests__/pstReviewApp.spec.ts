@@ -91,6 +91,50 @@ async function requestJson(url: string, init?: RequestInit): Promise<any> {
   return payload
 }
 
+async function requestBuffer(url: string, init?: RequestInit): Promise<{ response: Response; buffer: Buffer }> {
+  const response = await fetch(url, init)
+  const buffer = Buffer.from(await response.arrayBuffer())
+  if (!response.ok) {
+    const text = buffer.toString('utf8')
+    let payload: any = null
+    try {
+      payload = text ? JSON.parse(text) : null
+    } catch {
+      payload = null
+    }
+    throw new Error((payload && payload.error) || response.statusText)
+  }
+  return { response, buffer }
+}
+
+function parseStoredZipEntries(buffer: Buffer): Map<string, Buffer> {
+  const entries = new Map<string, Buffer>()
+  let offset = 0
+  while (offset + 4 <= buffer.length) {
+    const signature = buffer.readUInt32LE(offset)
+    if (signature === 0x04034b50) {
+      const compression = buffer.readUInt16LE(offset + 8)
+      expect(compression).toBe(0)
+      const nameLength = buffer.readUInt16LE(offset + 26)
+      const extraLength = buffer.readUInt16LE(offset + 28)
+      const compressedSize = buffer.readUInt32LE(offset + 18)
+      const fileName = buffer
+        .slice(offset + 30, offset + 30 + nameLength)
+        .toString('utf8')
+      const dataStart = offset + 30 + nameLength + extraLength
+      const dataEnd = dataStart + compressedSize
+      entries.set(fileName, buffer.slice(dataStart, dataEnd))
+      offset = dataEnd
+      continue
+    }
+    if (signature === 0x02014b50 || signature === 0x06054b50) {
+      break
+    }
+    offset += 1
+  }
+  return entries
+}
+
 async function startApp(pstRootDir: string, apiSecurity?: ApiSecurityConfig) {
   const reviewStore = new MemoryReviewStore()
   const searchIndexStore = new MemorySearchIndexStore()
@@ -443,6 +487,7 @@ describe('pst review api', () => {
     const openApi = await requestJson(`${started.baseUrl}/api/openapi.json`)
     expect(openApi.paths['/api/psts/open']).toBeDefined()
     expect(openApi.paths['/api/sessions/{sessionId}/messages/{messageId}/review']).toBeDefined()
+    expect(openApi.paths['/api/exports/flagged.zip']).toBeDefined()
 
     const docsResponse = await fetch(`${started.baseUrl}/api/docs`)
     const docsHtml = await docsResponse.text()
@@ -524,6 +569,208 @@ describe('pst review api', () => {
       }
     )
     expect(deleted.review.flagged).toBe(false)
+  })
+
+  it('exports a flagged mail and appointment bundle as a zip archive', async () => {
+    rootDir = makeTempDir('pst-review-api-bundle-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
+    stageFixture(outlookPath, path.join(pstDir, 'Case1', 'Search1', 'archive.ost'))
+
+    const started = await startApp(pstDir)
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const opened = await requestJson(`${started.baseUrl}/api/psts/open`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        scopePath: 'Case1/Search1',
+        fileName: 'archive.ost'
+      })
+    })
+
+    const mailFolder = findMailFolder(opened.tree)
+    expect(mailFolder).toBeTruthy()
+    const mailFolderPage = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/folders/${encodeURIComponent(
+        mailFolder!.id
+      )}/messages?pageSize=20`
+    )
+    const mailItem = mailFolderPage.page.items.find((item: { kind: string }) => item.kind === 'mail')
+    expect(mailItem).toBeTruthy()
+
+    await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
+        mailItem.id
+      )}/review`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          flagged: true
+        })
+      }
+    )
+
+    const calendarFolder = findFolderByDisplayName(opened.tree, 'Calendar')
+    expect(calendarFolder).toBeTruthy()
+    const calendarPage = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/folders/${encodeURIComponent(
+        calendarFolder!.id
+      )}/messages?mailOnly=0&pageSize=20`
+    )
+    const appointment = calendarPage.page.items.find(
+      (item: { kind: string }) => item.kind === 'appointment'
+    )
+    expect(appointment).toBeTruthy()
+
+    await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
+        appointment.id
+      )}/review`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          flagged: true
+        })
+      }
+    )
+
+    const { response, buffer } = await requestBuffer(
+      `${started.baseUrl}/api/exports/flagged.zip?scope=pst&sessionId=${opened.sessionId}`
+    )
+    expect(response.headers.get('content-type')).toContain('application/zip')
+    const entries = parseStoredZipEntries(buffer)
+    expect(entries.has('manifest.json')).toBe(true)
+    const manifest = JSON.parse(entries.get('manifest.json')!.toString('utf8'))
+    expect(manifest.scope.scope).toBe('pst')
+    expect(manifest.counts.total).toBe(2)
+    expect(manifest.counts.exported).toBe(2)
+    expect(manifest.counts.failed).toBe(0)
+    expect(manifest.items).toHaveLength(2)
+    expect(manifest.items.some((item: { outputType: string }) => item.outputType === 'eml')).toBe(
+      true
+    )
+    expect(manifest.items.some((item: { outputType: string }) => item.outputType === 'ics')).toBe(
+      true
+    )
+    expect([...entries.keys()].some((name) => name.endsWith('.eml'))).toBe(true)
+    expect([...entries.keys()].some((name) => name.endsWith('.ics'))).toBe(true)
+    expect([...entries.keys()].some((name) => name.endsWith('.pst'))).toBe(false)
+  })
+
+  it('honors bundle scope when exporting flagged items', async () => {
+    rootDir = makeTempDir('pst-review-api-bundle-scope-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
+    fs.mkdirSync(path.join(pstDir, 'Case1', 'Search2'), { recursive: true })
+    stageFixture(outlookPath, path.join(pstDir, 'Case1', 'Search1', 'first.ost'))
+    stageFixture(outlookPath, path.join(pstDir, 'Case1', 'Search2', 'second.ost'))
+
+    const started = await startApp(pstDir)
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const openedOne = await requestJson(`${started.baseUrl}/api/psts/open`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        scopePath: 'Case1/Search1',
+        fileName: 'first.ost'
+      })
+    })
+    const openedTwo = await requestJson(`${started.baseUrl}/api/psts/open`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        scopePath: 'Case1/Search2',
+        fileName: 'second.ost'
+      })
+    })
+
+    const firstFolder = findMailFolder(openedOne.tree)
+    const secondFolder = findMailFolder(openedTwo.tree)
+    expect(firstFolder).toBeTruthy()
+    expect(secondFolder).toBeTruthy()
+
+    const firstPage = await requestJson(
+      `${started.baseUrl}/api/sessions/${openedOne.sessionId}/folders/${encodeURIComponent(
+        firstFolder!.id
+      )}/messages?pageSize=20`
+    )
+    const secondPage = await requestJson(
+      `${started.baseUrl}/api/sessions/${openedTwo.sessionId}/folders/${encodeURIComponent(
+        secondFolder!.id
+      )}/messages?pageSize=20`
+    )
+    const firstMail = firstPage.page.items.find((item: { kind: string }) => item.kind === 'mail')
+    const secondMail = secondPage.page.items.find((item: { kind: string }) => item.kind === 'mail')
+    expect(firstMail).toBeTruthy()
+    expect(secondMail).toBeTruthy()
+
+    await requestJson(
+      `${started.baseUrl}/api/sessions/${openedOne.sessionId}/messages/${encodeURIComponent(
+        firstMail.id
+      )}/review`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ flagged: true })
+      }
+    )
+    await requestJson(
+      `${started.baseUrl}/api/sessions/${openedTwo.sessionId}/messages/${encodeURIComponent(
+        secondMail.id
+      )}/review`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ flagged: true })
+      }
+    )
+
+    const searchScopeBundle = await requestBuffer(
+      `${started.baseUrl}/api/exports/flagged.zip?scope=search&scopePath=${encodeURIComponent(
+        'Case1/Search1'
+      )}`
+    )
+    const searchEntries = parseStoredZipEntries(searchScopeBundle.buffer)
+    const searchManifest = JSON.parse(searchEntries.get('manifest.json')!.toString('utf8'))
+    expect(searchManifest.scope.scope).toBe('search')
+    expect(searchManifest.counts.total).toBe(1)
+    expect(searchManifest.items).toHaveLength(1)
+    expect(searchManifest.items[0].scopePath).toBe('Case1/Search1')
+    expect([...searchEntries.keys()].some((name) => name.includes('first.ost'))).toBe(true)
+    expect([...searchEntries.keys()].some((name) => name.includes('second.ost'))).toBe(false)
+
+    const allScopeBundle = await requestBuffer(
+      `${started.baseUrl}/api/exports/flagged.zip?scope=all`
+    )
+    const allEntries = parseStoredZipEntries(allScopeBundle.buffer)
+    const allManifest = JSON.parse(allEntries.get('manifest.json')!.toString('utf8'))
+    expect(allManifest.scope.scope).toBe('all')
+    expect(allManifest.counts.total).toBe(2)
+    expect(allManifest.items).toHaveLength(2)
+    expect([...allEntries.keys()].some((name) => name.includes('first.ost'))).toBe(true)
+    expect([...allEntries.keys()].some((name) => name.includes('second.ost'))).toBe(true)
   })
 
   it('opens PST root mailboxes when scopePath is empty', async () => {

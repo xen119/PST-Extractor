@@ -1,5 +1,6 @@
 import Long from 'long'
 import { PSTAttachment } from './PSTAttachment.class'
+import { PSTAppointment } from './PSTAppointment.class'
 import { PSTFile } from './PSTFile.class'
 import { PSTFolder } from './PSTFolder.class'
 import { PSTMessage } from './PSTMessage.class'
@@ -2010,6 +2011,225 @@ export function exportMessageAsEmlFromSession(
 ): string {
   return withSessionMessage(session, messageId, (message, summary) =>
     buildMessageEmlFromMessage(message, summary, { embeddedDepth })
+  )
+}
+
+function escapeIcsText(value: string): string {
+  return safeString(value)
+    .replace(/\\/g, '\\\\')
+    .replace(/\r?\n/g, '\\n')
+    .replace(/;/g, '\\;')
+    .replace(/,/g, '\\,')
+}
+
+function escapeIcsParameterValue(value: string): string {
+  return safeString(value)
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/;/g, '\\;')
+    .replace(/,/g, '\\,')
+}
+
+function foldIcsLine(line: string): string[] {
+  const text = safeString(line)
+  const maxLength = 74
+  if (text.length <= maxLength) {
+    return [text]
+  }
+  const parts: string[] = []
+  for (let index = 0; index < text.length; index += maxLength) {
+    parts.push((index === 0 ? '' : ' ') + text.slice(index, index + maxLength))
+  }
+  return parts
+}
+
+function appendIcsLine(lines: string[], name: string, value: string): void {
+  const folded = foldIcsLine(`${name}:${escapeIcsText(value)}`)
+  for (const line of folded) {
+    lines.push(line)
+  }
+}
+
+function appendIcsParameterLine(
+  lines: string[],
+  name: string,
+  value: string,
+  params: Record<string, string> = {}
+): void {
+  const serializedParams = Object.entries(params)
+    .map(([key, item]) => `${key}=${escapeIcsParameterValue(item)}`)
+    .filter(Boolean)
+    .join(';')
+  const prefix = serializedParams ? `${name};${serializedParams}` : name
+  const folded = foldIcsLine(`${prefix}:${escapeIcsText(value)}`)
+  for (const line of folded) {
+    lines.push(line)
+  }
+}
+
+function formatIcsTimestamp(value: Date | null | undefined): string {
+  if (!value || !(value instanceof Date) || Number.isNaN(value.getTime())) {
+    return ''
+  }
+  return value
+    .toISOString()
+    .replace(/[-:]/g, '')
+    .replace(/\.\d{3}Z$/, 'Z')
+}
+
+function formatIcsDateOnly(value: Date | null | undefined): string {
+  if (!value || !(value instanceof Date) || Number.isNaN(value.getTime())) {
+    return ''
+  }
+  const year = String(value.getUTCFullYear()).padStart(4, '0')
+  const month = String(value.getUTCMonth() + 1).padStart(2, '0')
+  const day = String(value.getUTCDate()).padStart(2, '0')
+  return `${year}${month}${day}`
+}
+
+function normalizeIcsIdentifier(value: string): string {
+  return collapseWhitespace(value)
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 128)
+}
+
+function extractEmailAddress(value: string): string {
+  const match = safeString(value).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
+  return match ? match[0].trim() : ''
+}
+
+function appendIcsParticipants(
+  lines: string[],
+  propertyName: 'ORGANIZER' | 'ATTENDEE',
+  value: string,
+  extraParams: Record<string, string> = {},
+  seen = new Set<string>()
+): void {
+  for (const token of splitRecipientEntries(value)) {
+    const email = extractEmailAddress(token)
+    const displayName = collapseWhitespace(token.replace(email, '').replace(/[<>]/g, ''))
+    const key = normalizeIcsIdentifier(email || displayName || token).toLowerCase()
+    if (!key || seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+
+    if (email) {
+      appendIcsParameterLine(lines, propertyName, `mailto:${email}`, {
+        CN: displayName || email,
+        ...extraParams
+      })
+    } else if (displayName) {
+      appendIcsParameterLine(lines, propertyName, displayName, extraParams)
+    }
+  }
+}
+
+function buildAppointmentIcsFromMessage(
+  message: PSTMessage,
+  summary: MessageSummary
+): string {
+  const appointment = message as PSTAppointment
+  const lines: string[] = []
+  const subject = safeString(summary.subject || message.subject || '(no subject)')
+  const location = safeRead(() => appointment.location, '')
+  const startTime = safeRead(() => appointment.startTime, null)
+  const endTime = safeRead(() => appointment.endTime, null)
+  const allDay = Boolean(safeRead(() => appointment.subType, false))
+  const organizer = firstNonEmpty(
+    safeRead(() => appointment.netMeetingOrganizerAlias, ''),
+    safeString(message.sentRepresentingEmailAddress),
+    safeString(message.senderEmailAddress)
+  )
+  const requiredAttendees = safeRead(() => appointment.requiredAttendees, '')
+  const toAttendees = safeRead(() => appointment.toAttendees, '')
+  const ccAttendees = safeRead(() => appointment.ccAttendees, '')
+  const allAttendees = safeRead(() => appointment.allAttendees, '')
+  const descriptionParts = [safeString(message.bodyPrefix), safeString(message.body)].filter(Boolean)
+  const description = descriptionParts.length
+    ? descriptionParts.join('\n').trim()
+    : htmlToText(safeString(message.bodyHTML))
+  const participantKeys = new Set<string>()
+  const uidBase = normalizeIcsIdentifier(
+    [summary.id, summary.descriptorId, summary.folderId].filter(Boolean).join('-')
+  )
+  const stamp = summary.modificationTime || summary.messageDeliveryTime || summary.creationTime
+  const stampDate = stamp ? new Date(stamp) : new Date()
+  const stampText = formatIcsTimestamp(stampDate) || formatIcsTimestamp(new Date())
+
+  lines.push('BEGIN:VCALENDAR')
+  lines.push('VERSION:2.0')
+  lines.push('PRODID:-//PST Mail Explorer//EN')
+  lines.push('CALSCALE:GREGORIAN')
+  lines.push('METHOD:PUBLISH')
+  lines.push('BEGIN:VEVENT')
+  appendIcsLine(lines, 'UID', `${uidBase || 'message'}@pst-extractor`)
+  appendIcsLine(lines, 'SUMMARY', subject)
+  appendIcsLine(lines, 'DTSTAMP', stampText)
+  if (allDay) {
+    if (startTime) {
+      const startValue = formatIcsDateOnly(startTime)
+      if (startValue) {
+        lines.push(`DTSTART;VALUE=DATE:${startValue}`)
+      }
+    }
+    if (endTime) {
+      const endValue = formatIcsDateOnly(endTime)
+      if (endValue) {
+        lines.push(`DTEND;VALUE=DATE:${endValue}`)
+      }
+    }
+  } else {
+    if (startTime) {
+      const startValue = formatIcsTimestamp(startTime)
+      if (startValue) {
+        lines.push(`DTSTART:${startValue}`)
+      }
+    }
+    if (endTime) {
+      const endValue = formatIcsTimestamp(endTime)
+      if (endValue) {
+        lines.push(`DTEND:${endValue}`)
+      }
+    }
+  }
+  if (location) {
+    appendIcsLine(lines, 'LOCATION', location)
+  }
+  if (description) {
+    appendIcsLine(lines, 'DESCRIPTION', description)
+  }
+  if (organizer) {
+    const organizerEmail = extractEmailAddress(organizer)
+    if (organizerEmail) {
+      const organizerName = collapseWhitespace(organizer.replace(organizerEmail, '').replace(/[<>]/g, ''))
+      appendIcsParameterLine(lines, 'ORGANIZER', `mailto:${organizerEmail}`, {
+        CN: organizerName || organizerEmail
+      })
+    } else {
+      appendIcsLine(lines, 'ORGANIZER', organizer)
+    }
+  }
+  appendIcsParticipants(lines, 'ATTENDEE', requiredAttendees, { ROLE: 'REQ-PARTICIPANT' }, participantKeys)
+  appendIcsParticipants(lines, 'ATTENDEE', toAttendees, { ROLE: 'REQ-PARTICIPANT' }, participantKeys)
+  appendIcsParticipants(lines, 'ATTENDEE', ccAttendees, { ROLE: 'OPT-PARTICIPANT' }, participantKeys)
+  appendIcsParticipants(lines, 'ATTENDEE', allAttendees, {}, participantKeys)
+  lines.push('CLASS:PUBLIC')
+  lines.push('STATUS:CONFIRMED')
+  lines.push('TRANSP:OPAQUE')
+  lines.push('END:VEVENT')
+  lines.push('END:VCALENDAR')
+
+  return lines.join('\r\n') + '\r\n'
+}
+
+export function exportAppointmentAsIcsFromSession(
+  session: ViewerSessionIndex,
+  messageId: string
+): string {
+  return withSessionMessage(session, messageId, (message, summary) =>
+    buildAppointmentIcsFromMessage(message, summary)
   )
 }
 

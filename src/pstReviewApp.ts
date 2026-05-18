@@ -30,6 +30,7 @@ import {
   buildMessageDetail,
   buildMessageDetailFromSession,
   buildSessionSummary,
+  exportAppointmentAsIcsFromSession,
   exportMessageAsEml,
   exportMessageAsEmlFromSession,
   exportMessageAsJson,
@@ -50,8 +51,11 @@ import {
 import {
   getDefaultPstRootDirectory,
   listPstMailboxFiles,
-  openPstMailbox
+  openPstMailbox,
+  resolvePstMailboxPath
 } from './pstCatalog'
+import type { ReviewRecord } from './reviewTypes'
+import { createZipStreamWriter } from './zipWriter'
 
 export interface CreatePstReviewAppOptions {
   publicDir: string
@@ -164,6 +168,57 @@ interface SearchRequestQuery {
   reviewFlagged?: boolean
   reviewTagged?: boolean
   reviewTag?: string
+}
+
+interface FlaggedBundleQuery {
+  scope?: string
+  scopePath?: string
+  sessionId?: string
+}
+
+interface BundleMailboxDescriptor {
+  mailboxKey: string
+  fileName: string
+  scopePath: string
+  scopeLabel: string
+  session?: ViewerSessionIndex
+}
+
+interface FlaggedBundleManifestItem {
+  sourcePstPath: string
+  mailboxName: string
+  mailboxKey: string
+  scopePath: string
+  scopeLabel: string
+  fileName: string
+  folderId: string
+  folderPath: string
+  messageId: string
+  descriptorId: string
+  kind: ReviewRecord['kind']
+  subject: string
+  review: ReviewState
+  outputFile: string
+  outputType: 'eml' | 'ics'
+  status: 'exported' | 'error'
+  error?: string
+}
+
+interface FlaggedBundleManifest {
+  generatedAt: string
+  scope: {
+    scope: 'all' | 'search' | 'pst'
+    scopePath: string
+    scopeLabel: string
+    sessionId: string
+    sessionFileName: string
+  }
+  counts: {
+    total: number
+    exported: number
+    failed: number
+  }
+  items: FlaggedBundleManifestItem[]
 }
 
 const DEFAULT_PAGE_SIZE = 50
@@ -540,6 +595,124 @@ function resolveCatalogScopeSelection(
   }
 
   return catalog
+}
+
+function parseFlaggedBundleScope(value: unknown): 'all' | 'search' | 'pst' {
+  const normalized = normalizeText(value).toLowerCase()
+  if (normalized === 'all' || normalized === 'search' || normalized === 'pst') {
+    return normalized
+  }
+  return 'all'
+}
+
+function sanitizeBundleSegment(value: string, fallback: string): string {
+  return sanitizeFileNameForDownload(value || fallback, fallback) || fallback
+}
+
+function buildBundleScopeSegment(scopePath: string): string {
+  const normalized = normalizeScopePath(scopePath)
+  if (!normalized) {
+    return 'PST root'
+  }
+  return normalized.split('/').map((segment) => sanitizeBundleSegment(segment, 'scope')).join('/')
+}
+
+function buildBundleEntryPath(
+  kind: ReviewRecord['kind'],
+  scopePath: string,
+  fileName: string,
+  folderPath: string,
+  subject: string,
+  messageId: string
+): string {
+  const scopeSegment = buildBundleScopeSegment(scopePath)
+  const mailboxSegment = sanitizeBundleSegment(fileName, 'mailbox')
+  const folderSegments = normalizeScopePath(folderPath)
+    ? normalizeScopePath(folderPath)
+        .split('/')
+        .map((segment) => sanitizeBundleSegment(segment, 'folder'))
+        .filter(Boolean)
+    : []
+  const itemName = `${sanitizeBundleSegment(subject || 'message', 'message')}-${sanitizeBundleSegment(
+    messageId,
+    'message'
+  )}.${kind === 'appointment' ? 'ics' : 'eml'}`
+  return [kind === 'appointment' ? 'calendar' : 'mail', scopeSegment, mailboxSegment, ...folderSegments, itemName]
+    .filter(Boolean)
+    .join('/')
+}
+
+function buildBundleMailboxes(
+  rootPath: string,
+  scope: 'all' | 'search' | 'pst',
+  scopePath: string,
+  session: SessionRecord | null
+): BundleMailboxDescriptor[] {
+  if (scope === 'pst') {
+    if (!session) {
+      throw createAppError(400, 'Session id is required for selected PST exports')
+    }
+    return [
+      {
+        mailboxKey: session.mailboxKey,
+        fileName: session.fileName,
+        scopePath: session.scopePath,
+        scopeLabel: session.scopeLabel,
+        session: session.index
+      }
+    ]
+  }
+
+  const catalog =
+    scope === 'search'
+      ? resolveCatalogScopeSelection(rootPath, scopePath)
+      : listPstMailboxFiles(rootPath)
+  const scopes = scope === 'search' ? [catalog] : catalog.scopes
+
+  const mailboxes: BundleMailboxDescriptor[] = []
+  for (const catalogScope of scopes) {
+    for (const file of catalogScope.files) {
+      mailboxes.push({
+        mailboxKey: resolvePstMailboxPath(rootPath, catalogScope.scopePath, file.fileName),
+        fileName: file.fileName,
+        scopePath: catalogScope.scopePath,
+        scopeLabel: catalogScope.scopeLabel
+      })
+    }
+  }
+  return mailboxes
+}
+
+function createBundleManifest(scope: {
+  scope: 'all' | 'search' | 'pst'
+  scopePath: string
+  scopeLabel: string
+  sessionId: string
+  sessionFileName: string
+}): FlaggedBundleManifest {
+  return {
+    generatedAt: new Date().toISOString(),
+    scope,
+    counts: {
+      total: 0,
+      exported: 0,
+      failed: 0
+    },
+    items: []
+  }
+}
+
+function addBundleManifestItem(
+  manifest: FlaggedBundleManifest,
+  item: FlaggedBundleManifestItem
+): void {
+  manifest.items.push(item)
+  manifest.counts.total += 1
+  if (item.status === 'exported') {
+    manifest.counts.exported += 1
+  } else {
+    manifest.counts.failed += 1
+  }
 }
 
 function isReviewMatch(
@@ -1214,6 +1387,220 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       )
     } catch (error) {
       createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.flaggedBundleExport, async (req, res) => {
+    try {
+      const query = req.query as FlaggedBundleQuery
+      const scope = parseFlaggedBundleScope(query.scope)
+      const scopePath = normalizeScopePath(query.scopePath)
+      const sessionId = normalizeText(query.sessionId)
+      const session = scope === 'pst' ? getSessionOrThrow(sessions, sessionId) : null
+      const bundleScope =
+        scope === 'search'
+          ? resolveCatalogScopeSelection(pstRootDir, scopePath)
+          : scope === 'all'
+            ? listPstMailboxFiles(pstRootDir)
+            : null
+      const scopeLabel =
+        scope === 'all'
+          ? 'All cases/searches'
+          : scope === 'search'
+            ? bundleScope?.scopeLabel || getScopeLabel(scopePath)
+            : session?.scopeLabel || 'Selected PST'
+      const writer = createZipStreamWriter(res)
+      const manifest = createBundleManifest({
+        scope,
+        scopePath: scope === 'all' ? '' : scope === 'search' ? normalizeText(bundleScope?.scopePath || scopePath) : session?.scopePath || '',
+        scopeLabel,
+        sessionId: session?.id || '',
+        sessionFileName: session?.fileName || ''
+      })
+      const mailboxes = buildBundleMailboxes(
+        pstRootDir,
+        scope,
+        scope === 'search' ? normalizeText(bundleScope?.scopePath || scopePath) : scopePath,
+        session
+      )
+
+      res.status(200)
+        .type('application/zip')
+        .set('Content-Disposition', 'attachment; filename="flagged-bundle.zip"')
+      res.flushHeaders?.()
+
+      for (const mailbox of mailboxes) {
+        let mailboxSession = mailbox.session || null
+        let flaggedReviews = await reviewStore.listReviews(mailbox.mailboxKey, {
+          flaggedOnly: true
+        })
+        if (!flaggedReviews.length) {
+          continue
+        }
+
+        if (!mailboxSession) {
+          try {
+            mailboxSession = openPstMailbox(pstRootDir, mailbox.scopePath, mailbox.fileName)
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            for (const review of flaggedReviews) {
+              const outputType = review.kind === 'appointment' ? 'ics' : 'eml'
+              const outputFile = buildBundleEntryPath(
+                review.kind,
+                mailbox.scopePath,
+                mailbox.fileName,
+                review.folderPath,
+                review.subject,
+                review.messageId
+              )
+              addBundleManifestItem(manifest, {
+                sourcePstPath: mailbox.mailboxKey,
+                mailboxName: mailbox.scopeLabel || mailbox.fileName,
+                mailboxKey: mailbox.mailboxKey,
+                scopePath: mailbox.scopePath,
+                scopeLabel: mailbox.scopeLabel,
+                fileName: mailbox.fileName,
+                folderId: review.folderId,
+                folderPath: review.folderPath,
+                messageId: review.messageId,
+                descriptorId: review.descriptorId,
+                kind: review.kind,
+                subject: review.subject,
+                review: {
+                  flagged: review.flagged,
+                  tags: [...review.tags],
+                  createdAt: review.createdAt,
+                  updatedAt: review.updatedAt
+                },
+                outputFile,
+                outputType,
+                status: 'error',
+                error: message
+              })
+            }
+            continue
+          }
+        }
+
+        const activeMailboxSession = mailboxSession
+        if (!activeMailboxSession) {
+          continue
+        }
+
+        for (const review of flaggedReviews) {
+          const summary = activeMailboxSession.messages.get(review.messageId) || null
+          const outputType = review.kind === 'appointment' ? 'ics' : 'eml'
+          const outputFile = buildBundleEntryPath(
+            review.kind,
+            mailbox.scopePath,
+            mailbox.fileName,
+            review.folderPath,
+            review.subject,
+            review.messageId
+          )
+
+          if (!summary) {
+            addBundleManifestItem(manifest, {
+              sourcePstPath: mailbox.mailboxKey,
+              mailboxName: activeMailboxSession.mailboxName || mailbox.fileName,
+              mailboxKey: mailbox.mailboxKey,
+              scopePath: mailbox.scopePath,
+              scopeLabel: mailbox.scopeLabel,
+              fileName: mailbox.fileName,
+              folderId: review.folderId,
+              folderPath: review.folderPath,
+              messageId: review.messageId,
+              descriptorId: review.descriptorId,
+              kind: review.kind,
+              subject: review.subject,
+              review: {
+                flagged: review.flagged,
+                tags: [...review.tags],
+                createdAt: review.createdAt,
+                updatedAt: review.updatedAt
+              },
+              outputFile,
+              outputType,
+              status: 'error',
+              error: 'Message not found in mailbox session'
+            })
+            continue
+          }
+
+          try {
+            const payload =
+              outputType === 'ics'
+                ? exportAppointmentAsIcsFromSession(activeMailboxSession, review.messageId)
+                : exportMessageAsEmlFromSession(activeMailboxSession, review.messageId)
+            const mtime = summary.modificationTime
+              ? new Date(summary.modificationTime)
+              : summary.creationTime
+                ? new Date(summary.creationTime)
+                : new Date()
+            await writer.addText(outputFile, payload, { mtime })
+            addBundleManifestItem(manifest, {
+              sourcePstPath: mailbox.mailboxKey,
+              mailboxName: activeMailboxSession.mailboxName || mailbox.fileName,
+              mailboxKey: mailbox.mailboxKey,
+              scopePath: mailbox.scopePath,
+              scopeLabel: mailbox.scopeLabel,
+              fileName: mailbox.fileName,
+              folderId: review.folderId,
+              folderPath: review.folderPath,
+              messageId: review.messageId,
+              descriptorId: review.descriptorId,
+              kind: review.kind,
+              subject: review.subject,
+              review: {
+                flagged: review.flagged,
+                tags: [...review.tags],
+                createdAt: review.createdAt,
+                updatedAt: review.updatedAt
+              },
+              outputFile,
+              outputType,
+              status: 'exported'
+            })
+          } catch (error) {
+            addBundleManifestItem(manifest, {
+              sourcePstPath: mailbox.mailboxKey,
+              mailboxName: activeMailboxSession.mailboxName || mailbox.fileName,
+              mailboxKey: mailbox.mailboxKey,
+              scopePath: mailbox.scopePath,
+              scopeLabel: mailbox.scopeLabel,
+              fileName: mailbox.fileName,
+              folderId: review.folderId,
+              folderPath: review.folderPath,
+              messageId: review.messageId,
+              descriptorId: review.descriptorId,
+              kind: review.kind,
+              subject: review.subject,
+              review: {
+                flagged: review.flagged,
+                tags: [...review.tags],
+                createdAt: review.createdAt,
+                updatedAt: review.updatedAt
+              },
+              outputFile,
+              outputType,
+              status: 'error',
+              error: error instanceof Error ? error.message : String(error)
+            })
+          }
+        }
+      }
+
+      await writer.addText('manifest.json', JSON.stringify(manifest, null, 2), {
+        mtime: new Date(manifest.generatedAt)
+      })
+      await writer.finalize()
+      res.end()
+    } catch (error) {
+      if (!res.headersSent) {
+        createRouteErrorHandler(res, error)
+      } else {
+        res.destroy(error instanceof Error ? error : undefined)
+      }
     }
   })
 

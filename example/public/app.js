@@ -11,7 +11,8 @@
     mailOnly: 'pst-mail-explorer.mailOnly',
     sort: 'pst-mail-explorer.sort',
     reviewFlaggedOnly: 'pst-mail-explorer.reviewFlaggedOnly',
-    reviewTaggedOnly: 'pst-mail-explorer.reviewTaggedOnly'
+    reviewTaggedOnly: 'pst-mail-explorer.reviewTaggedOnly',
+    flaggedBundleScope: 'pst-mail-explorer.flaggedBundleScope'
   }
 
   const state = {
@@ -43,6 +44,7 @@
     sort: 'date-desc',
     reviewFlaggedOnly: false,
     reviewTaggedOnly: false,
+    bundleScope: 'all',
     pageSize: 50
   }
 
@@ -812,6 +814,7 @@
     )
     localStorage.setItem(STORAGE_KEYS.searchScope, state.searchScope)
     localStorage.setItem(STORAGE_KEYS.mailboxScopeView, state.mailboxScopeView)
+    localStorage.setItem(STORAGE_KEYS.flaggedBundleScope, state.bundleScope)
   }
 
   function applyStateToControls() {
@@ -821,6 +824,9 @@
     ui.reviewFlaggedToggle.checked = state.reviewFlaggedOnly
     ui.reviewTaggedToggle.checked = state.reviewTaggedOnly
     ui.searchScopeSelect.value = state.searchScope
+    if (ui.flaggedBundleScopeSelect) {
+      ui.flaggedBundleScopeSelect.value = state.bundleScope
+    }
     ui.scopeSelect.value = state.mailboxScopeView === 'all' ? ALL_PSTS_SCOPE_VALUE : state.selectedScopePath || ''
     ui.pstFilter.value = state.mailboxFilter
   }
@@ -2015,6 +2021,35 @@
     window.location.assign(url)
   }
 
+  function buildFlaggedBundleDownloadUrl() {
+    const params = new URLSearchParams()
+    const scope = String(state.bundleScope || 'all')
+    params.set('scope', scope)
+
+    if (scope === 'pst') {
+      if (!state.sessionId) {
+        return ''
+      }
+      params.set('sessionId', state.sessionId)
+    } else if (scope === 'search') {
+      const scopePath = normalizeScopePath(state.selectedScopePath || '')
+      if (scopePath) {
+        params.set('scopePath', scopePath)
+      }
+    }
+
+    return `/api/exports/flagged.zip?${params.toString()}`
+  }
+
+  function downloadFlaggedBundle() {
+    const url = buildFlaggedBundleDownloadUrl()
+    if (!url) {
+      setStatus('Select a PST session before downloading a selected-PST bundle.', 'error')
+      return
+    }
+    window.location.assign(url)
+  }
+
   async function navigateFolderPage(delta) {
     const page = getActivePage()
     if (!page) {
@@ -2159,6 +2194,19 @@
       state.searchScope = ui.searchScopeSelect.value || 'pst'
       saveState()
     })
+
+    if (ui.flaggedBundleScopeSelect) {
+      ui.flaggedBundleScopeSelect.addEventListener('change', () => {
+        state.bundleScope = ui.flaggedBundleScopeSelect.value || 'all'
+        saveState()
+      })
+    }
+
+    if (ui.flaggedBundleButton) {
+      ui.flaggedBundleButton.addEventListener('click', () => {
+        downloadFlaggedBundle()
+      })
+    }
 
     ui.pstList.addEventListener('click', (event) => {
       const button = event.target.closest('[data-pst-file-name]')
@@ -2377,6 +2425,8 @@
     ui.searchInput = getElement('message-search')
     ui.searchButton = getElement('search-button')
     ui.searchScopeSelect = getElement('search-scope-select')
+    ui.flaggedBundleScopeSelect = getElement('flagged-bundle-scope-select')
+    ui.flaggedBundleButton = getElement('flagged-bundle-button')
     ui.hiddenFiltersPanel = getElement('hidden-filters-panel')
     ui.mailOnlyToggle = getElement('mail-only-toggle')
     ui.reviewFlaggedToggle = getElement('review-flagged-toggle')
@@ -2407,6 +2457,11 @@
     state.sort = localStorage.getItem(STORAGE_KEYS.sort) || 'date-desc'
     state.reviewFlaggedOnly = readStorageBool(STORAGE_KEYS.reviewFlaggedOnly, false)
     state.reviewTaggedOnly = readStorageBool(STORAGE_KEYS.reviewTaggedOnly, false)
+    state.bundleScope = ['all', 'search', 'pst'].includes(
+      localStorage.getItem(STORAGE_KEYS.flaggedBundleScope) || ''
+    )
+      ? localStorage.getItem(STORAGE_KEYS.flaggedBundleScope) || 'all'
+      : 'all'
     state.selectedPstFileName = localStorage.getItem(STORAGE_KEYS.pstFileName) || null
     state.mailboxFilter = ''
     refreshControls()

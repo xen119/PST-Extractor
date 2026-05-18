@@ -844,6 +844,32 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
           }
         }
       },
+      [openApiPath(API_ROUTES.flaggedBundleExport)]: {
+        get: {
+          tags: ['Review'],
+          summary: 'Download a ZIP bundle of flagged mail and appointment items',
+          parameters: [
+            {
+              name: 'scope',
+              in: 'query',
+              schema: { type: 'string', enum: ['all', 'search', 'pst'] }
+            },
+            { name: 'scopePath', in: 'query', schema: { type: 'string' } },
+            { name: 'sessionId', in: 'query', schema: { type: 'string' } }
+          ],
+          responses: {
+            200: {
+              description: 'ZIP bundle export',
+              content: {
+                'application/zip': {
+                  schema: { type: 'string', format: 'binary' }
+                }
+              }
+            },
+            ...errorResponse(404, 'Session or search scope not found')
+          }
+        }
+      },
       [openApiPath(API_ROUTES.messageExportJson)]: {
         get: {
           tags: ['Sessions'],
