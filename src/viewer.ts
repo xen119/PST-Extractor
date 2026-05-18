@@ -6,6 +6,7 @@ import { PSTFolder } from './PSTFolder.class'
 import { PSTMessage } from './PSTMessage.class'
 import { PSTNodeInputStream } from './PSTNodeInputStream.class'
 import { PSTUtil } from './PSTUtil.class'
+import type { HiddenRuleRecord } from './searchIndex'
 
 export type MessageKind = 'mail' | 'appointment' | 'contact' | 'task' | 'activity' | 'other'
 
@@ -133,6 +134,11 @@ export interface FolderMessagePage {
   query: string
   mailOnly: boolean
   sort: string
+}
+
+export interface FolderMessageCollection {
+  folder: FolderSummary
+  items: MessageSummary[]
 }
 
 export interface FolderTreeNode {
@@ -1471,6 +1477,117 @@ export function messageMatchesQuery(
   return true
 }
 
+function normalizeHiddenRuleValue(value: unknown): string {
+  return safeString(value).trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+function extractEmailAddresses(...values: Array<string | undefined | null>): string[] {
+  const emails = new Set<string>()
+  for (const value of values) {
+    const text = normalizeHiddenRuleValue(value)
+    if (!text) {
+      continue
+    }
+    const matches = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || []
+    for (const match of matches) {
+      emails.add(normalizeHiddenRuleValue(match))
+    }
+  }
+  return [...emails]
+}
+
+function buildHiddenRuleLookup(hiddenRules: HiddenRuleRecord[]): {
+  addresses: Set<string>
+  subjects: Set<string>
+} {
+  const addresses = new Set<string>()
+  const subjects = new Set<string>()
+
+  for (const rule of hiddenRules || []) {
+    const normalizedValue = normalizeHiddenRuleValue(rule.value)
+    if (!normalizedValue) {
+      continue
+    }
+    if (rule.kind === 'address') {
+      addresses.add(normalizedValue)
+    } else if (rule.kind === 'subject') {
+      subjects.add(normalizedValue)
+    }
+  }
+
+  return {
+    addresses,
+    subjects
+  }
+}
+
+function messageMatchesHiddenRules(
+  summary: MessageSummary,
+  hiddenLookup: {
+    addresses: Set<string>
+    subjects: Set<string>
+  }
+): boolean {
+  if (!hiddenLookup.addresses.size && !hiddenLookup.subjects.size) {
+    return false
+  }
+
+  if (hiddenLookup.addresses.size) {
+    const addressValues = extractEmailAddresses(
+      summary.senderEmailAddress,
+      summary.displayTo,
+      summary.displayCC,
+      summary.displayBCC,
+      summary.resolvedDisplayTo,
+      summary.resolvedDisplayCC,
+      summary.resolvedDisplayBCC
+    )
+    if (addressValues.some((value) => hiddenLookup.addresses.has(value))) {
+      return true
+    }
+  }
+
+  if (hiddenLookup.subjects.size) {
+    const subjectValues = [summary.subject, summary.originalSubject]
+    if (subjectValues.some((value) => hiddenLookup.subjects.has(normalizeHiddenRuleValue(value)))) {
+      return true
+    }
+  }
+
+  return false
+}
+
+export function collectFolderMessages(
+  session: ViewerSessionIndex,
+  folderId: string,
+  options: {
+    query?: string
+    mailOnly?: boolean
+    mode?: 'and' | 'or'
+  } = {},
+  hiddenRules: HiddenRuleRecord[] = []
+): FolderMessageCollection {
+  const folder = getFolderSummary(session, folderId)
+  const query = safeString(options.query).trim()
+  const mailOnly = options.mailOnly !== false
+  const hiddenLookup = buildHiddenRuleLookup(hiddenRules)
+  const messages = folder.messageIds
+    .map((messageId) => session.messages.get(messageId))
+    .filter((message): message is MessageSummary => Boolean(message))
+    .filter((message) => (mailOnly ? isMailLikeSummary(message) : true))
+    .filter((message) => !messageMatchesHiddenRules(message, hiddenLookup))
+    .filter((message) =>
+      messageMatchesQuery(message, query, session.searchTextByMessageId.get(message.id) || '', {
+        mode: options.mode
+      })
+    )
+
+  return {
+    folder,
+    items: messages
+  }
+}
+
 export function sortMessageSummaries(messages: MessageSummary[], sort: string): MessageSummary[] {
   const output = [...messages]
   if (sort === 'order') {
@@ -1814,31 +1931,32 @@ export function listFolderMessages(
     pageSize?: number
     sort?: string
     mode?: 'and' | 'or'
-  } = {}
+  } = {},
+  hiddenRules: HiddenRuleRecord[] = []
 ): FolderMessagePage {
-  const folder = getFolderSummary(session, folderId)
   const query = safeString(options.query).trim()
   const mailOnly = options.mailOnly !== false
+  const { folder, items } = collectFolderMessages(
+    session,
+    folderId,
+    {
+      query: options.query,
+      mailOnly: options.mailOnly,
+      mode: options.mode
+    },
+    hiddenRules
+  )
   const sort = options.sort || 'date-desc'
   const pageSize = Math.min(Math.max(options.pageSize || 50, 1), 200)
-  const messages = folder.messageIds
-    .map((messageId) => session.messages.get(messageId))
-    .filter((message): message is MessageSummary => Boolean(message))
-    .filter((message) => (mailOnly ? isMailLikeSummary(message) : true))
-    .filter((message) =>
-      messageMatchesQuery(message, query, session.searchTextByMessageId.get(message.id) || '', {
-        mode: options.mode,
-      })
-    )
-  const sortedMessages = sortMessageSummaries(messages, sort)
+  const sortedMessages = sortMessageSummaries(items, sort)
   const total = sortedMessages.length
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
   const page = Math.min(Math.max(options.page || 1, 1), totalPages)
   const start = (page - 1) * pageSize
-  const items = sortedMessages.slice(start, start + pageSize).map((item) => ({ ...item }))
+  const pageItems = sortedMessages.slice(start, start + pageSize).map((item) => ({ ...item }))
   return {
     folder,
-    items,
+    items: pageItems,
     total,
     page,
     pageSize,

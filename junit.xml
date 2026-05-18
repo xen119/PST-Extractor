@@ -1,149 +1,151 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuites name="jest tests" tests="55" failures="0" errors="0" time="39.149">
-  <testsuite name="PSTMessage tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T11:30:04" time="3.851" tests="2">
-    <testcase classname="PSTMessage tests should have email messages" name="PSTMessage tests should have email messages" time="0.099">
+<testsuites name="jest tests" tests="56" failures="0" errors="0" time="24.409">
+  <testsuite name="PSTMessage tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T17:41:53" time="1.974" tests="2">
+    <testcase classname="PSTMessage tests should have email messages" name="PSTMessage tests should have email messages" time="0.067">
     </testcase>
-    <testcase classname="PSTMessage tests should have email message which uses block skip points" name="PSTMessage tests should have email message which uses block skip points" time="0.063">
-    </testcase>
-  </testsuite>
-  <testsuite name="search index cache" errors="0" failures="0" skipped="0" timestamp="2026-05-18T11:30:04" time="4.083" tests="1">
-    <testcase classname="search index cache supports AND/OR search and exact hide rules from the cached documents" name="search index cache supports AND/OR search and exact hide rules from the cached documents" time="0.058">
+    <testcase classname="PSTMessage tests should have email message which uses block skip points" name="PSTMessage tests should have email message which uses block skip points" time="0.028">
     </testcase>
   </testsuite>
-  <testsuite name="review store helpers" errors="0" failures="0" skipped="0" timestamp="2026-05-18T11:30:04" time="4.307" tests="3">
-    <testcase classname="review store helpers normalizes review tags and builds search filters" name="review store helpers normalizes review tags and builds search filters" time="0.066">
+  <testsuite name="review store helpers" errors="0" failures="0" skipped="0" timestamp="2026-05-18T17:41:53" time="2.164" tests="3">
+    <testcase classname="review store helpers normalizes review tags and builds search filters" name="review store helpers normalizes review tags and builds search filters" time="0.016">
     </testcase>
-    <testcase classname="review store helpers upserts, clears, and queries reviews with the mongo-backed store API" name="review store helpers upserts, clears, and queries reviews with the mongo-backed store API" time="0.043">
+    <testcase classname="review store helpers upserts, clears, and queries reviews with the mongo-backed store API" name="review store helpers upserts, clears, and queries reviews with the mongo-backed store API" time="0.042">
     </testcase>
-    <testcase classname="review store helpers upserts reviews without conflicting mongo update operators" name="review store helpers upserts reviews without conflicting mongo update operators" time="0.008">
+    <testcase classname="review store helpers upserts reviews without conflicting mongo update operators" name="review store helpers upserts reviews without conflicting mongo update operators" time="0.003">
     </testcase>
   </testsuite>
-  <testsuite name="RecurrencePattern tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T11:30:04" time="4.799" tests="2">
+  <testsuite name="search index cache" errors="0" failures="0" skipped="0" timestamp="2026-05-18T17:41:53" time="2.327" tests="1">
+    <testcase classname="search index cache supports AND/OR search and exact hide rules from the cached documents" name="search index cache supports AND/OR search and exact hide rules from the cached documents" time="0.032">
+    </testcase>
+  </testsuite>
+  <testsuite name="RecurrencePattern tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T17:41:53" time="2.398" tests="2">
     <testcase classname="RecurrencePattern tests should have a Calendar folder" name="RecurrencePattern tests should have a Calendar folder" time="0.012">
     </testcase>
-    <testcase classname="RecurrencePattern tests should have repeating events" name="RecurrencePattern tests should have repeating events" time="0.114">
+    <testcase classname="RecurrencePattern tests should have repeating events" name="RecurrencePattern tests should have repeating events" time="0.089">
     </testcase>
   </testsuite>
-  <testsuite name="PSTContact tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T11:30:04" time="4.901" tests="2">
-    <testcase classname="PSTContact tests should have a Contact folder" name="PSTContact tests should have a Contact folder" time="0.016">
-    </testcase>
-    <testcase classname="PSTContact tests should have a contact with several fields" name="PSTContact tests should have a contact with several fields" time="0.143">
+  <testsuite name="viewer UI shell" errors="0" failures="0" skipped="0" timestamp="2026-05-18T17:41:55" time="0.365" tests="1">
+    <testcase classname="viewer UI shell shows a PST list and no upload controls" name="viewer UI shell shows a PST list and no upload controls" time="0.046">
     </testcase>
   </testsuite>
-  <testsuite name="PSTRecipient tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T11:30:08" time="1.229" tests="1">
-    <testcase classname="PSTRecipient tests should have email messages" name="PSTRecipient tests should have email messages" time="0.217">
+  <testsuite name="PSTContact tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T17:41:53" time="2.481" tests="2">
+    <testcase classname="PSTContact tests should have a Contact folder" name="PSTContact tests should have a Contact folder" time="0.009">
+    </testcase>
+    <testcase classname="PSTContact tests should have a contact with several fields" name="PSTContact tests should have a contact with several fields" time="0.071">
     </testcase>
   </testsuite>
-  <testsuite name="PSTFolder tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T11:30:09" time="0.974" tests="2">
-    <testcase classname="PSTFolder tests should have a root folder" name="PSTFolder tests should have a root folder" time="0.025">
+  <testsuite name="PSTFolder tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T17:41:56" time="0.331" tests="2">
+    <testcase classname="PSTFolder tests should have a root folder" name="PSTFolder tests should have a root folder" time="0.007">
     </testcase>
-    <testcase classname="PSTFolder tests root folder should have sub folders" name="PSTFolder tests root folder should have sub folders" time="0.092">
-    </testcase>
-  </testsuite>
-  <testsuite name="PSTAppointment tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T11:30:08" time="2.135" tests="2">
-    <testcase classname="PSTAppointment tests should have a Calendar folder" name="PSTAppointment tests should have a Calendar folder" time="0.011">
-    </testcase>
-    <testcase classname="PSTAppointment tests should have two calendar items" name="PSTAppointment tests should have two calendar items" time="0.144">
+    <testcase classname="PSTFolder tests root folder should have sub folders" name="PSTFolder tests root folder should have sub folders" time="0.075">
     </testcase>
   </testsuite>
-  <testsuite name="PSTObject tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T11:30:10" time="0.843" tests="1">
-    <testcase classname="PSTObject tests should have basic attributes" name="PSTObject tests should have basic attributes" time="0.164">
+  <testsuite name="PSTAppointment tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T17:41:56" time="0.796" tests="2">
+    <testcase classname="PSTAppointment tests should have a Calendar folder" name="PSTAppointment tests should have a Calendar folder" time="0.002">
+    </testcase>
+    <testcase classname="PSTAppointment tests should have two calendar items" name="PSTAppointment tests should have two calendar items" time="0.053">
     </testcase>
   </testsuite>
-  <testsuite name="PSTTask tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T11:30:09" time="1.527" tests="2">
-    <testcase classname="PSTTask tests should have a Tasks folder" name="PSTTask tests should have a Tasks folder" time="0.001">
-    </testcase>
-    <testcase classname="PSTTask tests should have two tasks" name="PSTTask tests should have two tasks" time="0.051">
+  <testsuite name="PSTRecipient tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T17:41:55" time="0.903" tests="1">
+    <testcase classname="PSTRecipient tests should have email messages" name="PSTRecipient tests should have email messages" time="0.166">
     </testcase>
   </testsuite>
-  <testsuite name="search result normalization" errors="0" failures="0" skipped="0" timestamp="2026-05-18T11:30:10" time="0.182" tests="2">
+  <testsuite name="search result normalization" errors="0" failures="0" skipped="0" timestamp="2026-05-18T17:41:56" time="0.191" tests="2">
     <testcase classname="search result normalization uses messageId as the canonical id when id is missing" name="search result normalization uses messageId as the canonical id when id is missing" time="0.002">
     </testcase>
     <testcase classname="search result normalization normalizes search result pages so items are clickable" name="search result normalization normalizes search result pages so items are clickable" time="0.001">
     </testcase>
   </testsuite>
-  <testsuite name="PSTfile tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T11:30:11" time="0.382" tests="1">
-    <testcase classname="PSTfile tests should open the file" name="PSTfile tests should open the file" time="0.009">
+  <testsuite name="PSTTask tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T17:41:56" time="1.1" tests="2">
+    <testcase classname="PSTTask tests should have a Tasks folder" name="PSTTask tests should have a Tasks folder" time="0.002">
+    </testcase>
+    <testcase classname="PSTTask tests should have two tasks" name="PSTTask tests should have two tasks" time="0.035">
     </testcase>
   </testsuite>
-  <testsuite name="viewer UI shell" errors="0" failures="0" skipped="0" timestamp="2026-05-18T11:30:11" time="0.864" tests="1">
-    <testcase classname="viewer UI shell shows a PST list and no upload controls" name="viewer UI shell shows a PST list and no upload controls" time="0.017">
+  <testsuite name="PSTObject tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T17:41:56" time="0.526" tests="1">
+    <testcase classname="PSTObject tests should have basic attributes" name="PSTObject tests should have basic attributes" time="0.07">
     </testcase>
   </testsuite>
-  <testsuite name="PSTActivity tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T11:30:10" time="1.227" tests="2">
-    <testcase classname="PSTActivity tests should have a Journal folder" name="PSTActivity tests should have a Journal folder" time="0.002">
-    </testcase>
-    <testcase classname="PSTActivity tests root folder should have a journal entry" name="PSTActivity tests root folder should have a journal entry" time="0.037">
+  <testsuite name="PSTfile tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T17:41:57" time="0.463" tests="1">
+    <testcase classname="PSTfile tests should open the file" name="PSTfile tests should open the file" time="0.007">
     </testcase>
   </testsuite>
-  <testsuite name="PSTAttachment tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T11:30:04" time="7.597" tests="5">
-    <testcase classname="PSTAttachment tests should have a contact with an attachment" name="PSTAttachment tests should have a contact with an attachment" time="0.68">
+  <testsuite name="PSTAttachment tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T17:41:53" time="3.999" tests="5">
+    <testcase classname="PSTAttachment tests should have a contact with an attachment" name="PSTAttachment tests should have a contact with an attachment" time="0.389">
     </testcase>
-    <testcase classname="PSTAttachment tests should have a task with an attachment" name="PSTAttachment tests should have a task with an attachment" time="0.497">
+    <testcase classname="PSTAttachment tests should have a task with an attachment" name="PSTAttachment tests should have a task with an attachment" time="0.313">
     </testcase>
-    <testcase classname="PSTAttachment tests should have email with word attachment" name="PSTAttachment tests should have email with word attachment" time="0.498">
+    <testcase classname="PSTAttachment tests should have email with word attachment" name="PSTAttachment tests should have email with word attachment" time="0.34">
     </testcase>
-    <testcase classname="PSTAttachment tests should have email with excel attachment" name="PSTAttachment tests should have email with excel attachment" time="0.473">
+    <testcase classname="PSTAttachment tests should have email with excel attachment" name="PSTAttachment tests should have email with excel attachment" time="0.349">
     </testcase>
-    <testcase classname="PSTAttachment tests should have email with jpg attachment" name="PSTAttachment tests should have email with jpg attachment" time="0.592">
-    </testcase>
-  </testsuite>
-  <testsuite name="pst catalog helpers" errors="0" failures="0" skipped="0" timestamp="2026-05-18T11:30:08" time="6.415" tests="4">
-    <testcase classname="pst catalog helpers discovers recursive case/search scopes and filters empty folders" name="pst catalog helpers discovers recursive case/search scopes and filters empty folders" time="0.052">
-    </testcase>
-    <testcase classname="pst catalog helpers includes PST root when direct mailbox files exist there" name="pst catalog helpers includes PST root when direct mailbox files exist there" time="0.01">
-    </testcase>
-    <testcase classname="pst catalog helpers reports an empty or missing PST folder without throwing" name="pst catalog helpers reports an empty or missing PST folder without throwing" time="0.006">
-    </testcase>
-    <testcase classname="pst catalog helpers rejects traversal attempts and opens mailbox files within a selected scope" name="pst catalog helpers rejects traversal attempts and opens mailbox files within a selected scope" time="2.16">
+    <testcase classname="PSTAttachment tests should have email with jpg attachment" name="PSTAttachment tests should have email with jpg attachment" time="0.358">
     </testcase>
   </testsuite>
-  <testsuite name="viewer integration" errors="0" failures="0" skipped="0" timestamp="2026-05-18T11:30:04" time="13.388" tests="14">
-    <testcase classname="viewer integration indexes the bundled PST and keeps malformed folders as warnings" name="viewer integration indexes the bundled PST and keeps malformed folders as warnings" time="0.037">
+  <testsuite name="PSTActivity tests" errors="0" failures="0" skipped="0" timestamp="2026-05-18T17:41:56" time="0.803" tests="2">
+    <testcase classname="PSTActivity tests should have a Journal folder" name="PSTActivity tests should have a Journal folder" time="0.001">
     </testcase>
-    <testcase classname="viewer integration filters and pages folder messages by metadata" name="viewer integration filters and pages folder messages by metadata" time="0.009">
+    <testcase classname="PSTActivity tests root folder should have a journal entry" name="PSTActivity tests root folder should have a journal entry" time="0.026">
     </testcase>
-    <testcase classname="viewer integration matches metadata, plain body text, and normalized html body text" name="viewer integration matches metadata, plain body text, and normalized html body text" time="0.007">
+  </testsuite>
+  <testsuite name="pst catalog helpers" errors="0" failures="0" skipped="0" timestamp="2026-05-18T17:41:55" time="4.005" tests="4">
+    <testcase classname="pst catalog helpers discovers recursive case/search scopes and filters empty folders" name="pst catalog helpers discovers recursive case/search scopes and filters empty folders" time="0.038">
+    </testcase>
+    <testcase classname="pst catalog helpers includes PST root when direct mailbox files exist there" name="pst catalog helpers includes PST root when direct mailbox files exist there" time="0.007">
+    </testcase>
+    <testcase classname="pst catalog helpers reports an empty or missing PST folder without throwing" name="pst catalog helpers reports an empty or missing PST folder without throwing" time="0.004">
+    </testcase>
+    <testcase classname="pst catalog helpers rejects traversal attempts and opens mailbox files within a selected scope" name="pst catalog helpers rejects traversal attempts and opens mailbox files within a selected scope" time="1.264">
+    </testcase>
+  </testsuite>
+  <testsuite name="viewer integration" errors="0" failures="0" skipped="0" timestamp="2026-05-18T17:41:53" time="7.479" tests="15">
+    <testcase classname="viewer integration indexes the bundled PST and keeps malformed folders as warnings" name="viewer integration indexes the bundled PST and keeps malformed folders as warnings" time="0.015">
+    </testcase>
+    <testcase classname="viewer integration filters and pages folder messages by metadata" name="viewer integration filters and pages folder messages by metadata" time="0.004">
+    </testcase>
+    <testcase classname="viewer integration hides matching folder rows when hidden rules are applied" name="viewer integration hides matching folder rows when hidden rules are applied" time="0.004">
+    </testcase>
+    <testcase classname="viewer integration matches metadata, plain body text, and normalized html body text" name="viewer integration matches metadata, plain body text, and normalized html body text" time="0.001">
     </testcase>
     <testcase classname="viewer integration supports AND/OR terms and quoted phrases" name="viewer integration supports AND/OR terms and quoted phrases" time="0.002">
     </testcase>
-    <testcase classname="viewer integration searches body text across the whole session" name="viewer integration searches body text across the whole session" time="0.007">
+    <testcase classname="viewer integration searches body text across the whole session" name="viewer integration searches body text across the whole session" time="0.003">
     </testcase>
-    <testcase classname="viewer integration supports explicit AND/OR search in session scans" name="viewer integration supports explicit AND/OR search in session scans" time="0.009">
+    <testcase classname="viewer integration supports explicit AND/OR search in session scans" name="viewer integration supports explicit AND/OR search in session scans" time="0.004">
     </testcase>
-    <testcase classname="viewer integration resolves recipient names to email addresses when loading details" name="viewer integration resolves recipient names to email addresses when loading details" time="0.074">
+    <testcase classname="viewer integration resolves recipient names to email addresses when loading details" name="viewer integration resolves recipient names to email addresses when loading details" time="0.04">
     </testcase>
-    <testcase classname="viewer integration finds messages by body keyword within a real folder" name="viewer integration finds messages by body keyword within a real folder" time="0.002">
+    <testcase classname="viewer integration finds messages by body keyword within a real folder" name="viewer integration finds messages by body keyword within a real folder" time="0.001">
     </testcase>
-    <testcase classname="viewer integration builds attachment download URLs and JSON exports" name="viewer integration builds attachment download URLs and JSON exports" time="0.078">
+    <testcase classname="viewer integration builds attachment download URLs and JSON exports" name="viewer integration builds attachment download URLs and JSON exports" time="0.034">
     </testcase>
-    <testcase classname="viewer integration exports raw attachment bytes and EML for real messages" name="viewer integration exports raw attachment bytes and EML for real messages" time="0.137">
+    <testcase classname="viewer integration exports raw attachment bytes and EML for real messages" name="viewer integration exports raw attachment bytes and EML for real messages" time="0.066">
     </testcase>
-    <testcase classname="viewer integration renders nested embedded messages in best-effort EML output" name="viewer integration renders nested embedded messages in best-effort EML output" time="0.004">
+    <testcase classname="viewer integration renders nested embedded messages in best-effort EML output" name="viewer integration renders nested embedded messages in best-effort EML output" time="0.001">
     </testcase>
-    <testcase classname="viewer integration sanitizes file names for browser downloads" name="viewer integration sanitizes file names for browser downloads" time="0.001">
+    <testcase classname="viewer integration sanitizes file names for browser downloads" name="viewer integration sanitizes file names for browser downloads" time="0">
     </testcase>
-    <testcase classname="viewer integration handles invalid headers and encrypted PST files" name="viewer integration handles invalid headers and encrypted PST files" time="0.344">
+    <testcase classname="viewer integration handles invalid headers and encrypted PST files" name="viewer integration handles invalid headers and encrypted PST files" time="0.17">
     </testcase>
-    <testcase classname="viewer integration survives per-message and per-attachment failures without killing the session" name="viewer integration survives per-message and per-attachment failures without killing the session" time="0.137">
+    <testcase classname="viewer integration survives per-message and per-attachment failures without killing the session" name="viewer integration survives per-message and per-attachment failures without killing the session" time="0.04">
     </testcase>
   </testsuite>
-  <testsuite name="pst review api" errors="0" failures="0" skipped="0" timestamp="2026-05-18T11:30:11" time="28.344" tests="8">
-    <testcase classname="pst review api serves mailbox catalog, extraction, review endpoints, and swagger docs" name="pst review api serves mailbox catalog, extraction, review endpoints, and swagger docs" time="7.859">
+  <testsuite name="pst review api" errors="0" failures="0" skipped="0" timestamp="2026-05-18T17:41:57" time="18.164" tests="8">
+    <testcase classname="pst review api serves mailbox catalog, extraction, review endpoints, and swagger docs" name="pst review api serves mailbox catalog, extraction, review endpoints, and swagger docs" time="4.738">
     </testcase>
-    <testcase classname="pst review api allows appointment items to be flagged and cleared" name="pst review api allows appointment items to be flagged and cleared" time="2.048">
+    <testcase classname="pst review api allows appointment items to be flagged and cleared" name="pst review api allows appointment items to be flagged and cleared" time="1.687">
     </testcase>
-    <testcase classname="pst review api exports a flagged mail and appointment bundle as a zip archive" name="pst review api exports a flagged mail and appointment bundle as a zip archive" time="1.902">
+    <testcase classname="pst review api exports a flagged mail and appointment bundle as a zip archive" name="pst review api exports a flagged mail and appointment bundle as a zip archive" time="1.741">
     </testcase>
-    <testcase classname="pst review api honors bundle scope when exporting flagged items" name="pst review api honors bundle scope when exporting flagged items" time="6.852">
+    <testcase classname="pst review api honors bundle scope when exporting flagged items" name="pst review api honors bundle scope when exporting flagged items" time="5.423">
     </testcase>
-    <testcase classname="pst review api opens PST root mailboxes when scopePath is empty" name="pst review api opens PST root mailboxes when scopePath is empty" time="1.703">
+    <testcase classname="pst review api opens PST root mailboxes when scopePath is empty" name="pst review api opens PST root mailboxes when scopePath is empty" time="1.411">
     </testcase>
-    <testcase classname="pst review api bypasses auth for loopback requests" name="pst review api bypasses auth for loopback requests" time="0.602">
+    <testcase classname="pst review api bypasses auth for loopback requests" name="pst review api bypasses auth for loopback requests" time="0.503">
     </testcase>
-    <testcase classname="pst review api rejects remote requests without a token when auth is required" name="pst review api rejects remote requests without a token when auth is required" time="0.579">
+    <testcase classname="pst review api rejects remote requests without a token when auth is required" name="pst review api rejects remote requests without a token when auth is required" time="0.5">
     </testcase>
-    <testcase classname="pst review api allows remote requests when auth succeeds and responds to cors preflight" name="pst review api allows remote requests when auth succeeds and responds to cors preflight" time="0.622">
+    <testcase classname="pst review api allows remote requests when auth succeeds and responds to cors preflight" name="pst review api allows remote requests when auth succeeds and responds to cors preflight" time="0.518">
     </testcase>
   </testsuite>
 </testsuites>

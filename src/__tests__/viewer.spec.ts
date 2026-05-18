@@ -142,6 +142,65 @@ describe('viewer integration', () => {
     expect(ordered.items[0].order).toBeLessThan(ordered.items[1].order)
   })
 
+  it('hides matching folder rows when hidden rules are applied', () => {
+    const targetFolder = [...enronSession.folders.values()].find(
+      (folder) => folder.displayName === 'TW-Commercial Group'
+    )
+    expect(targetFolder).toBeTruthy()
+
+    const baseline = listFolderMessages(enronSession, targetFolder!.id, {
+      pageSize: 20
+    })
+    expect(baseline.total).toBeGreaterThan(0)
+
+    const hiddenSubject = baseline.items[0]?.subject || ''
+    const hiddenAddress = baseline.items[0]?.senderEmailAddress || ''
+    expect(hiddenSubject).toBeTruthy()
+    expect(hiddenAddress).toBeTruthy()
+
+    const subjectHidden = listFolderMessages(
+      enronSession,
+      targetFolder!.id,
+      {
+        pageSize: 20
+      },
+      [
+        {
+          filterId: 'subject-rule',
+          kind: 'subject',
+          value: hiddenSubject.toLowerCase(),
+          label: hiddenSubject,
+          createdAt: '',
+          updatedAt: ''
+        }
+      ]
+    )
+    expect(subjectHidden.total).toBeLessThan(baseline.total)
+    expect(subjectHidden.items.some((item) => item.subject === hiddenSubject)).toBe(false)
+
+    const addressHidden = listFolderMessages(
+      enronSession,
+      targetFolder!.id,
+      {
+        pageSize: 20
+      },
+      [
+        {
+          filterId: 'address-rule',
+          kind: 'address',
+          value: hiddenAddress.toLowerCase(),
+          label: hiddenAddress,
+          createdAt: '',
+          updatedAt: ''
+        }
+      ]
+    )
+    expect(addressHidden.total).toBeLessThan(baseline.total)
+    expect(
+      addressHidden.items.some((item) => item.senderEmailAddress === hiddenAddress)
+    ).toBe(false)
+  })
+
   it('matches metadata, plain body text, and normalized html body text', () => {
     const summary = makeSummary({
       subject: 'Alpha Notice',

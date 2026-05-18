@@ -26,6 +26,7 @@ import {
 } from './searchIndex'
 import {
   buildEmptyMessageDetail,
+  collectFolderMessages,
   buildFolderTree,
   buildMessageDetail,
   buildMessageDetailFromSession,
@@ -38,9 +39,6 @@ import {
   getFolderSummary,
   getMessageSummary,
   isMailLikeSummary,
-  listFolderMessages,
-  listSessionMessages,
-  messageMatchesQuery,
   sanitizeFileNameForDownload,
   sortMessageSummaries,
   type FolderMessagePage,
@@ -879,21 +877,25 @@ async function buildReviewedFolderPage(
   session: SessionRecord,
   folderId: string,
   options: ListFolderOptions,
-  reviewStore: ReviewStore
+  reviewStore: ReviewStore,
+  hiddenRules: HiddenRuleRecord[]
 ): Promise<ReviewedFolderPage> {
-  const folder = getFolderSummary(session.index, folderId)
-  const messageIds = [...folder.messageIds]
-  const reviewMap = await reviewStore.getMany(session.filePath, messageIds)
+  const { folder, items: collectedItems } = collectFolderMessages(
+    session.index,
+    folderId,
+    {
+      query: options.query,
+      mailOnly: options.mailOnly,
+      mode: options.mode
+    },
+    hiddenRules
+  )
+  const reviewMap = await reviewStore.getMany(
+    session.filePath,
+    collectedItems.map((message) => message.id)
+  )
 
-  let items = messageIds
-    .map((messageId) => session.index.messages.get(messageId))
-    .filter((message): message is MessageSummary => Boolean(message))
-    .filter((message) => (options.mailOnly ? isMailLikeSummary(message) : true))
-    .filter((message) =>
-      messageMatchesQuery(message, options.query, session.index.searchTextByMessageId.get(message.id) || '', {
-        mode: options.mode
-      })
-    )
+  let items = [...collectedItems]
 
   if (options.reviewFlaggedOnly || options.reviewTaggedOnly || options.reviewTag) {
     items = items.filter((message) => {
@@ -947,34 +949,10 @@ async function buildFolderPageWithReviews(
   session: SessionRecord,
   folderId: string,
   options: ListFolderOptions,
-  reviewStore: ReviewStore
+  reviewStore: ReviewStore,
+  hiddenRules: HiddenRuleRecord[]
 ): Promise<ReviewedFolderPage> {
-  if (options.reviewFlaggedOnly || options.reviewTaggedOnly || options.reviewTag) {
-    return buildReviewedFolderPage(session, folderId, options, reviewStore)
-  }
-
-  const basePage = listFolderMessages(session.index, folderId, {
-    query: options.query,
-    mailOnly: options.mailOnly,
-    page: options.page,
-    pageSize: options.pageSize,
-    sort: options.sort,
-    mode: options.mode
-  })
-  const reviewMap = await reviewStore.getMany(
-    session.filePath,
-    basePage.items.map((item) => item.id)
-  )
-
-  return {
-    ...basePage,
-    items: basePage.items.map((item) => buildReviewedSummary(item, reviewMap.get(item.id) || null)),
-    reviewFilters: {
-      flaggedOnly: options.reviewFlaggedOnly,
-      taggedOnly: options.reviewTaggedOnly,
-      tag: options.reviewTag
-    }
-  }
+  return buildReviewedFolderPage(session, folderId, options, reviewStore, hiddenRules)
 }
 
 function assertReviewableMessage(summary: MessageSummary): void {
@@ -1272,7 +1250,14 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const folderId = normalizeText(req.params.folderId)
       const filters = parseReviewFilters(req.query as Record<string, string | string[] | undefined>)
-      const page = await buildFolderPageWithReviews(session, folderId, filters, reviewStore)
+      const hiddenRules = await searchIndexStore.listHiddenRules()
+      const page = await buildFolderPageWithReviews(
+        session,
+        folderId,
+        filters,
+        reviewStore,
+        hiddenRules
+      )
       responseJson(res, 200, {
         sessionId: session.id,
         page
@@ -1319,7 +1304,14 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       const folderId = normalizeText(req.params.folderId)
       const filters = parseReviewFilters(req.query as Record<string, string | string[] | undefined>)
       const fields = normalizeExtractionFields(req.query.fields)
-      const page = await buildFolderPageWithReviews(session, folderId, filters, reviewStore)
+      const hiddenRules = await searchIndexStore.listHiddenRules()
+      const page = await buildFolderPageWithReviews(
+        session,
+        folderId,
+        filters,
+        reviewStore,
+        hiddenRules
+      )
       const folder = getFolderSummary(session.index, folderId)
       const extraction = buildFolderExtractionPage(
         page,

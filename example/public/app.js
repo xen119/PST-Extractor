@@ -40,6 +40,7 @@
     activeSearch: null,
     hiddenRules: [],
     hiddenRulesLoaded: false,
+    hiddenFiltersOpen: false,
     mailOnly: true,
     sort: 'date-desc',
     reviewFlaggedOnly: false,
@@ -719,9 +720,7 @@
       })
     })
     await loadHiddenFilters()
-    if (isSearchResultView()) {
-      await executeSearch(1, { selectPreferred: true })
-    }
+    await refreshActiveVisibleMessages()
   }
 
   async function removeHiddenRule(filterId) {
@@ -734,9 +733,20 @@
       method: 'DELETE'
     })
     await loadHiddenFilters()
-    if (isSearchResultView()) {
-      await executeSearch(1, { selectPreferred: true })
+    await refreshActiveVisibleMessages()
+  }
+
+  async function refreshActiveVisibleMessages() {
+    const activePage = getActivePage()
+    if (!state.sessionId || !activePage) {
+      return
     }
+
+    const preferredMessageId = state.selectedMessageId || null
+    await loadVisibleMessages(activePage.page || 1, {
+      selectPreferred: false,
+      preferredMessageId
+    })
   }
 
   async function refreshSearchIndex() {
@@ -931,13 +941,23 @@
   }
 
   function renderHiddenFiltersPanel() {
-    if (!ui.hiddenFiltersPanel) {
+    if (!ui.hiddenFiltersPanel || !ui.hiddenFiltersToggle || !ui.hiddenFiltersCount) {
       return
     }
 
     const rules = (Array.isArray(state.hiddenRules) ? state.hiddenRules : [])
       .map(normalizeHiddenRule)
       .filter(Boolean)
+    const isOpen = Boolean(state.hiddenFiltersOpen)
+
+    ui.hiddenFiltersCount.textContent = String(rules.length)
+    ui.hiddenFiltersToggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false')
+    ui.hiddenFiltersDropdown?.classList.toggle('is-open', isOpen)
+    ui.hiddenFiltersPanel.hidden = !isOpen
+
+    if (!isOpen) {
+      return
+    }
 
     if (!rules.length) {
       ui.hiddenFiltersPanel.innerHTML = `
@@ -975,6 +995,22 @@
           .join('')}
       </div>
     `
+  }
+
+  function setHiddenFiltersOpen(isOpen) {
+    state.hiddenFiltersOpen = Boolean(isOpen)
+    renderHiddenFiltersPanel()
+  }
+
+  function toggleHiddenFiltersDropdown() {
+    setHiddenFiltersOpen(!state.hiddenFiltersOpen)
+  }
+
+  function closeHiddenFiltersDropdown() {
+    if (!state.hiddenFiltersOpen) {
+      return
+    }
+    setHiddenFiltersOpen(false)
   }
 
   async function loadHiddenFilters() {
@@ -1813,6 +1849,7 @@
         state.currentMessageDetail = null
         ui.messageDetail.innerHTML =
           '<div class="panel-empty">Select a message to inspect it.</div>'
+        saveState()
         renderMessageList()
       }
 
@@ -1921,6 +1958,7 @@
         state.currentMessageDetail = null
         ui.messageDetail.innerHTML =
           '<div class="panel-empty">Select a result to inspect it.</div>'
+        saveState()
         renderMessageList()
       }
 
@@ -2326,6 +2364,11 @@
       void removeHiddenRule(actionButton.dataset.filterId || '')
     })
 
+    ui.hiddenFiltersToggle.addEventListener('click', (event) => {
+      event.preventDefault()
+      toggleHiddenFiltersDropdown()
+    })
+
     ui.searchInput.addEventListener(
       'input',
       debounce(() => {
@@ -2339,6 +2382,24 @@
         event.preventDefault()
         void executeSearch(1, { selectPreferred: true })
       }
+    })
+
+    document.addEventListener('click', (event) => {
+      if (!state.hiddenFiltersOpen || !ui.hiddenFiltersDropdown) {
+        return
+      }
+      const target = event.target
+      if (target instanceof Node && ui.hiddenFiltersDropdown.contains(target)) {
+        return
+      }
+      closeHiddenFiltersDropdown()
+    })
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') {
+        return
+      }
+      closeHiddenFiltersDropdown()
     })
 
     ui.pstFilter.addEventListener('input', () => {
@@ -2427,6 +2488,9 @@
     ui.searchScopeSelect = getElement('search-scope-select')
     ui.flaggedBundleScopeSelect = getElement('flagged-bundle-scope-select')
     ui.flaggedBundleButton = getElement('flagged-bundle-button')
+    ui.hiddenFiltersDropdown = getElement('hidden-filters-dropdown')
+    ui.hiddenFiltersToggle = getElement('hidden-filters-toggle')
+    ui.hiddenFiltersCount = getElement('hidden-filters-count')
     ui.hiddenFiltersPanel = getElement('hidden-filters-panel')
     ui.mailOnlyToggle = getElement('mail-only-toggle')
     ui.reviewFlaggedToggle = getElement('review-flagged-toggle')
@@ -2462,6 +2526,7 @@
     )
       ? localStorage.getItem(STORAGE_KEYS.flaggedBundleScope) || 'all'
       : 'all'
+    state.hiddenFiltersOpen = false
     state.selectedPstFileName = localStorage.getItem(STORAGE_KEYS.pstFileName) || null
     state.mailboxFilter = ''
     refreshControls()

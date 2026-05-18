@@ -135,6 +135,24 @@
                   Next
                 </button>
               </div>
+              <div id="hidden-filters-dropdown" class="hidden-filters-dropdown">
+                <button
+                  id="hidden-filters-toggle"
+                  class="ghost-button small hidden-filters-toggle"
+                  type="button"
+                  aria-controls="hidden-filters-panel"
+                  aria-expanded="false"
+                >
+                  Hidden filters
+                  <span id="hidden-filters-count" class="badge">0</span>
+                </button>
+                <div
+                  id="hidden-filters-panel"
+                  class="hidden-filters-panel hidden-filters-menu"
+                  aria-label="Hidden filters"
+                  hidden
+                ></div>
+              </div>
             </div>
           </div>
 
@@ -151,13 +169,6 @@
               Download flagged bundle
             </button>
           </div>
-
-          <section id="hidden-filters-panel" class="hidden-filters-panel" aria-label="Hidden filters">
-            <div class="panel-empty compact-note">
-              Hidden filters will appear here. Click <strong>-</strong> on an address or subject in a
-              search result to hide it globally.
-            </div>
-          </section>
 
           <div id="message-list" class="message-list panel-empty">
             Select a folder to begin.

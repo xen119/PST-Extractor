@@ -374,6 +374,11 @@ describe('pst review api', () => {
           ? resultRecipientMatch[1]
           : searchSources[0]
         : searchResult?.subject || detail.detail.subject || searchTerm
+    expect(folderPage.page.total).toBeGreaterThan(0)
+    expect(
+      folderPage.page.items.some((item: { id: string }) => item.id === message.id)
+    ).toBe(true)
+
     const hiddenSubjectResponse = await requestJson(`${started.baseUrl}/api/search/filters`, {
       method: 'POST',
       headers: {
@@ -387,6 +392,16 @@ describe('pst review api', () => {
     })
     expect(hiddenSubjectResponse.rule.kind).toBe(hiddenRuleKind)
     expect(hiddenSubjectResponse.rule.value).toBe(hiddenSubject.toLowerCase())
+
+    const folderAfterHidden = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/folders/${encodeURIComponent(
+        folder!.id
+      )}/messages?mailOnly=1&pageSize=5000`
+    )
+    expect(folderAfterHidden.page.total).toBeLessThan(folderPage.page.total)
+    expect(
+      folderAfterHidden.page.items.some((item: { id: string }) => item.id === message.id)
+    ).toBe(false)
 
     const hiddenFilters = await requestJson(`${started.baseUrl}/api/search/filters`)
     expect(hiddenFilters.items.some((item: { value: string }) => item.value === hiddenSubject.toLowerCase())).toBe(true)
