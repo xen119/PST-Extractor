@@ -22,7 +22,6 @@
                 <option value="">Loading cases...</option>
               </select>
             </label>
-            <div id="case-name-label" class="case-name-label">Current case</div>
             <label class="select-field scope-field" for="scope-select">
               <span>Search</span>
               <select id="scope-select">
@@ -41,6 +40,15 @@
                 </button>
               </div>
             </div>
+            <label class="search-field mailbox-filter-field" for="pst-filter">
+              <span>Filter</span>
+              <input
+                id="pst-filter"
+                type="search"
+                placeholder="Filename or path"
+                autocomplete="off"
+              />
+            </label>
             <div id="pst-empty" class="panel-empty">
               No case / search folders found. Put .pst or .ost files inside
               <code>PST/&lt;case&gt;/&lt;search&gt;/</code> folders.
@@ -77,52 +85,65 @@
             </div>
           </div>
 
-          <div class="filters compact">
-              <label class="search-field">
+          <div class="filters compact search-controls">
+            <div class="search-toolbar">
+              <label class="search-field search-query-field">
                 <span>Search</span>
                 <input
                   id="message-search"
                   type="search"
-                  placeholder="Keyword, body, recipients, subject"
+                  placeholder="Keywords, &quot;phrases&quot;, + AND, | OR"
+                  title="Type + for AND or | for OR inside the search field."
                   autocomplete="off"
                 />
               </label>
-            <label class="select-field search-scope-field">
-              <span>Scope</span>
-              <select id="search-scope-select">
-                <option value="pst">Selected PST</option>
-                <option value="search">Selected search</option>
-                <option value="all">All cases/searches</option>
-              </select>
-            </label>
-            <label class="toggle-field">
-              <input id="mail-only-toggle" type="checkbox" checked />
-              <span>Mail only</span>
-            </label>
-            <label class="toggle-field">
-              <input id="review-flagged-toggle" type="checkbox" />
-              <span>Flagged</span>
-            </label>
-            <label class="toggle-field">
-              <input id="review-tagged-toggle" type="checkbox" />
-              <span>Tagged</span>
-            </label>
-            <label class="select-field">
-              <span>Sort</span>
-              <select id="message-sort">
-                <option value="date-desc">Newest first</option>
-                <option value="order">Folder order</option>
-              </select>
-            </label>
-            <div class="pager">
-              <button id="page-prev" class="ghost-button small" type="button" disabled>
-                Prev
+              <button id="search-button" class="primary-button small search-submit" type="button">
+                Search
               </button>
-              <button id="page-next" class="ghost-button small" type="button" disabled>
-                Next
-              </button>
+              <label class="select-field search-scope-field">
+                <span>Scope</span>
+                <select id="search-scope-select">
+                  <option value="pst">Selected PST</option>
+                  <option value="search">Selected search</option>
+                  <option value="all">All cases/searches</option>
+                </select>
+              </label>
+              <label class="toggle-field">
+                <input id="mail-only-toggle" type="checkbox" checked />
+                <span>Mail only</span>
+              </label>
+              <label class="toggle-field">
+                <input id="review-flagged-toggle" type="checkbox" />
+                <span>Flagged</span>
+              </label>
+              <label class="toggle-field">
+                <input id="review-tagged-toggle" type="checkbox" />
+                <span>Tagged</span>
+              </label>
+              <label class="select-field sort-field">
+                <span>Sort</span>
+                <select id="message-sort">
+                  <option value="date-desc">Newest first</option>
+                  <option value="order">Folder order</option>
+                </select>
+              </label>
+              <div class="pager">
+                <button id="page-prev" class="ghost-button small" type="button" disabled>
+                  Prev
+                </button>
+                <button id="page-next" class="ghost-button small" type="button" disabled>
+                  Next
+                </button>
+              </div>
             </div>
           </div>
+
+          <section id="hidden-filters-panel" class="hidden-filters-panel" aria-label="Hidden filters">
+            <div class="panel-empty compact-note">
+              Hidden filters will appear here. Click <strong>-</strong> on an address or subject in a
+              search result to hide it globally.
+            </div>
+          </section>
 
           <div id="message-list" class="message-list panel-empty">
             Select a folder to begin.
@@ -152,6 +173,7 @@
       </footer>
     </div>
 
+    <script src="/search-utils.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

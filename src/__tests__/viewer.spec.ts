@@ -68,6 +68,7 @@ function makeSummary(overrides: Partial<MessageSummary> = {}): MessageSummary {
     resolvedDisplayTo: 'Recipient <recipient@example.com>',
     resolvedDisplayCC: '',
     resolvedDisplayBCC: '',
+    originalSubject: 'Summary subject',
     clientSubmitTime: now,
     creationTime: now,
     modificationTime: now,
@@ -144,10 +145,12 @@ describe('viewer integration', () => {
   it('matches metadata, plain body text, and normalized html body text', () => {
     const summary = makeSummary({
       subject: 'Alpha Notice',
-      senderName: 'Sender One'
+      senderName: 'Sender One',
+      originalSubject: 'Re: Alpha Notice'
     })
 
     expect(messageMatchesQuery(summary, 'alpha')).toBe(true)
+    expect(messageMatchesQuery(summary, 'recipient@example.com')).toBe(true)
     expect(
       messageMatchesQuery(
         summary,
@@ -161,6 +164,22 @@ describe('viewer integration', () => {
     expect(messageMatchesQuery(summary, 'update', htmlBody)).toBe(true)
   })
 
+  it('supports AND/OR terms and quoted phrases', () => {
+    const summary = makeSummary({
+      subject: 'Project Update',
+      senderName: 'Alice Example',
+      senderEmailAddress: 'alice@example.com',
+      displayTo: 'Bob',
+      resolvedDisplayTo: 'Bob <bob@example.com>',
+      originalSubject: 'Re: Project Update'
+    })
+
+    expect(messageMatchesQuery(summary, 'project update', '', { mode: 'and' })).toBe(true)
+    expect(messageMatchesQuery(summary, 'project missingterm', '', { mode: 'and' })).toBe(false)
+    expect(messageMatchesQuery(summary, 'project missingterm', '', { mode: 'or' })).toBe(true)
+    expect(messageMatchesQuery(summary, '"Project Update"', '', { mode: 'and' })).toBe(true)
+  })
+
   it('searches body text across the whole session', () => {
     const matches = listSessionMessages(enronSession, {
       query: 'signature',
@@ -168,6 +187,22 @@ describe('viewer integration', () => {
     })
 
     expect(matches.some((item) => item.id === 'message:2097188')).toBe(true)
+  })
+
+  it('supports explicit AND/OR search in session scans', () => {
+    const andMatches = listSessionMessages(enronSession, {
+      query: '"New OBA\'s" signature',
+      mailOnly: true,
+      mode: 'and'
+    })
+    expect(andMatches.some((item) => item.id === 'message:2097188')).toBe(true)
+
+    const orMatches = listSessionMessages(enronSession, {
+      query: 'signature missingterm',
+      mailOnly: true,
+      mode: 'or'
+    })
+    expect(orMatches.some((item) => item.id === 'message:2097188')).toBe(true)
   })
 
   it('resolves recipient names to email addresses when loading details', () => {

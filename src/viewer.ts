@@ -66,6 +66,7 @@ export interface MessageSummary {
   resolvedDisplayTo: string
   resolvedDisplayCC: string
   resolvedDisplayBCC: string
+  originalSubject: string
   clientSubmitTime: string | null
   creationTime: string | null
   modificationTime: string | null
@@ -262,6 +263,60 @@ function collapseWhitespace(value: string): string {
 
 function normalizeSearchableText(...parts: Array<string | null | undefined>): string {
   return collapseWhitespace(parts.map((part) => safeString(part)).join(' ')).toLowerCase()
+}
+
+function tokenizeSearchTerms(value: string): string[] {
+  const normalized = safeString(value).replace(/[\r\n;,]+/g, ' ')
+  const terms: string[] = []
+  const pattern = /"([^"]+)"|'([^']+)'|(\S+)/g
+  let match: RegExpExecArray | null = null
+
+  while ((match = pattern.exec(normalized))) {
+    const term = collapseWhitespace(match[1] || match[2] || match[3] || '')
+    if (term) {
+      terms.push(term.toLowerCase())
+    }
+  }
+
+  return terms
+}
+
+function buildSearchHaystacks(
+  summary: MessageSummary,
+  searchText = ''
+): {
+  general: string
+  email: string
+  subject: string
+} {
+  return {
+    general: normalizeSearchableText(
+      summary.subject,
+      summary.originalSubject,
+      summary.senderName,
+      summary.senderEmailAddress,
+      summary.recipientText,
+      summary.displayTo,
+      summary.displayCC,
+      summary.displayBCC,
+      summary.resolvedDisplayTo,
+      summary.resolvedDisplayCC,
+      summary.resolvedDisplayBCC,
+      summary.messageClass,
+      summary.kind,
+      searchText
+    ),
+    email: normalizeSearchableText(
+      summary.senderEmailAddress,
+      summary.displayTo,
+      summary.displayCC,
+      summary.displayBCC,
+      summary.resolvedDisplayTo,
+      summary.resolvedDisplayCC,
+      summary.resolvedDisplayBCC
+    ),
+    subject: normalizeSearchableText(summary.subject, summary.originalSubject)
+  }
 }
 
 function normalizeRecipientKey(value: string): string {
@@ -649,6 +704,7 @@ function buildSummaryFromMessage(
     resolvedDisplayTo: resolvedRecipients.resolvedDisplayTo,
     resolvedDisplayCC: resolvedRecipients.resolvedDisplayCC,
     resolvedDisplayBCC: resolvedRecipients.resolvedDisplayBCC,
+    originalSubject: collapseWhitespace(safeString(message.originalSubject)),
     clientSubmitTime,
     creationTime,
     modificationTime,
@@ -1391,24 +1447,27 @@ export function isMailLikeSummary(summary: MessageSummary): boolean {
 export function messageMatchesQuery(
   summary: MessageSummary,
   query: string,
-  searchText = ''
+  searchText = '',
+  options: {
+    mode?: 'and' | 'or'
+  } = {}
 ): boolean {
-  if (!query) {
-    return true
+  const haystacks = buildSearchHaystacks(summary, searchText)
+  const positiveTerms = tokenizeSearchTerms(query)
+  const mode = options.mode === 'or' ? 'or' : 'and'
+
+  if (positiveTerms.length) {
+    const positiveMatch =
+      mode === 'or'
+        ? positiveTerms.some((term) => haystacks.general.includes(term))
+        : positiveTerms.every((term) => haystacks.general.includes(term))
+
+    if (!positiveMatch) {
+      return false
+    }
   }
-  const haystack = normalizeSearchableText(
-    summary.subject,
-    summary.senderName,
-    summary.senderEmailAddress,
-    summary.displayTo,
-    summary.displayCC,
-    summary.displayBCC,
-    summary.recipientText,
-    summary.messageClass,
-    summary.kind,
-    searchText
-  )
-  return haystack.includes(normalizeSearchableText(query))
+
+  return true
 }
 
 export function sortMessageSummaries(messages: MessageSummary[], sort: string): MessageSummary[] {
@@ -1432,6 +1491,7 @@ export function listSessionMessages(
     query?: string
     mailOnly?: boolean
     sort?: string
+    mode?: 'and' | 'or'
   } = {}
 ): MessageSummary[] {
   const query = safeString(options.query).trim()
@@ -1442,7 +1502,9 @@ export function listSessionMessages(
     [...session.messages.values()]
       .filter((message) => (mailOnly ? isMailLikeSummary(message) : true))
       .filter((message) =>
-        messageMatchesQuery(message, query, session.searchTextByMessageId.get(message.id) || '')
+        messageMatchesQuery(message, query, session.searchTextByMessageId.get(message.id) || '', {
+          mode: options.mode,
+        })
       ),
     sort
   )
@@ -1622,6 +1684,7 @@ function indexFolder(
         resolvedDisplayTo: '',
         resolvedDisplayCC: '',
         resolvedDisplayBCC: '',
+        originalSubject: '',
         clientSubmitTime: null,
         creationTime: null,
         modificationTime: null,
@@ -1749,6 +1812,7 @@ export function listFolderMessages(
     page?: number
     pageSize?: number
     sort?: string
+    mode?: 'and' | 'or'
   } = {}
 ): FolderMessagePage {
   const folder = getFolderSummary(session, folderId)
@@ -1761,7 +1825,9 @@ export function listFolderMessages(
     .filter((message): message is MessageSummary => Boolean(message))
     .filter((message) => (mailOnly ? isMailLikeSummary(message) : true))
     .filter((message) =>
-      messageMatchesQuery(message, query, session.searchTextByMessageId.get(message.id) || '')
+      messageMatchesQuery(message, query, session.searchTextByMessageId.get(message.id) || '', {
+        mode: options.mode,
+      })
     )
   const sortedMessages = sortMessageSummaries(messages, sort)
   const total = sortedMessages.length

@@ -17,6 +17,14 @@ import {
 } from './reviewStore'
 import type { ReviewState } from './reviewTypes'
 import {
+  buildSearchIndexDocumentsFromSession,
+  refreshSearchIndexFromCatalog,
+  type HiddenRuleRecord,
+  type SearchIndexPage,
+  type SearchIndexStore,
+  type SearchScope
+} from './searchIndex'
+import {
   buildEmptyMessageDetail,
   buildFolderTree,
   buildMessageDetail,
@@ -48,6 +56,7 @@ import {
 export interface CreatePstReviewAppOptions {
   publicDir: string
   reviewStore: ReviewStore
+  searchIndexStore: SearchIndexStore
   openApiSpec: Record<string, unknown>
   pstRootDir?: string
   apiSecurity?: ApiSecurityConfig
@@ -85,11 +94,18 @@ interface SessionRecord {
   fileName: string
   scopePath: string
   scopeLabel: string
+  mailboxKey: string
 }
 
 interface OpenMailboxRequestBody {
   scopePath?: string
   fileName?: string
+}
+
+interface HiddenRuleRequestBody {
+  kind?: 'address' | 'subject'
+  value?: string
+  label?: string
 }
 
 interface ReviewPatchBody {
@@ -106,6 +122,7 @@ interface ListFolderOptions {
   reviewFlaggedOnly: boolean
   reviewTaggedOnly: boolean
   reviewTag: string
+  mode: 'and' | 'or'
 }
 
 interface SessionResponse {
@@ -139,6 +156,7 @@ interface SearchRequestQuery {
   scopePath?: string
   sessionId?: string
   query?: string
+  mode?: string
   mailOnly?: boolean
   sort?: string
   page?: number
@@ -146,32 +164,6 @@ interface SearchRequestQuery {
   reviewFlagged?: boolean
   reviewTagged?: boolean
   reviewTag?: string
-}
-
-interface SearchResultItem extends ReviewedMessageSummary {
-  scopePath: string
-  scopeLabel: string
-  fileName: string
-  mailboxName: string
-}
-
-interface SearchResultPage {
-  items: SearchResultItem[]
-  total: number
-  page: number
-  pageSize: number
-  totalPages: number
-  query: string
-  mailOnly: boolean
-  sort: string
-  scope: string
-  scopePath: string
-  scopeLabel: string
-  reviewFilters: {
-    flaggedOnly: boolean
-    taggedOnly: boolean
-    tag: string
-  }
 }
 
 const DEFAULT_PAGE_SIZE = 50
@@ -433,6 +425,44 @@ function parseSort(value: string | string[] | undefined): string {
   return 'date-desc'
 }
 
+function parseSearchMode(value: string | string[] | undefined): 'and' | 'or' {
+  const raw = Array.isArray(value) ? value[0] : value
+  if (!raw) {
+    return 'and'
+  }
+  return raw.trim().toLowerCase() === 'or' ? 'or' : 'and'
+}
+
+function parseQueryText(value: string | string[] | undefined): string {
+  const raw = Array.isArray(value) ? value[0] : value
+  return normalizeText(raw)
+}
+
+function parseSearchModeFromQuery(
+  query: string,
+  fallbackMode: string | string[] | undefined
+): 'and' | 'or' {
+  const text = normalizeText(query)
+  if (text) {
+    const pattern = /"([^"]+)"|(\S+)/g
+    let match: RegExpExecArray | null = null
+    while ((match = pattern.exec(text))) {
+      const token = String(match[1] || match[2] || '').trim().toLowerCase()
+      if (!token) {
+        continue
+      }
+      if (token === '|' || token.startsWith('|')) {
+        return 'or'
+      }
+      if (token === '+' || token.startsWith('+')) {
+        return 'and'
+      }
+    }
+  }
+
+  return parseSearchMode(fallbackMode)
+}
+
 function parseZeroBasedInt(value: string | string[] | undefined): number {
   const raw = Array.isArray(value) ? value[0] : value
   if (raw === undefined) {
@@ -443,15 +473,21 @@ function parseZeroBasedInt(value: string | string[] | undefined): number {
 }
 
 function parseReviewFilters(value: Record<string, string | string[] | undefined>): ListFolderOptions {
+  const queryValue =
+    value.q !== undefined && value.q !== null && value.q !== ''
+      ? value.q
+      : value.query
+  const query = parseQueryText(queryValue)
   return {
-    query: normalizeText(value.q),
+    query,
     mailOnly: parseBoolean(value.mailOnly, true),
     sort: parseSort(value.sort),
     page: parsePositiveInt(value.page, 1),
     pageSize: parsePositiveInt(value.pageSize, DEFAULT_PAGE_SIZE),
     reviewFlaggedOnly: parseBoolean(value.reviewFlagged, false),
     reviewTaggedOnly: parseBoolean(value.reviewTagged, false),
-    reviewTag: normalizeText(value.reviewTag)
+    reviewTag: normalizeText(value.reviewTag),
+    mode: parseSearchModeFromQuery(query, value.mode)
   }
 }
 
@@ -488,42 +524,6 @@ function getScopeLabel(scopePath: string): string {
   return scopePath ? scopePath.split('/').join(' / ') : 'PST root'
 }
 
-function sortSearchResults(
-  left: SearchResultItem,
-  right: SearchResultItem,
-  sort: string
-): number {
-  if (sort === 'order') {
-    if (left.scopeLabel !== right.scopeLabel) {
-      return left.scopeLabel.localeCompare(right.scopeLabel, undefined, { sensitivity: 'base' })
-    }
-    if (left.fileName !== right.fileName) {
-      return left.fileName.localeCompare(right.fileName, undefined, { sensitivity: 'base' })
-    }
-    if (left.folderPath !== right.folderPath) {
-      return left.folderPath.localeCompare(right.folderPath, undefined, { sensitivity: 'base' })
-    }
-    return left.order - right.order
-  }
-
-  const leftDate = left.sortDateMs ?? Number.MIN_SAFE_INTEGER
-  const rightDate = right.sortDateMs ?? Number.MIN_SAFE_INTEGER
-  if (leftDate !== rightDate) {
-    return rightDate - leftDate
-  }
-
-  if (left.scopeLabel !== right.scopeLabel) {
-    return left.scopeLabel.localeCompare(right.scopeLabel, undefined, { sensitivity: 'base' })
-  }
-  if (left.fileName !== right.fileName) {
-    return left.fileName.localeCompare(right.fileName, undefined, { sensitivity: 'base' })
-  }
-  if (left.folderPath !== right.folderPath) {
-    return left.folderPath.localeCompare(right.folderPath, undefined, { sensitivity: 'base' })
-  }
-  return left.order - right.order
-}
-
 function resolveCatalogScopeSelection(
   rootPath: string,
   requestedScopePath: string
@@ -540,24 +540,6 @@ function resolveCatalogScopeSelection(
   }
 
   return catalog
-}
-
-function buildSearchResultItem(
-  summary: ReviewedMessageSummary,
-  context: {
-    scopePath: string
-    scopeLabel: string
-    fileName: string
-    mailboxName: string
-  }
-): SearchResultItem {
-  return {
-    ...summary,
-    scopePath: context.scopePath,
-    scopeLabel: context.scopeLabel,
-    fileName: context.fileName,
-    mailboxName: context.mailboxName
-  }
 }
 
 function isReviewMatch(
@@ -581,48 +563,6 @@ function isReviewMatch(
     }
   }
   return true
-}
-
-async function buildSessionSearchResults(
-  session: SessionRecord,
-  filters: ListFolderOptions,
-  reviewStore: ReviewStore,
-  context: {
-    scopePath: string
-    scopeLabel: string
-    fileName: string
-    mailboxName: string
-  }
-): Promise<SearchResultItem[]> {
-  const messages = listSessionMessages(session.index, {
-    query: filters.query,
-    mailOnly: filters.mailOnly,
-    sort: filters.sort
-  }) as ReviewedMessageSummary[]
-
-  const reviewMap = await reviewStore.getMany(
-    session.filePath,
-    messages.map((message) => message.id)
-  )
-
-  return messages
-    .map((message) => buildSearchResultItem(message, context))
-    .filter((message) =>
-      isReviewMatch(reviewMap.get(message.id) || null, {
-        flaggedOnly: filters.reviewFlaggedOnly,
-        taggedOnly: filters.reviewTaggedOnly,
-        tag: filters.reviewTag
-      })
-    )
-    .map((message) =>
-      buildSearchResultItem(
-        {
-          ...message,
-          review: reviewMap.get(message.id) || normalizeReviewState(null)
-        },
-        context
-      )
-    )
 }
 
 function createAttachmentBaseUrl(sessionId: string, messageId: string): string {
@@ -776,7 +716,11 @@ async function buildReviewedFolderPage(
     .map((messageId) => session.index.messages.get(messageId))
     .filter((message): message is MessageSummary => Boolean(message))
     .filter((message) => (options.mailOnly ? isMailLikeSummary(message) : true))
-    .filter((message) => messageMatchesQuery(message, options.query))
+    .filter((message) =>
+      messageMatchesQuery(message, options.query, session.index.searchTextByMessageId.get(message.id) || '', {
+        mode: options.mode
+      })
+    )
 
   if (options.reviewFlaggedOnly || options.reviewTaggedOnly || options.reviewTag) {
     items = items.filter((message) => {
@@ -841,7 +785,8 @@ async function buildFolderPageWithReviews(
     mailOnly: options.mailOnly,
     page: options.page,
     pageSize: options.pageSize,
-    sort: options.sort
+    sort: options.sort,
+    mode: options.mode
   })
   const reviewMap = await reviewStore.getMany(
     session.filePath,
@@ -925,142 +870,23 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   const publicDir = options.publicDir
   const pstRootDir = options.pstRootDir || getDefaultPstRootDirectory()
   const reviewStore = options.reviewStore
+  const searchIndexStore = options.searchIndexStore
 
-  async function searchMailboxSession(
-    session: SessionRecord,
-    filters: ListFolderOptions,
-    context: {
-      scopePath: string
-      scopeLabel: string
-      fileName: string
-      mailboxName: string
-    }
-  ): Promise<SearchResultItem[]> {
-    const messages = listSessionMessages(session.index, {
-      query: filters.query,
-      mailOnly: filters.mailOnly,
-      sort: filters.sort
-    })
-    const reviewMap = await reviewStore.getMany(
-      session.filePath,
-      messages.map((message) => message.id)
+  async function syncSearchIndexForMailbox(session: SessionRecord): Promise<void> {
+    const messageIds = [...session.index.messages.keys()]
+    const reviewMap = await reviewStore.getMany(session.filePath, messageIds)
+    const documents = buildSearchIndexDocumentsFromSession(
+      session.index,
+      {
+        mailboxKey: session.filePath,
+        scopePath: session.scopePath,
+        scopeLabel: session.scopeLabel,
+        fileName: session.fileName,
+        mailboxName: session.index.mailboxName
+      },
+      reviewMap
     )
-    const reviewed = messages.map((message) =>
-      buildReviewedSummary(message, reviewMap.get(message.id) || null)
-    )
-    return reviewed
-      .filter((message) =>
-        isReviewMatch(reviewMap.get(message.id) || null, {
-          flaggedOnly: filters.reviewFlaggedOnly,
-          taggedOnly: filters.reviewTaggedOnly,
-          tag: filters.reviewTag
-        })
-      )
-      .map((message) => buildSearchResultItem(message, context))
-  }
-
-  async function searchCatalogScope(
-    scope: { scopePath: string; scopeLabel: string; files: Array<{ fileName: string }> },
-    filters: ListFolderOptions
-  ): Promise<SearchResultItem[]> {
-    const results: SearchResultItem[] = []
-    for (const file of scope.files) {
-      try {
-        const index = openPstMailbox(pstRootDir, scope.scopePath, file.fileName)
-        const session: SessionRecord = {
-          id: '',
-          index,
-          filePath: index.filePath,
-          fileName: index.fileName,
-          scopePath: scope.scopePath,
-          scopeLabel: scope.scopeLabel
-        }
-        const items = await searchMailboxSession(session, filters, {
-          scopePath: scope.scopePath,
-          scopeLabel: scope.scopeLabel,
-          fileName: file.fileName,
-          mailboxName: index.mailboxName
-        })
-        results.push(...items)
-      } catch (error) {
-        console.warn(
-          `Unable to search mailbox ${file.fileName} in ${scope.scopeLabel}:`,
-          error instanceof Error ? error.message : error
-        )
-      }
-    }
-    return results
-  }
-
-  async function buildSearchPage(
-    scope: 'all' | 'search' | 'pst',
-    filters: ListFolderOptions,
-    options: {
-      sessionId?: string
-      scopePath?: string
-    } = {}
-  ): Promise<SearchResultPage> {
-    let items: SearchResultItem[] = []
-    let scopePath = ''
-    let scopeLabel = 'All cases/searches'
-
-    if (scope === 'pst') {
-      const session = getSessionOrThrow(sessions, options.sessionId || '')
-      scopePath = session.scopePath
-      scopeLabel = session.scopeLabel || getScopeLabel(scopePath)
-      items = await searchMailboxSession(
-        session,
-        filters,
-        {
-          scopePath,
-          scopeLabel,
-          fileName: session.fileName,
-          mailboxName: session.index.mailboxName
-        }
-      )
-    } else {
-      const catalog =
-        scope === 'search'
-          ? resolveCatalogScopeSelection(pstRootDir, options.scopePath || '')
-          : listPstMailboxFiles(pstRootDir)
-      const catalogScopes =
-        scope === 'search'
-          ? catalog.scopes.filter((entry) => entry.scopePath === catalog.scopePath)
-          : catalog.scopes
-      scopePath = scope === 'search' ? catalog.scopePath : ''
-      scopeLabel = scope === 'search' ? catalog.scopeLabel : 'All cases/searches'
-
-      for (const catalogScope of catalogScopes) {
-        const scopeResults = await searchCatalogScope(catalogScope, filters)
-        items.push(...scopeResults)
-      }
-    }
-
-    items.sort((left, right) => sortSearchResults(left, right, filters.sort))
-
-    const total = items.length
-    const totalPages = Math.max(1, Math.ceil(total / filters.pageSize))
-    const page = Math.min(Math.max(filters.page, 1), totalPages)
-    const start = (page - 1) * filters.pageSize
-
-    return {
-      items: items.slice(start, start + filters.pageSize),
-      total,
-      page,
-      pageSize: filters.pageSize,
-      totalPages,
-      query: filters.query,
-      mailOnly: filters.mailOnly,
-      sort: filters.sort,
-      scope,
-      scopePath,
-      scopeLabel,
-      reviewFilters: {
-        flaggedOnly: filters.reviewFlaggedOnly,
-        taggedOnly: filters.reviewTaggedOnly,
-        tag: filters.reviewTag
-      }
-    }
+    await searchIndexStore.replaceMailboxDocuments(session.filePath, documents)
   }
 
   app.disable('x-powered-by')
@@ -1109,9 +935,19 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         filePath: index.filePath,
         fileName: index.fileName,
         scopePath,
-        scopeLabel
+        scopeLabel,
+        mailboxKey: index.filePath
       }
       sessions.set(sessionId, record)
+
+      try {
+        await syncSearchIndexForMailbox(record)
+      } catch (error) {
+        console.warn(
+          `Unable to refresh search index for ${index.fileName}:`,
+          error instanceof Error ? error.message : error
+        )
+      }
 
       const summary = buildSessionSummary(index)
       responseJson(res, 200, {
@@ -1130,19 +966,101 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.get(API_ROUTES.search, async (req, res) => {
     try {
       const filters = parseReviewFilters(req.query as Record<string, string | string[] | undefined>)
-      const scope = parseSearchScope(req.query.scope)
-      const scopePath = normalizeScopePath(req.query.scopePath)
+      const scope = parseSearchScope(req.query.scope) as SearchScope
+      const requestedScopePath = normalizeScopePath(req.query.scopePath)
       const sessionId = normalizeText(req.query.sessionId)
-      const page = await buildSearchPage(scope, filters, {
-        sessionId,
-        scopePath
+      let scopePath = ''
+      let scopeLabel = 'All cases/searches'
+      let mailboxKey = ''
+
+      if (scope === 'pst') {
+        const session = getSessionOrThrow(sessions, sessionId)
+        scopePath = session.scopePath
+        scopeLabel = session.scopeLabel || getScopeLabel(scopePath)
+        mailboxKey = session.filePath
+      } else if (scope === 'search') {
+        const catalog = resolveCatalogScopeSelection(pstRootDir, requestedScopePath)
+        scopePath = catalog.scopePath
+        scopeLabel = catalog.scopeLabel
+      }
+
+      const page = await searchIndexStore.search({
+        scope,
+        scopePath,
+        mailboxKey,
+        query: filters.query,
+        mode: filters.mode,
+        mailOnly: filters.mailOnly,
+        sort: filters.sort,
+        page: filters.page,
+        pageSize: filters.pageSize,
+        reviewFlaggedOnly: filters.reviewFlaggedOnly,
+        reviewTaggedOnly: filters.reviewTaggedOnly,
+        reviewTag: filters.reviewTag
       })
       responseJson(res, 200, {
         scope,
-        scopePath: page.scopePath,
-        scopeLabel: page.scopeLabel,
+        scopePath: page.scopePath || scopePath,
+        scopeLabel: page.scopeLabel || scopeLabel,
         page
       })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.post(API_ROUTES.searchIndexRefresh, async (_req, res) => {
+    try {
+      const summary = await refreshSearchIndexFromCatalog(pstRootDir, reviewStore, searchIndexStore)
+      responseJson(res, 200, {
+        summary,
+        hiddenRules: await searchIndexStore.listHiddenRules()
+      })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.searchFilters, async (_req, res) => {
+    try {
+      responseJson(res, 200, {
+        items: await searchIndexStore.listHiddenRules()
+      })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.post(API_ROUTES.searchFilters, async (req, res) => {
+    try {
+      const body = (req.body || {}) as HiddenRuleRequestBody
+      const kind = body.kind
+      const value = normalizeText(body.value)
+      if (kind !== 'address' && kind !== 'subject') {
+        throw createAppError(400, 'Filter kind must be address or subject')
+      }
+      if (!value) {
+        throw createAppError(400, 'Filter value is required')
+      }
+      const rule = await searchIndexStore.upsertHiddenRule({
+        kind,
+        value,
+        label: normalizeText(body.label || value)
+      })
+      responseJson(res, 200, { rule })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.delete(API_ROUTES.searchFilter, async (req, res) => {
+    try {
+      const filterId = normalizeText(req.params.filterId)
+      if (!filterId) {
+        throw createAppError(400, 'Filter id is required')
+      }
+      const deleted = await searchIndexStore.deleteHiddenRule(filterId)
+      responseJson(res, 200, { deleted })
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
@@ -1342,6 +1260,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         flagged: body.flagged,
         tags: body.tags
       })
+      await searchIndexStore.updateReviewState(session.filePath, messageId, review)
 
       responseJson(res, 200, {
         sessionId: session.id,
@@ -1358,6 +1277,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const messageId = normalizeText(req.params.messageId)
       await reviewStore.deleteReview(session.filePath, messageId)
+      await searchIndexStore.updateReviewState(session.filePath, messageId, null)
       responseJson(res, 200, {
         sessionId: session.id,
         messageId,

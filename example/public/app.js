@@ -2,6 +2,7 @@
   const STORAGE_KEYS = {
     casePath: 'pst-mail-explorer.casePath',
     scopePath: 'pst-mail-explorer.scopePath',
+    mailboxScopeView: 'pst-mail-explorer.mailboxScopeView',
     pstFileName: 'pst-mail-explorer.pstFileName',
     folderId: 'pst-mail-explorer.folderId',
     messageId: 'pst-mail-explorer.messageId',
@@ -22,7 +23,9 @@
     selectedCasePath: null,
     selectedScopePath: null,
     selectedScopeLabel: '',
+    mailboxScopeView: 'search',
     selectedPstFileName: null,
+    mailboxFilter: '',
     summary: null,
     tree: null,
     folderMap: new Map(),
@@ -33,6 +36,9 @@
     selectedMessageId: null,
     query: '',
     searchScope: 'pst',
+    activeSearch: null,
+    hiddenRules: [],
+    hiddenRulesLoaded: false,
     mailOnly: true,
     sort: 'date-desc',
     reviewFlaggedOnly: false,
@@ -95,6 +101,58 @@
     return parts.join('/')
   }
 
+  function localNormalizeMessageId(item) {
+    if (!item || typeof item !== 'object') {
+      return ''
+    }
+    return String(item.id || item.messageId || '').trim()
+  }
+
+  function localNormalizeSearchResultItem(item) {
+    if (!item || typeof item !== 'object') {
+      return item
+    }
+    const id = localNormalizeMessageId(item)
+    if (!id) {
+      return { ...item }
+    }
+    return {
+      ...item,
+      id,
+      messageId: String(item.messageId || item.id || id).trim()
+    }
+  }
+
+  function localNormalizeSearchResultsPage(page) {
+    if (!page || typeof page !== 'object') {
+      return page
+    }
+    const items = Array.isArray(page.items) ? page.items : []
+    return {
+      ...page,
+      items: items.map((item) => localNormalizeSearchResultItem(item))
+    }
+  }
+
+  const SEARCH_RESULT_HELPERS =
+    (typeof window !== 'undefined' && window.PstExplorerSearch) || {
+      normalizeMessageId: localNormalizeMessageId,
+      normalizeSearchResultItem: localNormalizeSearchResultItem,
+      normalizeSearchResultsPage: localNormalizeSearchResultsPage
+    }
+
+  function resolveMessageId(item) {
+    return SEARCH_RESULT_HELPERS.normalizeMessageId(item)
+  }
+
+  function normalizeSearchResultItem(item) {
+    return SEARCH_RESULT_HELPERS.normalizeSearchResultItem(item)
+  }
+
+  function normalizeSearchResultsPage(page) {
+    return SEARCH_RESULT_HELPERS.normalizeSearchResultsPage(page)
+  }
+
   function getCasePathFromScopePath(scopePath) {
     const normalized = normalizeScopePath(scopePath)
     if (!normalized) {
@@ -120,6 +178,123 @@
 
   function getScopeLabel(scopePath) {
     return scopePath ? String(scopePath).split('/').join(' / ') : 'PST root'
+  }
+
+  const ALL_PSTS_SCOPE_VALUE = '__all_psts__'
+
+  function isAllPstsScopeValue(value) {
+    return String(value || '') === ALL_PSTS_SCOPE_VALUE
+  }
+
+  function normalizeMailboxFilter(value) {
+    return String(value || '')
+      .trim()
+      .replace(/\s+/g, ' ')
+      .toLowerCase()
+  }
+
+  function deriveSearchMode(query) {
+    const text = String(query || '').trim()
+    if (!text) {
+      return 'and'
+    }
+
+    const pattern = /"([^"]+)"|(\S+)/g
+    let match = null
+    while ((match = pattern.exec(text))) {
+      const raw = String(match[1] || match[2] || '').trim()
+      if (!raw) {
+        continue
+      }
+
+      const token = raw.toLowerCase()
+      if (token === '|' || token.startsWith('|')) {
+        return 'or'
+      }
+      if (token === '+' || token.startsWith('+')) {
+        return 'and'
+      }
+    }
+
+    return 'and'
+  }
+
+  function normalizeHiddenRuleValue(value) {
+    return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase()
+  }
+
+  function extractEmailAddress(value) {
+    const match = String(value || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
+    return match ? match[0].trim().toLowerCase() : ''
+  }
+
+  function splitRecipientTokens(value) {
+    return String(value || '')
+      .split(';')
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+  }
+
+  function renderInlineHideButton(kind, value, label) {
+    const normalizedValue = normalizeHiddenRuleValue(value)
+    if (!normalizedValue) {
+      return ''
+    }
+
+    return `
+      <button
+        class="inline-filter-button"
+        type="button"
+        data-action="hide-${kind}"
+        data-filter-value="${escapeAttr(normalizedValue)}"
+        data-filter-label="${escapeAttr(label || value)}"
+      >
+        -
+      </button>
+    `
+  }
+
+  function normalizeHiddenRule(rule) {
+    if (!rule || typeof rule !== 'object') {
+      return null
+    }
+
+    return {
+      filterId: String(rule.filterId || rule.id || ''),
+      kind: String(rule.kind || ''),
+      value: normalizeHiddenRuleValue(rule.value),
+      label: String(rule.label || rule.value || ''),
+      createdAt: String(rule.createdAt || ''),
+      updatedAt: String(rule.updatedAt || '')
+    }
+  }
+
+  function isSearchResultView() {
+    return Boolean(state.currentSearchPage && state.activeSearch && hasSearchCriteria(state.activeSearch))
+  }
+
+  function hasSearchCriteria(criteria) {
+    if (!criteria) {
+      return false
+    }
+    return Boolean(String(criteria.query || '').trim())
+  }
+
+  function collectSearchDraft() {
+    const query = String(ui.searchInput.value || '').trim()
+    return {
+      query,
+      searchScope: ui.searchScopeSelect.value || 'pst',
+      mode: deriveSearchMode(query)
+    }
+  }
+
+  function syncSearchDraftToState() {
+    const draft = collectSearchDraft()
+    state.query = draft.query
+    state.searchScope = draft.searchScope
+    saveState()
+    return draft
   }
 
   function getCatalogScope(scopePath) {
@@ -168,6 +343,74 @@
           sensitivity: 'base'
         })
       )
+  }
+
+  function getMailboxEntriesForCase(casePath, viewMode = 'search') {
+    const normalizedCasePath = normalizeScopePath(casePath)
+    const searches = getSearchesForCase(normalizedCasePath)
+    const selectedScopePath = normalizeScopePath(state.selectedScopePath || '')
+    const entries = []
+
+    const appendScopeFiles = (scope) => {
+      for (const file of scope.files || []) {
+        entries.push({
+          ...file,
+          casePath: normalizedCasePath,
+          scopePath: scope.scopePath,
+          scopeLabel: scope.scopeLabel,
+          displayPath: scope.scopeLabel || scope.scopePath || ''
+        })
+      }
+    }
+
+    if (viewMode === 'all') {
+      for (const scope of searches) {
+        appendScopeFiles(scope)
+      }
+    } else {
+      const selectedScope =
+        searches.find((scope) => normalizeScopePath(scope.scopePath) === selectedScopePath) ||
+        searches[0] ||
+        null
+      if (selectedScope) {
+        appendScopeFiles(selectedScope)
+      }
+    }
+
+    entries.sort((left, right) => {
+      if (viewMode === 'all') {
+        const scopeCompare = String(left.displayPath || '').localeCompare(
+          String(right.displayPath || ''),
+          undefined,
+          { sensitivity: 'base' }
+        )
+        if (scopeCompare !== 0) {
+          return scopeCompare
+        }
+      }
+      return String(left.fileName || '').localeCompare(String(right.fileName || ''), undefined, {
+        sensitivity: 'base'
+      })
+    })
+
+    return entries
+  }
+
+  function mailboxMatchesFilter(entry, filterText) {
+    if (!filterText) {
+      return true
+    }
+
+    const haystack = normalizeMailboxFilter(
+      [entry.fileName, entry.displayPath, entry.scopePath].filter(Boolean).join(' ')
+    )
+    return haystack.includes(filterText)
+  }
+
+  function getMailboxEntriesForDisplay(casePath, viewMode = 'search') {
+    const entries = getMailboxEntriesForCase(casePath, viewMode)
+    const filterText = normalizeMailboxFilter(state.mailboxFilter)
+    return filterText ? entries.filter((entry) => mailboxMatchesFilter(entry, filterText)) : entries
   }
 
   function formatDate(value) {
@@ -315,19 +558,19 @@
           <button class="ghost-button small" type="button" data-action="clear-review">
             Clear
           </button>
+          <form class="review-tag-form review-tag-form-inline" data-action="add-review-tag">
+            <input
+              class="review-tag-input"
+              data-review-tag-input
+              type="text"
+              maxlength="48"
+              placeholder="Add tag"
+              autocomplete="off"
+            />
+            <button class="ghost-button small" type="submit">Add</button>
+          </form>
         </div>
         <div class="review-tags">${tagChips}</div>
-        <form class="review-tag-form" data-action="add-review-tag">
-          <input
-            class="review-tag-input"
-            data-review-tag-input
-            type="text"
-            maxlength="48"
-            placeholder="Add tag"
-            autocomplete="off"
-          />
-          <button class="ghost-button small" type="submit">Add</button>
-        </form>
       </section>
     `
   }
@@ -348,7 +591,7 @@
       state.currentFolderPage = {
         ...state.currentFolderPage,
         items: state.currentFolderPage.items.map((item) =>
-          item.id === messageId
+          resolveMessageId(item) === messageId
             ? {
                 ...item,
                 review: normalized
@@ -362,7 +605,7 @@
       state.currentSearchPage = {
         ...state.currentSearchPage,
         items: state.currentSearchPage.items.map((item) =>
-          item.id === messageId
+          resolveMessageId(item) === messageId
             ? {
                 ...item,
                 review: normalized
@@ -449,6 +692,52 @@
     })
   }
 
+  async function addHiddenRule(kind, value, label) {
+    const normalizedValue = normalizeHiddenRuleValue(value)
+    if (!normalizedValue) {
+      return
+    }
+
+    await fetchJson('/api/search/filters', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        kind,
+        value: normalizedValue,
+        label: label || normalizedValue
+      })
+    })
+    await loadHiddenFilters()
+    if (isSearchResultView()) {
+      await executeSearch(1, { selectPreferred: true })
+    }
+  }
+
+  async function removeHiddenRule(filterId) {
+    const normalizedId = String(filterId || '').trim()
+    if (!normalizedId) {
+      return
+    }
+
+    await fetchJson(`/api/search/filters/${encodeURIComponent(normalizedId)}`, {
+      method: 'DELETE'
+    })
+    await loadHiddenFilters()
+    if (isSearchResultView()) {
+      await executeSearch(1, { selectPreferred: true })
+    }
+  }
+
+  async function refreshSearchIndex() {
+    const response = await fetchJson('/api/search/index/refresh', {
+      method: 'POST'
+    })
+    await loadHiddenFilters()
+    return response
+  }
+
   function makeApiPath(...parts) {
     return parts
       .map((part) => encodeURIComponent(String(part)))
@@ -515,6 +804,7 @@
       state.reviewTaggedOnly ? '1' : '0'
     )
     localStorage.setItem(STORAGE_KEYS.searchScope, state.searchScope)
+    localStorage.setItem(STORAGE_KEYS.mailboxScopeView, state.mailboxScopeView)
   }
 
   function applyStateToControls() {
@@ -524,6 +814,8 @@
     ui.reviewFlaggedToggle.checked = state.reviewFlaggedOnly
     ui.reviewTaggedToggle.checked = state.reviewTaggedOnly
     ui.searchScopeSelect.value = state.searchScope
+    ui.scopeSelect.value = state.mailboxScopeView === 'all' ? ALL_PSTS_SCOPE_VALUE : state.selectedScopePath || ''
+    ui.pstFilter.value = state.mailboxFilter
   }
 
   function resetSessionState(message = 'Select a PST file from the list on the left.') {
@@ -536,6 +828,7 @@
     state.currentSearchPage = null
     state.currentMessageDetail = null
     state.selectedMessageId = null
+    state.activeSearch = null
     ui.folderTree.innerHTML = '<div class="panel-empty tree-empty">No mailbox loaded.</div>'
     ui.messageList.innerHTML =
       '<div class="panel-empty">Select a folder to begin.</div>'
@@ -624,8 +917,68 @@
     `
   }
 
+  function renderHiddenFiltersPanel() {
+    if (!ui.hiddenFiltersPanel) {
+      return
+    }
+
+    const rules = (Array.isArray(state.hiddenRules) ? state.hiddenRules : [])
+      .map(normalizeHiddenRule)
+      .filter(Boolean)
+
+    if (!rules.length) {
+      ui.hiddenFiltersPanel.innerHTML = `
+        <div class="panel-empty compact-note">
+          Hidden filters will appear here. Click <strong>-</strong> on an address or subject to
+          hide it globally.
+        </div>
+      `
+      return
+    }
+
+    ui.hiddenFiltersPanel.innerHTML = `
+      <div class="hidden-filters-head">
+        <div class="hidden-filters-title">Hidden filters</div>
+        <span class="badge">${escapeHtml(String(rules.length))}</span>
+      </div>
+      <div class="hidden-filters-list">
+        ${rules
+          .map(
+            (rule) => `
+              <div class="hidden-filter-chip">
+                <span class="hidden-filter-kind">${escapeHtml(rule.kind || 'filter')}</span>
+                <span class="hidden-filter-value">${escapeHtml(rule.label || rule.value)}</span>
+                <button
+                  class="ghost-button small hidden-filter-toggle"
+                  type="button"
+                  data-action="remove-hidden-filter"
+                  data-filter-id="${escapeAttr(rule.filterId)}"
+                >
+                  +
+                </button>
+              </div>
+            `
+          )
+          .join('')}
+      </div>
+    `
+  }
+
+  async function loadHiddenFilters() {
+    try {
+      const response = await fetchJson('/api/search/filters')
+      state.hiddenRules = Array.isArray(response.items) ? response.items : []
+      state.hiddenRulesLoaded = true
+      renderHiddenFiltersPanel()
+    } catch (error) {
+      state.hiddenRulesLoaded = true
+      state.hiddenRules = []
+      renderHiddenFiltersPanel()
+      setStatus(`Unable to load hidden filters: ${error.message}`, 'error')
+    }
+  }
+
   function renderPstCatalog() {
-    const files = Array.isArray(state.catalog) ? state.catalog : []
     const cases = getCatalogCases()
     const selectedCase =
       cases.find((entry) => normalizeScopePath(entry.casePath) === normalizeScopePath(state.selectedCasePath)) ||
@@ -641,7 +994,24 @@
     state.selectedScopePath = selectedSearch ? selectedSearch.scopePath : ''
     state.selectedScopeLabel = selectedSearch ? selectedSearch.scopeLabel : getScopeLabel(state.selectedScopePath)
 
-    ui.scopeCountBadge.textContent = String(searches.length)
+    const allMailboxCount = selectedCase
+      ? getMailboxEntriesForCase(selectedCase.casePath, 'all').length
+      : 0
+    const visibleMailboxes = selectedCase
+      ? getMailboxEntriesForDisplay(selectedCase.casePath, state.mailboxScopeView)
+      : []
+    const selectedMailboxVisible = visibleMailboxes.some(
+      (entry) =>
+        entry.fileName === state.selectedPstFileName &&
+        normalizeScopePath(entry.scopePath) === normalizeScopePath(state.selectedScopePath)
+    )
+
+    if (state.mailboxFilter && state.selectedPstFileName && !selectedMailboxVisible) {
+      state.selectedPstFileName = null
+      saveState()
+    }
+
+    ui.scopeCountBadge.textContent = String(searches.length + (searches.length ? 1 : 0))
     ui.caseSelect.innerHTML = cases.length
       ? cases
           .map((entry) => {
@@ -655,21 +1025,24 @@
           .join('')
       : '<option value="">No cases found</option>'
 
-    ui.caseNameLabel.textContent = `Current case: ${selectedCase ? selectedCase.caseLabel : 'PST root'}`
     ui.scopeSelect.innerHTML = searches.length
-      ? searches
-          .map((entry) => {
+      ? [
+          `<option value="${escapeAttr(ALL_PSTS_SCOPE_VALUE)}"${
+            state.mailboxScopeView === 'all' ? ' selected' : ''
+          }>All PSTs (${escapeHtml(String(allMailboxCount))})</option>`,
+          ...searches.map((entry) => {
             const isSelected =
+              state.mailboxScopeView !== 'all' &&
               normalizeScopePath(entry.scopePath) === normalizeScopePath(state.selectedScopePath)
             const label = `${getSearchLabel(entry.scopePath)} (${entry.fileCount})`
             return `<option value="${escapeAttr(entry.scopePath)}"${
               isSelected ? ' selected' : ''
             }>${escapeHtml(label)}</option>`
           })
-          .join('')
+        ].join('')
       : '<option value="">No searches available</option>'
 
-    ui.pstCountBadge.textContent = String(files.length)
+    ui.pstCountBadge.textContent = String(visibleMailboxes.length)
 
     if (!state.catalogLoaded) {
       ui.pstEmpty.classList.remove('hidden')
@@ -686,26 +1059,42 @@
       return
     }
 
-    if (!files.length) {
+    if (!visibleMailboxes.length) {
       ui.pstEmpty.classList.remove('hidden')
-      ui.pstEmpty.innerHTML = escapeHtml(state.catalogMessage || 'No PST files found.')
+      ui.pstEmpty.innerHTML = escapeHtml(
+        state.mailboxFilter
+          ? 'No PST files match the current mailbox filter.'
+          : state.mailboxScopeView === 'all'
+            ? 'No PST files were found for this case.'
+            : state.catalogMessage || 'No PST files found.'
+      )
       ui.pstList.innerHTML = ''
       return
     }
 
     ui.pstEmpty.classList.add('hidden')
-    ui.pstList.innerHTML = files
+    ui.pstList.innerHTML = visibleMailboxes
       .map((file) => {
-        const isActive = file.fileName === state.selectedPstFileName ? ' active' : ''
+        const isActive =
+          file.fileName === state.selectedPstFileName &&
+          normalizeScopePath(file.scopePath) === normalizeScopePath(state.selectedScopePath)
+            ? ' active'
+            : ''
         const modifiedAt = file.modifiedAt ? formatDate(file.modifiedAt) : 'Unknown date'
         const size = Number.isFinite(file.size) ? formatBytes(file.size) : 'Unknown size'
+        const pathLine =
+          state.mailboxScopeView === 'all' && file.displayPath
+            ? `<span class="pst-item-path">${escapeHtml(file.displayPath)}</span>`
+            : ''
         return `
           <button
             class="pst-item${isActive}"
             data-pst-file-name="${escapeAttr(file.fileName)}"
+            data-scope-path="${escapeAttr(file.scopePath || '')}"
             title="${escapeAttr(file.fileName)}"
           >
             <span class="pst-item-name">${escapeHtml(file.fileName)}</span>
+            ${pathLine}
             <span class="pst-item-meta">${escapeHtml(size)} · ${escapeHtml(modifiedAt)}</span>
           </button>
         `
@@ -784,11 +1173,16 @@
   }
 
   function renderMessageRow(item) {
-    const isActive = item.id === state.selectedMessageId ? ' active' : ''
+    const messageId = resolveMessageId(item)
+    const isActive = messageId && messageId === state.selectedMessageId ? ' active' : ''
     const isSearchResult = item.scopeLabel ? ' search-result-row' : ''
     const sender = item.senderName || item.senderEmailAddress || '(unknown sender)'
     const time = item.sortDate || item.creationTime || item.clientSubmitTime
     const review = normalizeReviewState(item.review)
+    const subjectHide = renderInlineHideButton('subject', item.subject, item.subject)
+    const senderHide = item.senderEmailAddress
+      ? renderInlineHideButton('address', item.senderEmailAddress, item.senderEmailAddress)
+      : ''
     const chips = [
       `<span class="chip ${item.kind === 'mail' ? 'green' : 'accent'}">${escapeHtml(
         item.kind || 'other'
@@ -820,24 +1214,32 @@
         : ''
 
     return `
-      <button
+      <article
         class="message-row${isActive}${isSearchResult}"
-        data-message-id="${escapeAttr(item.id)}"
+        tabindex="0"
+        role="button"
+        data-message-id="${escapeAttr(messageId)}"
         ${item.scopePath ? `data-scope-path="${escapeAttr(item.scopePath)}"` : ''}
         ${item.fileName ? `data-file-name="${escapeAttr(item.fileName)}"` : ''}
         ${item.folderId ? `data-folder-id="${escapeAttr(item.folderId)}"` : ''}
       >
         <div class="message-row-top">
-          <div class="message-subject">${escapeHtml(item.subject || '(no subject)')}</div>
+          <div class="message-subject">
+            <span class="message-subject-text">${escapeHtml(item.subject || '(no subject)')}</span>
+            ${subjectHide}
+          </div>
           <div class="message-date">${escapeHtml(formatDate(time))}</div>
         </div>
-        <div class="message-sender">${escapeHtml(sender)}</div>
+        <div class="message-sender">
+          <span class="message-sender-text">${escapeHtml(sender)}</span>
+          ${senderHide}
+        </div>
         ${contextLine}
         <div class="message-row-meta">
           ${chips}
           <span>${escapeHtml(item.recipientText || item.displayTo || 'No recipients')}</span>
         </div>
-      </button>
+      </article>
     `
   }
 
@@ -857,7 +1259,7 @@
 
     const items = page ? page.items || [] : []
     const currentIndex = state.selectedMessageId
-      ? items.findIndex((item) => item.id === state.selectedMessageId)
+      ? items.findIndex((item) => resolveMessageId(item) === state.selectedMessageId)
       : -1
     ui.messagePrev.disabled =
       !hasPage || (currentIndex <= 0 && page.page <= 1)
@@ -1006,6 +1408,26 @@
     `
   }
 
+  function renderRecipientTokens(value, allowHide = false) {
+    const tokens = splitRecipientTokens(value)
+    if (!tokens.length) {
+      return ''
+    }
+
+    return tokens
+      .map((token) => {
+        const email = extractEmailAddress(token)
+        const hideButton = allowHide && email ? renderInlineHideButton('address', email, email) : ''
+        return `
+          <span class="recipient-chip">
+            <span class="recipient-chip-text">${escapeHtml(token)}</span>
+            ${hideButton}
+          </span>
+        `
+      })
+      .join('')
+  }
+
   function renderDetailCard(detail) {
     if (!detail) {
       return '<div class="panel-empty">Select a message to inspect it.</div>'
@@ -1020,6 +1442,7 @@
         </button>
       </div>
     `
+    const subjectHide = renderInlineHideButton('subject', detail.subject, detail.subject)
 
     const bodySection = renderBodySection({
       ...detail,
@@ -1032,20 +1455,16 @@
       detail.senderEmailAddress && detail.senderEmailAddress !== senderName
         ? detail.senderEmailAddress
         : ''
-    const recipientLines = [
-      detail.resolvedDisplayTo || detail.displayTo ? `To ${detail.resolvedDisplayTo || detail.displayTo}` : '',
-      detail.resolvedDisplayCC || detail.displayCC ? `Cc ${detail.resolvedDisplayCC || detail.displayCC}` : '',
-      detail.resolvedDisplayBCC || detail.displayBCC ? `Bcc ${detail.resolvedDisplayBCC || detail.displayBCC}` : ''
-    ]
-      .filter(Boolean)
-      .join(' · ')
     const sentTime = formatDate(detail.sortDate || detail.clientSubmitTime || detail.creationTime)
     const reviewPanel = renderReviewPanel(detail)
 
     return `
       <article class="detail-card" data-message-id="${escapeAttr(detail.id)}">
         <header class="outlook-header">
-          <h3 class="detail-title">${escapeHtml(detail.subject || '(no subject)')}</h3>
+          <h3 class="detail-title">
+            <span class="detail-title-text">${escapeHtml(detail.subject || '(no subject)')}</span>
+            ${subjectHide}
+          </h3>
           ${actions}
         </header>
 
@@ -1061,12 +1480,50 @@
             <div class="sender-line">
               <span class="sender-name">${escapeHtml(senderName)}</span>
               ${
-                senderEmail
-                  ? `<span class="sender-address">&lt;${escapeHtml(senderEmail)}&gt;</span>`
+              senderEmail
+                  ? `<span class="sender-address">&lt;${escapeHtml(senderEmail)}&gt;${renderInlineHideButton('address', senderEmail, senderEmail)}</span>`
                   : ''
               }
             </div>
-            ${recipientLines ? `<div class="recipient-line">${escapeHtml(recipientLines)}</div>` : ''}
+            ${
+              detail.resolvedDisplayTo || detail.displayTo
+                ? `
+                  <div class="recipient-line">
+                    <span class="recipient-label">To</span>
+                    <span class="recipient-values">${renderRecipientTokens(
+                      detail.resolvedDisplayTo || detail.displayTo,
+                      true
+                    )}</span>
+                  </div>
+                `
+                : ''
+            }
+            ${
+              detail.resolvedDisplayCC || detail.displayCC
+                ? `
+                  <div class="recipient-line">
+                    <span class="recipient-label">Cc</span>
+                    <span class="recipient-values">${renderRecipientTokens(
+                      detail.resolvedDisplayCC || detail.displayCC,
+                      true
+                    )}</span>
+                  </div>
+                `
+                : ''
+            }
+            ${
+              detail.resolvedDisplayBCC || detail.displayBCC
+                ? `
+                  <div class="recipient-line">
+                    <span class="recipient-label">Bcc</span>
+                    <span class="recipient-values">${renderRecipientTokens(
+                      detail.resolvedDisplayBCC || detail.displayBCC,
+                      true
+                    )}</span>
+                  </div>
+                `
+                : ''
+            }
           </div>
           <div class="sent-time">${escapeHtml(sentTime)}</div>
         </section>
@@ -1229,10 +1686,25 @@
         state.selectedPstFileName ||
         localStorage.getItem(STORAGE_KEYS.pstFileName) ||
         ''
+      const preferredScopePath = normalizeScopePath(
+        options.preferredScopePath ||
+          state.selectedScopePath ||
+          localStorage.getItem(STORAGE_KEYS.scopePath) ||
+          ''
+      )
+      const mailboxEntries = getMailboxEntriesForCase(
+        state.selectedCasePath || casePath || getCasePathFromScopePath(response.scopePath),
+        state.mailboxScopeView
+      )
       const preferred = preferredFileName
-        ? state.catalog.find((item) => item.fileName === preferredFileName)
+        ? mailboxEntries.find(
+            (item) =>
+              item.fileName === preferredFileName &&
+              normalizeScopePath(item.scopePath) === preferredScopePath
+          ) ||
+          mailboxEntries.find((item) => item.fileName === preferredFileName)
         : null
-      const nextMailbox = preferred || state.catalog[0] || null
+      const nextMailbox = preferred || mailboxEntries[0] || null
 
       if (!nextMailbox) {
         renderPstCatalog()
@@ -1249,7 +1721,7 @@
 
       await openMailbox(nextMailbox.fileName, {
         showBusy: false,
-        scopePath: state.selectedScopePath || scopePath || '',
+        scopePath: nextMailbox.scopePath || state.selectedScopePath || scopePath || '',
         restoreFolderId: localStorage.getItem(STORAGE_KEYS.folderId) || undefined,
         restoreMessageId: localStorage.getItem(STORAGE_KEYS.messageId) || undefined
       })
@@ -1292,8 +1764,8 @@
     if (state.reviewTaggedOnly) {
       params.set('reviewTagged', '1')
     }
-    if (state.query.trim()) {
-      params.set('q', state.query.trim())
+    if (options.query) {
+      params.set('q', String(options.query).trim())
     }
 
     setStatus(`Loading messages for ${getFolderById(folderId)?.displayName || 'folder'}...`)
@@ -1348,19 +1820,21 @@
   }
 
   async function loadSearchResults(page = 1, options = {}) {
-    const query = state.query.trim()
-    if (!query) {
+    const criteria = options.criteria || state.activeSearch
+    if (!criteria || !hasSearchCriteria(criteria)) {
+      state.activeSearch = null
       state.currentSearchPage = null
       return loadFolderPage(page, options)
     }
 
-    const scope = state.searchScope || 'pst'
+    const scope = criteria.searchScope || state.searchScope || 'pst'
     if (scope === 'pst' && !state.sessionId) {
       return
     }
     const params = new URLSearchParams()
     params.set('scope', scope)
-    params.set('query', query)
+    params.set('query', String(criteria.query || '').trim())
+    params.set('mode', criteria.mode || deriveSearchMode(criteria.query))
     params.set('page', String(page))
     params.set('pageSize', String(state.pageSize))
     params.set('mailOnly', state.mailOnly ? '1' : '0')
@@ -1371,8 +1845,13 @@
     if (state.reviewTaggedOnly) {
       params.set('reviewTagged', '1')
     }
-    if (state.selectedScopePath) {
-      params.set('scopePath', state.selectedScopePath)
+    const searchScopePath = String(
+      scope === 'search'
+        ? criteria.scopePath || state.selectedScopePath || ''
+        : criteria.scopePath || ''
+    ).trim()
+    if (searchScopePath) {
+      params.set('scopePath', searchScopePath)
     }
     if (scope === 'pst' && state.sessionId) {
       params.set('sessionId', state.sessionId)
@@ -1383,32 +1862,47 @@
         scope === 'all'
           ? 'all cases/searches'
           : scope === 'search'
-            ? state.selectedScopeLabel || 'selected search'
+            ? getScopeLabel(criteria.scopePath || state.selectedScopePath || '') || state.selectedScopeLabel || 'selected search'
             : 'selected PST'
       }...`
     )
     try {
       const response = await fetchJson(`/api/search?${params.toString()}`)
+      const normalizedPage = normalizeSearchResultsPage(response.page)
       state.currentFolderPage = null
-      state.currentSearchPage = response.page
+      state.currentSearchPage = normalizedPage
+      state.hiddenRules = Array.isArray(response.page?.hiddenRules)
+        ? response.page.hiddenRules
+        : state.hiddenRules
+      state.hiddenRulesLoaded = true
+      state.activeSearch = {
+        query: String(response.page?.query || criteria.query || '').trim(),
+        searchScope: scope,
+        scopePath:
+          scope === 'search'
+            ? String(response.page?.scopePath || criteria.scopePath || state.selectedScopePath || '').trim()
+            : String(criteria.scopePath || '').trim(),
+        mode: String(response.page?.mode || criteria.mode || deriveSearchMode(criteria.query) || 'and')
+      }
+      renderHiddenFiltersPanel()
       renderMessageList()
 
-      const pageItems = response.page?.items || []
+      const pageItems = normalizedPage?.items || []
       const preferredMessageId =
         options.preferredMessageId || localStorage.getItem(STORAGE_KEYS.messageId) || null
       const preferredVisible = preferredMessageId
-        ? pageItems.find((item) => item.id === preferredMessageId)
+        ? pageItems.find((item) => resolveMessageId(item) === preferredMessageId)
         : null
 
       if (scope === 'pst' && preferredVisible) {
-        await selectMessage(preferredVisible.id, { refresh: true })
+        await selectMessage(resolveMessageId(preferredVisible), { refresh: true })
       } else if (
         scope === 'pst' &&
         options.selectPreferred !== false &&
         pageItems.length &&
         pageItems[0].fileName === state.selectedPstFileName
       ) {
-        await selectMessage(pageItems[0].id, { refresh: true })
+        await selectMessage(resolveMessageId(pageItems[0]), { refresh: true })
       } else {
         state.selectedMessageId = null
         state.currentMessageDetail = null
@@ -1434,10 +1928,32 @@
   }
 
   async function loadVisibleMessages(page = 1, options = {}) {
-    if (state.query.trim()) {
+    if (state.currentSearchPage && state.activeSearch && hasSearchCriteria(state.activeSearch)) {
       return loadSearchResults(page, options)
     }
     return loadFolderPage(page, options)
+  }
+
+  async function executeSearch(page = 1, options = {}) {
+    const draft = syncSearchDraftToState()
+    const criteria = {
+      query: draft.query,
+      searchScope: draft.searchScope,
+      scopePath: draft.searchScope === 'search' ? state.selectedScopePath || '' : '',
+      mode: draft.mode
+    }
+
+    if (!hasSearchCriteria(criteria)) {
+      state.activeSearch = null
+      state.currentSearchPage = null
+      await loadFolderPage(page, options)
+      return
+    }
+
+    await loadSearchResults(page, {
+      ...options,
+      criteria
+    })
   }
 
   async function selectMessage(messageId, options = {}) {
@@ -1511,11 +2027,11 @@
     }
 
     const items = page.items || []
-    const index = items.findIndex((item) => item.id === state.selectedMessageId)
+    const index = items.findIndex((item) => resolveMessageId(item) === state.selectedMessageId)
     if (index >= 0) {
       const targetIndex = index + delta
       if (targetIndex >= 0 && targetIndex < items.length) {
-        await selectMessage(items[targetIndex].id, { refresh: true })
+        await selectMessage(resolveMessageId(items[targetIndex]), { refresh: true })
         return
       }
     }
@@ -1529,7 +2045,8 @@
   }
 
   async function openSearchResult(item) {
-    if (!item || !item.fileName || !item.id) {
+    const messageId = resolveMessageId(item)
+    if (!item || !item.fileName || !messageId) {
       return
     }
 
@@ -1541,8 +2058,7 @@
       targetScopePath === currentScopePath
 
     if (isCurrentMailbox) {
-      state.currentSearchPage = null
-      await selectMessage(item.id, { refresh: true })
+      await selectMessage(messageId, { refresh: true })
       return
     }
 
@@ -1550,9 +2066,9 @@
       showBusy: true,
       scopePath: targetScopePath,
       restoreFolderId: item.folderId,
-      restoreMessageId: item.id
+      restoreMessageId: messageId
     })
-    await selectMessage(item.id, { refresh: true })
+    await selectMessage(messageId, { refresh: true })
   }
 
   async function chooseFolder(folderId) {
@@ -1578,12 +2094,20 @@
 
   function wireEvents() {
     ui.refreshCatalog.addEventListener('click', () => {
-      void loadMailboxCatalog({
-        showBusy: true,
-        casePath: state.selectedCasePath || undefined,
-        scopePath: state.selectedScopePath || undefined,
-        preferredFileName: state.selectedPstFileName || undefined
-      })
+      void (async () => {
+        setStatus('Refreshing mailbox catalog and search cache...')
+        try {
+          await refreshSearchIndex()
+        } catch (error) {
+          setStatus(`Unable to refresh search cache: ${error.message}`, 'error')
+        }
+        await loadMailboxCatalog({
+          showBusy: true,
+          casePath: state.selectedCasePath || undefined,
+          scopePath: state.selectedScopePath || undefined,
+          preferredFileName: state.selectedPstFileName || undefined
+        })
+      })()
     })
 
     ui.caseSelect.addEventListener('change', () => {
@@ -1597,31 +2121,36 @@
         showBusy: true,
         casePath: state.selectedCasePath || undefined,
         scopePath: state.selectedScopePath || undefined,
-        preferredFileName: state.selectedPstFileName || undefined
+        preferredFileName: state.selectedPstFileName || undefined,
+        preferredScopePath: state.selectedScopePath || undefined
       })
     })
 
     ui.scopeSelect.addEventListener('change', () => {
-      const nextScopePath = normalizeScopePath(ui.scopeSelect.value)
-      const nextScope = getCatalogScope(nextScopePath)
-      state.selectedScopePath = nextScopePath
-      state.selectedCasePath = getCasePathFromScopePath(nextScopePath)
-      state.selectedScopeLabel = nextScope ? nextScope.scopeLabel : getScopeLabel(nextScopePath)
+      const nextScopeValue = String(ui.scopeSelect.value || '')
+      if (isAllPstsScopeValue(nextScopeValue)) {
+        state.mailboxScopeView = 'all'
+      } else {
+        const nextScopePath = normalizeScopePath(nextScopeValue)
+        const nextScope = getCatalogScope(nextScopePath)
+        state.mailboxScopeView = 'search'
+        state.selectedScopePath = nextScopePath
+        state.selectedCasePath = getCasePathFromScopePath(nextScopePath)
+        state.selectedScopeLabel = nextScope ? nextScope.scopeLabel : getScopeLabel(nextScopePath)
+      }
       saveState()
       void loadMailboxCatalog({
         showBusy: true,
         casePath: state.selectedCasePath || undefined,
         scopePath: state.selectedScopePath || undefined,
-        preferredFileName: state.selectedPstFileName || undefined
+        preferredFileName: state.selectedPstFileName || undefined,
+        preferredScopePath: state.selectedScopePath || undefined
       })
     })
 
     ui.searchScopeSelect.addEventListener('change', () => {
       state.searchScope = ui.searchScopeSelect.value || 'pst'
       saveState()
-      if (state.query.trim()) {
-        void loadVisibleMessages(1, { selectPreferred: true })
-      }
     })
 
     ui.pstList.addEventListener('click', (event) => {
@@ -1630,10 +2159,11 @@
         return
       }
       const fileName = button.dataset.pstFileName
+      const scopePath = normalizeScopePath(button.dataset.scopePath || '')
       if (!fileName) {
         return
       }
-      void openMailbox(fileName, { showBusy: true })
+      void openMailbox(fileName, { showBusy: true, scopePath })
     })
 
     ui.folderTree.addEventListener('click', (event) => {
@@ -1645,6 +2175,17 @@
     })
 
     ui.messageList.addEventListener('click', (event) => {
+      const actionButton = event.target.closest('[data-action]')
+      if (actionButton && actionButton.dataset.action) {
+        const action = actionButton.dataset.action
+        if (action === 'hide-subject') {
+          void addHiddenRule('subject', actionButton.dataset.filterValue || '', actionButton.dataset.filterLabel || '')
+        } else if (action === 'hide-address') {
+          void addHiddenRule('address', actionButton.dataset.filterValue || '', actionButton.dataset.filterLabel || '')
+        }
+        return
+      }
+
       const button = event.target.closest('[data-message-id]')
       if (!button) {
         return
@@ -1652,6 +2193,7 @@
       if (button.dataset.fileName && button.dataset.scopePath) {
         void openSearchResult({
           id: button.dataset.messageId,
+          messageId: button.dataset.messageId,
           fileName: button.dataset.fileName,
           scopePath: button.dataset.scopePath,
           folderId: button.dataset.folderId || '',
@@ -1662,6 +2204,29 @@
       void selectMessage(button.dataset.messageId, { refresh: true })
     })
 
+    ui.messageList.addEventListener('keydown', (event) => {
+      const row = event.target.closest('[data-message-id]')
+      if (!row) {
+        return
+      }
+      if (event.key !== 'Enter' && event.key !== ' ') {
+        return
+      }
+      event.preventDefault()
+      if (row.dataset.fileName && row.dataset.scopePath) {
+        void openSearchResult({
+          id: row.dataset.messageId,
+          messageId: row.dataset.messageId,
+          fileName: row.dataset.fileName,
+          scopePath: row.dataset.scopePath,
+          folderId: row.dataset.folderId || '',
+          displayName: ''
+        })
+        return
+      }
+      void selectMessage(row.dataset.messageId, { refresh: true })
+    })
+
     ui.messageDetail.addEventListener('click', (event) => {
       const actionButton = event.target.closest('[data-action]')
       if (!actionButton) {
@@ -1669,7 +2234,11 @@
       }
 
       const action = actionButton.dataset.action
-      if (action === 'download-json') {
+      if (action === 'hide-subject') {
+        void addHiddenRule('subject', actionButton.dataset.filterValue || '', actionButton.dataset.filterLabel || '')
+      } else if (action === 'hide-address') {
+        void addHiddenRule('address', actionButton.dataset.filterValue || '', actionButton.dataset.filterLabel || '')
+      } else if (action === 'download-json') {
         void downloadCurrentMessage('json')
       } else if (action === 'download-eml') {
         void downloadCurrentMessage('eml')
@@ -1694,21 +2263,42 @@
       void addReviewTag(value)
     })
 
+    ui.hiddenFiltersPanel.addEventListener('click', (event) => {
+      const actionButton = event.target.closest('[data-action="remove-hidden-filter"]')
+      if (!actionButton) {
+        return
+      }
+      void removeHiddenRule(actionButton.dataset.filterId || '')
+    })
+
     ui.searchInput.addEventListener(
       'input',
       debounce(() => {
-        state.query = ui.searchInput.value.trim()
+        state.query = ui.searchInput.value
         saveState()
-        if (state.sessionId && (state.currentFolderId || state.query.trim())) {
-          void loadVisibleMessages(1, { selectPreferred: true })
-        }
-      }, 250)
+      }, 50)
     )
+
+    ui.searchInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault()
+        void executeSearch(1, { selectPreferred: true })
+      }
+    })
+
+    ui.pstFilter.addEventListener('input', () => {
+      state.mailboxFilter = ui.pstFilter.value
+      renderPstCatalog()
+    })
+
+    ui.searchButton.addEventListener('click', () => {
+      void executeSearch(1, { selectPreferred: true })
+    })
 
     ui.mailOnlyToggle.addEventListener('change', () => {
       state.mailOnly = ui.mailOnlyToggle.checked
       saveState()
-      if (state.sessionId && (state.currentFolderId || state.query.trim())) {
+      if (state.sessionId && (state.currentFolderId || state.currentSearchPage)) {
         void loadVisibleMessages(1, { selectPreferred: true })
       }
     })
@@ -1716,7 +2306,7 @@
     ui.reviewFlaggedToggle.addEventListener('change', () => {
       state.reviewFlaggedOnly = ui.reviewFlaggedToggle.checked
       saveState()
-      if (state.sessionId && (state.currentFolderId || state.query.trim())) {
+      if (state.sessionId && (state.currentFolderId || state.currentSearchPage)) {
         void loadVisibleMessages(1, { selectPreferred: true })
       }
     })
@@ -1724,7 +2314,7 @@
     ui.reviewTaggedToggle.addEventListener('change', () => {
       state.reviewTaggedOnly = ui.reviewTaggedToggle.checked
       saveState()
-      if (state.sessionId && (state.currentFolderId || state.query.trim())) {
+      if (state.sessionId && (state.currentFolderId || state.currentSearchPage)) {
         void loadVisibleMessages(1, { selectPreferred: true })
       }
     })
@@ -1732,7 +2322,7 @@
     ui.sortSelect.addEventListener('change', () => {
       state.sort = ui.sortSelect.value
       saveState()
-      if (state.sessionId && (state.currentFolderId || state.query.trim())) {
+      if (state.sessionId && (state.currentFolderId || state.currentSearchPage)) {
         void loadVisibleMessages(1, { selectPreferred: true })
       }
     })
@@ -1775,10 +2365,12 @@
     ui.messageCountBadge = getElement('message-count-badge')
     ui.scopeCountBadge = getElement('scope-count-badge')
     ui.caseSelect = getElement('case-select')
-    ui.caseNameLabel = getElement('case-name-label')
     ui.scopeSelect = getElement('scope-select')
+    ui.pstFilter = getElement('pst-filter')
     ui.searchInput = getElement('message-search')
+    ui.searchButton = getElement('search-button')
     ui.searchScopeSelect = getElement('search-scope-select')
+    ui.hiddenFiltersPanel = getElement('hidden-filters-panel')
     ui.mailOnlyToggle = getElement('mail-only-toggle')
     ui.reviewFlaggedToggle = getElement('review-flagged-toggle')
     ui.reviewTaggedToggle = getElement('review-tagged-toggle')
@@ -1799,6 +2391,8 @@
     )
       ? localStorage.getItem(STORAGE_KEYS.searchScope) || 'pst'
       : 'pst'
+    state.mailboxScopeView =
+      localStorage.getItem(STORAGE_KEYS.mailboxScopeView) === 'all' ? 'all' : 'search'
     state.selectedCasePath = normalizeScopePath(localStorage.getItem(STORAGE_KEYS.casePath) || '')
     state.selectedScopePath = normalizeScopePath(localStorage.getItem(STORAGE_KEYS.scopePath) || '')
     state.selectedScopeLabel = getScopeLabel(state.selectedScopePath)
@@ -1807,6 +2401,7 @@
     state.reviewFlaggedOnly = readStorageBool(STORAGE_KEYS.reviewFlaggedOnly, false)
     state.reviewTaggedOnly = readStorageBool(STORAGE_KEYS.reviewTaggedOnly, false)
     state.selectedPstFileName = localStorage.getItem(STORAGE_KEYS.pstFileName) || null
+    state.mailboxFilter = ''
     refreshControls()
     wireEvents()
     renderPstCatalog()
@@ -1816,6 +2411,7 @@
       scopePath: state.selectedScopePath || undefined,
       preferredFileName: state.selectedPstFileName || undefined
     })
+    await loadHiddenFilters()
   }
 
   bootstrap().catch((error) => {

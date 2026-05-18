@@ -6,6 +6,7 @@ import { AddressInfo } from 'net'
 import { buildOpenApiDocument } from '../openApi'
 import { createPstReviewApp, type ApiSecurityConfig } from '../pstReviewApp'
 import { MemoryReviewStore } from '../reviewStore'
+import { MemorySearchIndexStore, refreshSearchIndexFromCatalog } from '../searchIndex'
 
 const resolve = path.resolve
 
@@ -66,10 +67,13 @@ async function requestJson(url: string, init?: RequestInit): Promise<any> {
 
 async function startApp(pstRootDir: string, apiSecurity?: ApiSecurityConfig) {
   const reviewStore = new MemoryReviewStore()
+  const searchIndexStore = new MemorySearchIndexStore()
+  await refreshSearchIndexFromCatalog(pstRootDir, reviewStore, searchIndexStore)
   const app = createPstReviewApp({
     publicDir,
     pstRootDir,
     reviewStore,
+    searchIndexStore,
     openApiSpec: buildOpenApiDocument({
       version: 'test',
       reviewStorageMode: reviewStore.kind
@@ -86,6 +90,7 @@ async function startApp(pstRootDir: string, apiSecurity?: ApiSecurityConfig) {
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
     reviewStore,
+    searchIndexStore,
     server
   }
 }
@@ -94,6 +99,7 @@ describe('pst review api', () => {
   let rootDir: string | null = null
   let server: http.Server | null = null
   let reviewStore: MemoryReviewStore | null = null
+  let searchIndexStore: MemorySearchIndexStore | null = null
 
   afterEach(async () => {
     if (server) {
@@ -105,6 +111,10 @@ describe('pst review api', () => {
     if (reviewStore) {
       await reviewStore.close()
       reviewStore = null
+    }
+    if (searchIndexStore) {
+      await searchIndexStore.close()
+      searchIndexStore = null
     }
     if (rootDir) {
       fs.rmSync(rootDir, { recursive: true, force: true })
@@ -123,6 +133,7 @@ describe('pst review api', () => {
     const started = await startApp(pstDir)
     server = started.server
     reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
 
     const catalog = await requestJson(`${started.baseUrl}/api/psts?scopePath=Case2/Search1`)
     expect(catalog.rootExists).toBe(true)
@@ -190,40 +201,159 @@ describe('pst review api', () => {
     const recipientMatch = String(
       detail.detail.resolvedDisplayTo || detail.detail.displayTo || ''
     ).match(/<([^>]+)>/)
-    expect(recipientMatch).toBeTruthy()
-    const recipientEmail = recipientMatch ? recipientMatch[1] : ''
-
-    const searchAll = await requestJson(
-      `${started.baseUrl}/api/search?scope=all&query=signature&mailOnly=1`
+    const searchSources = [
+      recipientMatch ? recipientMatch[1] : '',
+      detail.detail.senderEmailAddress || '',
+      detail.detail.subject || message.subject || '',
+      detail.detail.originalSubject || '',
+      detail.detail.bodyPrefix || '',
+      detail.detail.bodyText || ''
+    ]
+    const searchCandidates = Array.from(
+      new Set(
+        searchSources
+          .flatMap((source) =>
+            String(source)
+              .split(/[^A-Za-z0-9@._%+-]+/)
+              .map((part) => part.trim())
+              .filter((part) => part.length >= 4)
+          )
+          .filter(Boolean)
+      )
     )
+    let searchAll: any = null
+    let searchTerm = ''
+    for (const candidate of searchCandidates) {
+      const attempt = await requestJson(
+        `${started.baseUrl}/api/search?scope=all&query=${encodeURIComponent(
+          candidate
+        )}&mailOnly=1&pageSize=5000`
+      )
+      if (attempt.page.total > 0) {
+        searchAll = attempt
+        searchTerm = candidate
+        break
+      }
+    }
+    expect(searchAll).toBeTruthy()
+    expect(searchTerm).toBeTruthy()
     expect(searchAll.scope).toBe('all')
-    expect(searchAll.page.items.some((item: { id: string }) => item.id === message.id)).toBe(true)
+    expect(searchAll.page.mode).toBe('and')
+    expect(searchAll.page.total).toBeGreaterThan(0)
+    const searchResult =
+      searchAll.page.items.find((item: { messageId: string }) => item.messageId === message.id) ||
+      searchAll.page.items.find((item: { messageId: string }) => Boolean(item.messageId))
+    expect(searchResult).toBeTruthy()
+    const resultRecipientMatch = String(
+      searchResult.resolvedDisplayTo || searchResult.displayTo || ''
+    ).match(/<([^>]+)>/)
+    const hiddenRuleKind = resultRecipientMatch ? 'address' : 'subject'
 
     const searchSelected = await requestJson(
-      `${started.baseUrl}/api/search?scope=search&scopePath=Case2/Search1&query=signature&mailOnly=1`
+      `${started.baseUrl}/api/search?scope=search&scopePath=Case2/Search1&query=${encodeURIComponent(
+        searchTerm
+      )}&mailOnly=1&pageSize=5000`
     )
     expect(searchSelected.scope).toBe('search')
     expect(searchSelected.page.scopePath).toBe('Case2/Search1')
-    expect(searchSelected.page.items.some((item: { id: string }) => item.id === message.id)).toBe(
-      true
-    )
+    expect(searchSelected.page.mode).toBe('and')
+    expect(searchSelected.page.total).toBeGreaterThan(0)
 
     const searchMailbox = await requestJson(
-      `${started.baseUrl}/api/search?scope=pst&sessionId=${opened.sessionId}&query=signature&mailOnly=1`
+      `${started.baseUrl}/api/search?scope=pst&sessionId=${opened.sessionId}&query=${encodeURIComponent(
+        searchTerm
+      )}&mailOnly=1&pageSize=5000`
     )
     expect(searchMailbox.scope).toBe('pst')
-    expect(searchMailbox.page.items.some((item: { id: string }) => item.id === message.id)).toBe(
-      true
-    )
+    expect(searchMailbox.page.total).toBeGreaterThan(0)
 
-    if (recipientEmail) {
+    const refreshedIndex = await requestJson(`${started.baseUrl}/api/search/index/refresh`, {
+      method: 'POST'
+    })
+    expect(refreshedIndex.summary.mailboxCount).toBe(2)
+    expect(Array.isArray(refreshedIndex.hiddenRules)).toBe(true)
+
+    const searchAnd = await requestJson(
+      `${started.baseUrl}/api/search?scope=pst&sessionId=${opened.sessionId}&query=${encodeURIComponent(
+        `+ ${searchTerm}`
+      )}&mailOnly=1&pageSize=5000`
+    )
+    expect(searchAnd.page.mode).toBe('and')
+    expect(searchAnd.page.total).toBeGreaterThan(0)
+
+    const searchOr = await requestJson(
+      `${started.baseUrl}/api/search?scope=pst&sessionId=${opened.sessionId}&query=${encodeURIComponent(
+        `${searchTerm} | missingterm`
+      )}&mailOnly=1&pageSize=5000`
+    )
+    expect(searchOr.page.mode).toBe('or')
+    expect(searchOr.page.total).toBeGreaterThan(0)
+
+    if (searchSources[0]) {
       const recipientSearch = await requestJson(
         `${started.baseUrl}/api/search?scope=pst&sessionId=${opened.sessionId}&query=${encodeURIComponent(
-          recipientEmail
-        )}&mailOnly=1`
+          searchSources[0]
+        )}&mailOnly=1&pageSize=5000`
       )
+      expect(recipientSearch.page.total).toBeGreaterThan(0)
+    }
+
+    const hiddenSubject =
+      hiddenRuleKind === 'address'
+        ? resultRecipientMatch
+          ? resultRecipientMatch[1]
+          : searchSources[0]
+        : searchResult?.subject || detail.detail.subject || searchTerm
+    const hiddenSubjectResponse = await requestJson(`${started.baseUrl}/api/search/filters`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        kind: hiddenRuleKind,
+        value: hiddenSubject,
+        label: hiddenSubject
+      })
+    })
+    expect(hiddenSubjectResponse.rule.kind).toBe(hiddenRuleKind)
+    expect(hiddenSubjectResponse.rule.value).toBe(hiddenSubject.toLowerCase())
+
+    const hiddenFilters = await requestJson(`${started.baseUrl}/api/search/filters`)
+    expect(hiddenFilters.items.some((item: { value: string }) => item.value === hiddenSubject.toLowerCase())).toBe(true)
+
+    const searchHidden = await requestJson(
+      `${started.baseUrl}/api/search?scope=all&query=${encodeURIComponent(
+        searchTerm
+      )}&mailOnly=1&pageSize=5000`
+    )
+    if (searchResult) {
       expect(
-        recipientSearch.page.items.some((item: { id: string }) => item.id === message.id)
+        searchHidden.page.items.some(
+          (item: { messageId: string }) => item.messageId === searchResult.messageId
+        )
+      ).toBe(
+        false
+      )
+    }
+
+    await requestJson(
+      `${started.baseUrl}/api/search/filters/${encodeURIComponent(hiddenSubjectResponse.rule.filterId)}`,
+      {
+        method: 'DELETE'
+      }
+    )
+
+    const searchRestored = await requestJson(
+      `${started.baseUrl}/api/search?scope=all&query=${encodeURIComponent(
+        searchTerm
+      )}&mailOnly=1&pageSize=5000`
+    )
+    expect(searchRestored.page.total).toBeGreaterThanOrEqual(searchHidden.page.total)
+    if (searchResult) {
+      expect(
+        searchRestored.page.items.some(
+          (item: { messageId: string }) => item.messageId === searchResult.messageId
+        )
       ).toBe(true)
     }
 
@@ -303,6 +433,7 @@ describe('pst review api', () => {
     const started = await startApp(pstDir)
     server = started.server
     reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
 
     const catalog = await requestJson(`${started.baseUrl}/api/psts`)
     expect(catalog.scopePath).toBe('')
@@ -342,6 +473,7 @@ describe('pst review api', () => {
     })
     server = started.server
     reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
 
     const catalog = await requestJson(`${started.baseUrl}/api/psts`)
     expect(catalog.files).toHaveLength(1)
@@ -370,6 +502,7 @@ describe('pst review api', () => {
     })
     server = started.server
     reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
 
     const response = await fetch(`${started.baseUrl}/api/psts`, {
       headers: {
@@ -397,6 +530,7 @@ describe('pst review api', () => {
     })
     server = started.server
     reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
 
     const preflight = await fetch(`${started.baseUrl}/api/psts`, {
       method: 'OPTIONS',

@@ -5,6 +5,10 @@ import * as path from 'path'
 import { buildOpenApiDocument } from '../src/openApi'
 import { createPstReviewApp, type ApiSecurityConfig } from '../src/pstReviewApp'
 import { createReviewStoreFromEnv } from '../src/reviewStore'
+import {
+  createSearchIndexStoreFromEnv,
+  refreshSearchIndexFromCatalog
+} from '../src/searchIndex'
 import { getDefaultPstRootDirectory } from '../src/pstCatalog'
 
 interface PackageJson {
@@ -88,6 +92,7 @@ const apiSecurity: ApiSecurityConfig = {
 
 let server: http.Server | null = null
 let reviewStore = null as Awaited<ReturnType<typeof createReviewStoreFromEnv>> | null
+let searchIndexStore = null as Awaited<ReturnType<typeof createSearchIndexStoreFromEnv>> | null
 let shuttingDown = false
 
 async function shutdown(exitCode = 0): Promise<void> {
@@ -120,6 +125,14 @@ async function shutdown(exitCode = 0): Promise<void> {
     console.error(error)
   }
 
+  try {
+    if (searchIndexStore) {
+      await searchIndexStore.close()
+    }
+  } catch (error) {
+    console.error(error)
+  }
+
   if (exitCode !== 0) {
     process.exitCode = exitCode
   }
@@ -127,6 +140,12 @@ async function shutdown(exitCode = 0): Promise<void> {
 
 async function main(): Promise<void> {
   reviewStore = await createReviewStoreFromEnv(process.env)
+  searchIndexStore = await createSearchIndexStoreFromEnv(process.env)
+  await refreshSearchIndexFromCatalog(
+    getDefaultPstRootDirectory(),
+    reviewStore,
+    searchIndexStore
+  )
   const openApiSpec = buildOpenApiDocument({
     version: packageJson.version,
     reviewStorageMode: reviewStore.kind
@@ -136,6 +155,7 @@ async function main(): Promise<void> {
     publicDir,
     pstRootDir: getDefaultPstRootDirectory(),
     reviewStore,
+    searchIndexStore,
     openApiSpec,
     apiSecurity
   })

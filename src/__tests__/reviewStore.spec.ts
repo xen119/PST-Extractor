@@ -26,6 +26,7 @@ function makeContext() {
     resolvedDisplayTo: 'Bob <bob@example.com>',
     resolvedDisplayCC: '',
     resolvedDisplayBCC: '',
+    originalSubject: 'Review me',
     clientSubmitTime: '2024-01-01T10:00:00.000Z',
     creationTime: '2024-01-01T10:00:00.000Z',
     modificationTime: '2024-01-01T10:00:00.000Z',

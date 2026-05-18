@@ -85,6 +85,7 @@ function messageSummarySchema(): Record<string, unknown> {
       resolvedDisplayTo: { type: 'string' },
       resolvedDisplayCC: { type: 'string' },
       resolvedDisplayBCC: { type: 'string' },
+      originalSubject: { type: 'string' },
       clientSubmitTime: { type: ['string', 'null'] },
       creationTime: { type: ['string', 'null'] },
       modificationTime: { type: ['string', 'null'] },
@@ -161,6 +162,22 @@ function reviewRecordSchema(): Record<string, unknown> {
   }
 }
 
+function hiddenRuleSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['filterId', 'kind', 'value', 'label', 'createdAt', 'updatedAt'],
+    properties: {
+      filterId: { type: 'string' },
+      kind: { type: 'string', enum: ['address', 'subject'] },
+      value: { type: 'string' },
+      label: { type: 'string' },
+      createdAt: { type: 'string' },
+      updatedAt: { type: 'string' }
+    }
+  }
+}
+
 function searchResultItemSchema(): Record<string, unknown> {
   return {
     allOf: [
@@ -184,7 +201,7 @@ function searchPageSchema(): Record<string, unknown> {
   return {
     type: 'object',
     additionalProperties: true,
-    required: ['items', 'total', 'page', 'pageSize', 'totalPages', 'query', 'mailOnly', 'sort', 'scope', 'scopePath', 'scopeLabel'],
+    required: ['items', 'total', 'page', 'pageSize', 'totalPages', 'query', 'mode', 'mailOnly', 'sort', 'scope', 'scopePath', 'scopeLabel', 'hiddenRules'],
     properties: {
       items: {
         type: 'array',
@@ -195,11 +212,16 @@ function searchPageSchema(): Record<string, unknown> {
       pageSize: { type: 'integer' },
       totalPages: { type: 'integer' },
       query: { type: 'string' },
+      mode: { type: 'string', enum: ['and', 'or'] },
       mailOnly: { type: 'boolean' },
       sort: { type: 'string' },
       scope: { type: 'string' },
       scopePath: { type: 'string' },
       scopeLabel: { type: 'string' },
+      hiddenRules: {
+        type: 'array',
+        items: hiddenRuleSchema()
+      },
       reviewFilters: { type: 'object', additionalProperties: true }
     }
   }
@@ -351,7 +373,21 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
             },
             { name: 'scopePath', in: 'query', required: false, schema: { type: 'string' } },
             { name: 'sessionId', in: 'query', required: false, schema: { type: 'string' } },
-            { name: 'query', in: 'query', required: false, schema: { type: 'string' } },
+            {
+              name: 'query',
+              in: 'query',
+              required: false,
+              schema: { type: 'string' },
+              description:
+                'Search terms. Use + in the query for AND or | in the query for OR. Quoted phrases stay exact.'
+            },
+            {
+              name: 'mode',
+              in: 'query',
+              required: false,
+              schema: { type: 'string', enum: ['and', 'or'] },
+              description: 'Legacy fallback if the query does not include + or |.'
+            },
             { name: 'mailOnly', in: 'query', required: false, schema: { type: 'boolean' } },
             { name: 'sort', in: 'query', required: false, schema: { type: 'string', enum: ['date-desc', 'order'] } },
             { name: 'page', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
@@ -373,6 +409,99 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
                 page: searchPageSchema()
               }
             })
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.searchIndexRefresh)]: {
+        post: {
+          tags: ['Extraction'],
+          summary: 'Rebuild the cached search index from the PST catalog',
+          responses: {
+            200: jsonResponse({
+              type: 'object',
+              additionalProperties: true,
+              required: ['summary', 'hiddenRules'],
+              properties: {
+                summary: {
+                  type: 'object',
+                  additionalProperties: true
+                },
+                hiddenRules: {
+                  type: 'array',
+                  items: hiddenRuleSchema()
+                }
+              }
+            })
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.searchFilters)]: {
+        get: {
+          tags: ['Extraction'],
+          summary: 'List hidden search filters',
+          responses: {
+            200: jsonResponse({
+              type: 'object',
+              additionalProperties: true,
+              required: ['items'],
+              properties: {
+                items: {
+                  type: 'array',
+                  items: hiddenRuleSchema()
+                }
+              }
+            })
+          }
+        },
+        post: {
+          tags: ['Extraction'],
+          summary: 'Create a hidden search filter',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['kind', 'value'],
+                  properties: {
+                    kind: { type: 'string', enum: ['address', 'subject'] },
+                    value: { type: 'string' },
+                    label: { type: 'string' }
+                  }
+                }
+              }
+            }
+          },
+          responses: {
+            200: jsonResponse({
+              type: 'object',
+              additionalProperties: true,
+              required: ['rule'],
+              properties: {
+                rule: hiddenRuleSchema()
+              }
+            }),
+            ...errorResponse(400, 'Invalid filter payload')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.searchFilter)]: {
+        delete: {
+          tags: ['Extraction'],
+          summary: 'Delete a hidden search filter',
+          parameters: [
+            { name: 'filterId', in: 'path', required: true, schema: { type: 'string' } }
+          ],
+          responses: {
+            200: jsonResponse({
+              type: 'object',
+              additionalProperties: true,
+              required: ['deleted'],
+              properties: {
+                deleted: { type: 'boolean' }
+              }
+            }),
+            ...errorResponse(400, 'Invalid filter id')
           }
         }
       },
