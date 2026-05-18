@@ -499,6 +499,13 @@
     }
   }
 
+  function canReviewMessage(detail) {
+    if (!detail || typeof detail !== 'object') {
+      return false
+    }
+    return Boolean(detail.isMailLike || detail.kind === 'appointment')
+  }
+
   function renderReviewBadges(review) {
     const state = normalizeReviewState(review)
     const badges = []
@@ -522,10 +529,10 @@
 
   function renderReviewPanel(detail) {
     const review = normalizeReviewState(detail.review)
-    if (!detail.isMailLike) {
+    if (!canReviewMessage(detail)) {
       return `
         <section class="review-panel disabled">
-          <div class="review-note">Review controls are available for mail items only.</div>
+          <div class="review-note">Review controls are available for mail and appointment items only.</div>
         </section>
       `
     }
@@ -643,7 +650,7 @@
   }
 
   async function toggleReviewFlag() {
-    if (!state.currentMessageDetail || !state.currentMessageDetail.isMailLike) {
+    if (!canReviewMessage(state.currentMessageDetail)) {
       return
     }
 
@@ -654,14 +661,14 @@
   }
 
   async function clearReview() {
-    if (!state.currentMessageDetail || !state.currentMessageDetail.isMailLike) {
+    if (!canReviewMessage(state.currentMessageDetail)) {
       return
     }
     await saveReviewState(state.currentMessageDetail.id, {}, { deleteReview: true })
   }
 
   async function addReviewTag(tag) {
-    if (!state.currentMessageDetail || !state.currentMessageDetail.isMailLike) {
+    if (!canReviewMessage(state.currentMessageDetail)) {
       return
     }
 
@@ -681,7 +688,7 @@
   }
 
   async function removeReviewTag(tag) {
-    if (!state.currentMessageDetail || !state.currentMessageDetail.isMailLike) {
+    if (!canReviewMessage(state.currentMessageDetail)) {
       return
     }
 

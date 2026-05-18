@@ -805,9 +805,13 @@ async function buildFolderPageWithReviews(
 }
 
 function assertReviewableMessage(summary: MessageSummary): void {
-  if (!isMailLikeSummary(summary)) {
-    throw createAppError(400, 'Review state is available for mail items only')
+  if (!isReviewableSummary(summary)) {
+    throw createAppError(400, 'Review state is available for mail and appointment items only')
   }
+}
+
+function isReviewableSummary(summary: MessageSummary): boolean {
+  return isMailLikeSummary(summary) || summary.kind === 'appointment'
 }
 
 function responseJson(

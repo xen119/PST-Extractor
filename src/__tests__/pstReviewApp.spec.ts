@@ -51,6 +51,32 @@ function findMailFolder(node: {
   return null
 }
 
+function findFolderByDisplayName(
+  node: {
+    id: string
+    displayName?: string
+    children?: Array<{
+      id: string
+      displayName?: string
+      children?: unknown[]
+    }>
+  },
+  displayName: string
+): { id: string; displayName?: string } | null {
+  if (node.displayName === displayName) {
+    return node
+  }
+
+  for (const child of node.children || []) {
+    const match = findFolderByDisplayName(child, displayName)
+    if (match) {
+      return match
+    }
+  }
+
+  return null
+}
+
 async function readJson(response: Response): Promise<any> {
   const text = await response.text()
   return text ? JSON.parse(text) : null
@@ -422,6 +448,82 @@ describe('pst review api', () => {
     const docsHtml = await docsResponse.text()
     expect(docsHtml).toContain('SwaggerUIBundle')
     expect(docsHtml).toContain('/api/openapi.json')
+  })
+
+  it('allows appointment items to be flagged and cleared', async () => {
+    rootDir = makeTempDir('pst-review-api-appt-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
+    stageFixture(outlookPath, path.join(pstDir, 'Case1', 'Search1', 'archive.ost'))
+
+    const started = await startApp(pstDir)
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const opened = await requestJson(`${started.baseUrl}/api/psts/open`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        scopePath: 'Case1/Search1',
+        fileName: 'archive.ost'
+      })
+    })
+
+    const calendarFolder = findFolderByDisplayName(opened.tree, 'Calendar')
+    expect(calendarFolder).toBeTruthy()
+
+    const folderPage = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/folders/${encodeURIComponent(
+        calendarFolder!.id
+      )}/messages?mailOnly=0&pageSize=20`
+    )
+    const appointment = folderPage.page.items.find(
+      (item: { kind: string }) => item.kind === 'appointment'
+    )
+    expect(appointment).toBeTruthy()
+
+    const patch = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
+        appointment.id
+      )}/review`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          flagged: true
+        })
+      }
+    )
+    expect(patch.review.flagged).toBe(true)
+
+    const review = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
+        appointment.id
+      )}/review`
+    )
+    expect(review.review.flagged).toBe(true)
+
+    const queue = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/review?reviewFlagged=1`
+    )
+    expect(queue.items.map((item: { messageId: string }) => item.messageId)).toContain(
+      appointment.id
+    )
+
+    const deleted = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
+        appointment.id
+      )}/review`,
+      {
+        method: 'DELETE'
+      }
+    )
+    expect(deleted.review.flagged).toBe(false)
   })
 
   it('opens PST root mailboxes when scopePath is empty', async () => {
