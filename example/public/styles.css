@@ -411,15 +411,8 @@ textarea:focus-visible {
 }
 
 .pst-item-row {
-  display: flex;
-  align-items: stretch;
-  gap: 8px;
+  display: block;
   padding: 8px 10px 8px 12px;
-}
-
-.pst-item-row > .pst-item {
-  width: auto;
-  flex: 1;
 }
 
 .pst-item {
@@ -449,6 +442,10 @@ textarea:focus-visible {
   border-left-color: var(--accent);
 }
 
+.pst-item-clickable {
+  cursor: pointer;
+}
+
 .pst-item-static {
   cursor: default;
 }
@@ -469,6 +466,17 @@ textarea:focus-visible {
   line-height: 1;
   font-size: 1rem;
   font-weight: 700;
+}
+
+.pst-item-action--inline {
+  margin-left: 6px;
+}
+
+.pst-item-title-line {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
 }
 
 .pst-item-name {

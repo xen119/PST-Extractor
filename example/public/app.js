@@ -1282,20 +1282,11 @@
       state.mailboxScopeView === 'all' && file.displayPath
         ? `<span class="pst-item-path">${escapeHtml(file.displayPath)}</span>`
         : ''
-    const commonContent = `
+    const rowTitle = `
       <span class="pst-item-name">${escapeHtml(file.fileName)}</span>
-      ${pathLine}
-      <span class="pst-item-meta">${escapeHtml(size)} · ${escapeHtml(modifiedAt)}</span>
-    `
-
-    if (state.catalogMode === 'removed') {
-      return `
-        <div class="pst-item-row">
-          <div class="pst-item pst-item-static" title="${escapeAttr(file.fileName)}">
-            ${commonContent}
-          </div>
-          <button
-            class="ghost-button small pst-item-action pst-item-action--compact"
+      ${state.catalogMode === 'removed'
+        ? `<button
+            class="ghost-button small pst-item-action pst-item-action--compact pst-item-action--inline"
             type="button"
             data-action="restore-pst"
             data-pst-file-name="${escapeAttr(file.fileName)}"
@@ -1304,39 +1295,62 @@
             title="Restore PST to active catalog"
           >
             +
-          </button>
+          </button>`
+        : `<button
+            class="ghost-button small pst-item-action pst-item-action--compact pst-item-action--inline"
+            type="button"
+            data-action="remove-pst"
+            data-pst-file-name="${escapeAttr(file.fileName)}"
+            data-scope-path="${escapeAttr(file.scopePath || '')}"
+            aria-label="Remove PST from platform"
+            title="Remove PST from platform"
+          >
+            -
+          </button>`}
+    `
+    const rowClasses =
+      state.catalogMode === 'removed'
+        ? 'pst-item pst-item-static pst-item-inline'
+        : `pst-item pst-item-clickable${file.fileName === state.selectedPstFileName &&
+          normalizeScopePath(file.scopePath) === normalizeScopePath(state.selectedScopePath)
+            ? ' active'
+            : ''}`
+
+    if (state.catalogMode === 'removed') {
+      return `
+        <div class="pst-item-row">
+          <div
+            class="${rowClasses}"
+            title="${escapeAttr(file.fileName)}"
+            data-pst-file-name="${escapeAttr(file.fileName)}"
+            data-scope-path="${escapeAttr(file.scopePath || '')}"
+          >
+            <div class="pst-item-title-line">
+              ${rowTitle}
+            </div>
+            ${pathLine}
+            <span class="pst-item-meta">${escapeHtml(size)} · ${escapeHtml(modifiedAt)}</span>
+          </div>
         </div>
       `
     }
 
-    const isActive =
-      file.fileName === state.selectedPstFileName &&
-      normalizeScopePath(file.scopePath) === normalizeScopePath(state.selectedScopePath)
-        ? ' active'
-        : ''
-
     return `
       <div class="pst-item-row">
-        <button
-          class="pst-item${isActive}"
-          type="button"
-          data-pst-file-name="${escapeAttr(file.fileName)}"
-          data-scope-path="${escapeAttr(file.scopePath || '')}"
+        <div
+          class="${rowClasses}"
+          role="button"
+          tabindex="0"
           title="${escapeAttr(file.fileName)}"
-        >
-          ${commonContent}
-        </button>
-        <button
-          class="ghost-button small pst-item-action pst-item-action--compact"
-          type="button"
-          data-action="remove-pst"
           data-pst-file-name="${escapeAttr(file.fileName)}"
           data-scope-path="${escapeAttr(file.scopePath || '')}"
-          aria-label="Remove PST from platform"
-          title="Remove PST from platform"
         >
-          -
-        </button>
+          <div class="pst-item-title-line">
+            ${rowTitle}
+          </div>
+          ${pathLine}
+          <span class="pst-item-meta">${escapeHtml(size)} · ${escapeHtml(modifiedAt)}</span>
+        </div>
       </div>
     `
   }
@@ -2597,6 +2611,26 @@
       }
       const fileName = button.dataset.pstFileName
       const scopePath = normalizeScopePath(button.dataset.scopePath || '')
+      if (!fileName) {
+        return
+      }
+      void openMailbox(fileName, { showBusy: true, scopePath })
+    })
+
+    ui.pstList.addEventListener('keydown', (event) => {
+      const target = event.target.closest('[data-pst-file-name]')
+      if (!target || state.catalogMode === 'removed') {
+        return
+      }
+      if (event.key !== 'Enter' && event.key !== ' ') {
+        return
+      }
+      if (event.target.closest('[data-action]')) {
+        return
+      }
+      event.preventDefault()
+      const fileName = target.dataset.pstFileName
+      const scopePath = normalizeScopePath(target.dataset.scopePath || '')
       if (!fileName) {
         return
       }
