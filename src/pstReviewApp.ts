@@ -49,8 +49,11 @@ import {
 import {
   getDefaultPstRootDirectory,
   listPstMailboxFiles,
+  listRemovedPstMailboxFiles,
+  movePstMailboxToRemoved,
   openPstMailbox,
-  resolvePstMailboxPath
+  resolvePstMailboxPath,
+  restorePstMailboxFromRemoved
 } from './pstCatalog'
 import type { ReviewRecord } from './reviewTypes'
 import { createZipStreamWriter } from './zipWriter'
@@ -100,6 +103,15 @@ interface SessionRecord {
 }
 
 interface OpenMailboxRequestBody {
+  scopePath?: string
+  fileName?: string
+}
+
+interface CatalogScopeRequestQuery {
+  scopePath?: string
+}
+
+interface MoveMailboxRequestBody {
   scopePath?: string
   fileName?: string
 }
@@ -579,10 +591,11 @@ function getScopeLabel(scopePath: string): string {
 
 function resolveCatalogScopeSelection(
   rootPath: string,
-  requestedScopePath: string
+  requestedScopePath: string,
+  loader: (rootPath: string, scopePath?: string) => ReturnType<typeof listPstMailboxFiles> = listPstMailboxFiles
 ): ReturnType<typeof listPstMailboxFiles> {
   const normalizedScopePath = normalizeScopePath(requestedScopePath)
-  const catalog = listPstMailboxFiles(rootPath, normalizedScopePath)
+  const catalog = loader(rootPath, normalizedScopePath)
 
   if (normalizedScopePath && !catalog.scopes.some((scope) => scope.scopePath === normalizedScopePath)) {
     throw createAppError(404, 'Search scope not found')
@@ -1044,6 +1057,18 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     await searchIndexStore.replaceMailboxDocuments(session.filePath, documents)
   }
 
+  function closeSessionsForMailboxKey(mailboxKey: string): string[] {
+    const closedSessionIds: string[] = []
+    const normalizedMailboxKey = normalizeText(mailboxKey)
+    for (const [sessionId, session] of sessions.entries()) {
+      if (session.filePath === normalizedMailboxKey) {
+        sessions.delete(sessionId)
+        closedSessionIds.push(sessionId)
+      }
+    }
+    return closedSessionIds
+  }
+
   app.disable('x-powered-by')
   app.use(express.json({ limit: '2mb' }))
   app.use(express.static(publicDir))
@@ -1065,8 +1090,19 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.get(API_ROUTES.pstCatalog, (req, res) => {
     try {
-      const scopePath = typeof req.query.scopePath === 'string' ? normalizeText(req.query.scopePath) : ''
+      const scopePath =
+        typeof req.query.scopePath === 'string' ? normalizeText(req.query.scopePath) : ''
       responseJson(res, 200, listPstMailboxFiles(pstRootDir, scopePath))
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.pstRemovedCatalog, (req, res) => {
+    try {
+      const scopePath =
+        typeof req.query.scopePath === 'string' ? normalizeText(req.query.scopePath) : ''
+      responseJson(res, 200, listRemovedPstMailboxFiles(pstRootDir, scopePath))
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
@@ -1118,6 +1154,69 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     }
   })
 
+  app.post(API_ROUTES.pstRemove, async (req, res) => {
+    try {
+      const body = (req.body || {}) as MoveMailboxRequestBody
+      const scopePath = normalizeText(body.scopePath)
+      const fileName = normalizeText(body.fileName)
+      if (!fileName) {
+        throw createAppError(400, 'Mailbox file name is required')
+      }
+
+      const removal = movePstMailboxToRemoved(pstRootDir, scopePath, fileName)
+      await searchIndexStore.deleteMailboxDocuments(removal.sourcePath)
+      const closedSessionIds = closeSessionsForMailboxKey(removal.sourcePath)
+
+      responseJson(res, 200, {
+        removed: {
+          sourcePath: removal.sourcePath,
+          destinationPath: removal.destinationPath,
+          scopePath: removal.scopePath,
+          scopeLabel: getScopeLabel(removal.scopePath),
+          fileName: removal.fileName
+        },
+        closedSessionIds
+      })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.post(API_ROUTES.pstRestore, async (req, res) => {
+    try {
+      const body = (req.body || {}) as MoveMailboxRequestBody
+      const scopePath = normalizeText(body.scopePath)
+      const fileName = normalizeText(body.fileName)
+      if (!fileName) {
+        throw createAppError(400, 'Mailbox file name is required')
+      }
+
+      const restore = restorePstMailboxFromRemoved(pstRootDir, scopePath, fileName)
+      const restoredIndex = openPstMailbox(pstRootDir, restore.scopePath, restore.fileName)
+      await syncSearchIndexForMailbox({
+        id: createSessionId(),
+        index: restoredIndex,
+        filePath: restoredIndex.filePath,
+        fileName: restoredIndex.fileName,
+        scopePath: restore.scopePath,
+        scopeLabel: getScopeLabel(restore.scopePath),
+        mailboxKey: restoredIndex.filePath
+      })
+
+      responseJson(res, 200, {
+        restored: {
+          sourcePath: restore.sourcePath,
+          destinationPath: restore.destinationPath,
+          scopePath: restore.scopePath,
+          scopeLabel: getScopeLabel(restore.scopePath),
+          fileName: restore.fileName
+        }
+      })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
   app.get(API_ROUTES.search, async (req, res) => {
     try {
       const filters = parseReviewFilters(req.query as Record<string, string | string[] | undefined>)
@@ -1127,22 +1226,33 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       let scopePath = ''
       let scopeLabel = 'All cases/searches'
       let mailboxKey = ''
+      let allowedMailboxKeys: string[] = []
 
       if (scope === 'pst') {
         const session = getSessionOrThrow(sessions, sessionId)
         scopePath = session.scopePath
         scopeLabel = session.scopeLabel || getScopeLabel(scopePath)
         mailboxKey = session.filePath
+        allowedMailboxKeys = [mailboxKey]
       } else if (scope === 'search') {
         const catalog = resolveCatalogScopeSelection(pstRootDir, requestedScopePath)
         scopePath = catalog.scopePath
         scopeLabel = catalog.scopeLabel
+        const selectedCatalog = listPstMailboxFiles(pstRootDir, scopePath)
+        allowedMailboxKeys = selectedCatalog.files
+          .map((file) => resolvePstMailboxPath(pstRootDir, selectedCatalog.scopePath, file.fileName))
+      } else {
+        const activeCatalog = listPstMailboxFiles(pstRootDir)
+        allowedMailboxKeys = activeCatalog.scopes.flatMap((entry) =>
+          entry.files.map((file) => resolvePstMailboxPath(pstRootDir, entry.scopePath, file.fileName))
+        )
       }
 
       const page = await searchIndexStore.search({
         scope,
         scopePath,
         mailboxKey,
+        allowedMailboxKeys,
         query: filters.query,
         mode: filters.mode,
         mailOnly: filters.mailOnly,

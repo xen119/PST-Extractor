@@ -47,6 +47,29 @@ function pstCatalogScopeSchema(): Record<string, unknown> {
   }
 }
 
+function pstCatalogResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['rootPath', 'rootExists', 'scopes', 'scopePath', 'scopeLabel', 'files', 'message'],
+    properties: {
+      rootPath: { type: 'string' },
+      rootExists: { type: 'boolean' },
+      message: { type: 'string' },
+      scopePath: { type: 'string' },
+      scopeLabel: { type: 'string' },
+      scopes: {
+        type: 'array',
+        items: pstCatalogScopeSchema()
+      },
+      files: {
+        type: 'array',
+        items: pstCatalogEntrySchema()
+      }
+    }
+  }
+}
+
 function errorResponse(statusCode: number, description: string): Record<string, unknown> {
   return {
     [String(statusCode)]: jsonResponse(
@@ -275,6 +298,7 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
     servers: [{ url: '/' }],
     tags: [
       { name: 'PST catalog' },
+      { name: 'PST archive' },
       { name: 'Sessions' },
       { name: 'Extraction' },
       { name: 'Review' }
@@ -296,26 +320,26 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
           responses: {
             ...errorResponse(400, 'Invalid scope path'),
             ...errorResponse(404, 'PST folder missing'),
-            200: jsonResponse({
-              type: 'object',
-              additionalProperties: true,
-              required: ['rootPath', 'rootExists', 'scopes', 'scopePath', 'scopeLabel', 'files', 'message'],
-              properties: {
-                rootPath: { type: 'string' },
-                rootExists: { type: 'boolean' },
-                message: { type: 'string' },
-                scopePath: { type: 'string' },
-                scopeLabel: { type: 'string' },
-                scopes: {
-                  type: 'array',
-                  items: pstCatalogScopeSchema()
-                },
-                files: {
-                  type: 'array',
-                  items: pstCatalogEntrySchema()
-                }
-              }
-            })
+            200: jsonResponse(pstCatalogResponseSchema())
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.pstRemovedCatalog)]: {
+        get: {
+          tags: ['PST archive'],
+          summary: 'List removed case/search scopes and PST/OST files from PST/_removed',
+          parameters: [
+            {
+              name: 'scopePath',
+              in: 'query',
+              required: false,
+              schema: { type: 'string' },
+              description: 'Relative removed scope path such as Case1/Search1.'
+            }
+          ],
+          responses: {
+            ...errorResponse(400, 'Invalid scope path'),
+            200: jsonResponse(pstCatalogResponseSchema())
           }
         }
       },
@@ -356,6 +380,104 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
               }
             }),
             ...errorResponse(400, 'Invalid mailbox or scope path')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.pstRemove)]: {
+        post: {
+          tags: ['PST archive'],
+          summary: 'Move a PST/OST out of the active catalog into PST/_removed',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['fileName'],
+                  properties: {
+                    scopePath: {
+                      type: 'string',
+                      description: 'Relative PST scope path such as Case1/Search1.'
+                    },
+                    fileName: { type: 'string' }
+                  }
+                }
+              }
+            }
+          },
+          responses: {
+            200: jsonResponse({
+              type: 'object',
+              additionalProperties: true,
+              required: ['removed', 'closedSessionIds'],
+              properties: {
+                removed: {
+                  type: 'object',
+                  additionalProperties: true,
+                  properties: {
+                    sourcePath: { type: 'string' },
+                    destinationPath: { type: 'string' },
+                    scopePath: { type: 'string' },
+                    scopeLabel: { type: 'string' },
+                    fileName: { type: 'string' }
+                  }
+                },
+                closedSessionIds: {
+                  type: 'array',
+                  items: { type: 'string' }
+                }
+              }
+            }),
+            ...errorResponse(400, 'Invalid mailbox or scope path'),
+            ...errorResponse(404, 'Mailbox not found'),
+            ...errorResponse(409, 'Mailbox conflict')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.pstRestore)]: {
+        post: {
+          tags: ['PST archive'],
+          summary: 'Restore a removed PST/OST back into the active catalog',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['fileName'],
+                  properties: {
+                    scopePath: {
+                      type: 'string',
+                      description: 'Relative removed scope path such as Case1/Search1.'
+                    },
+                    fileName: { type: 'string' }
+                  }
+                }
+              }
+            }
+          },
+          responses: {
+            200: jsonResponse({
+              type: 'object',
+              additionalProperties: true,
+              required: ['restored'],
+              properties: {
+                restored: {
+                  type: 'object',
+                  additionalProperties: true,
+                  properties: {
+                    sourcePath: { type: 'string' },
+                    destinationPath: { type: 'string' },
+                    scopePath: { type: 'string' },
+                    scopeLabel: { type: 'string' },
+                    fileName: { type: 'string' }
+                  }
+                }
+              }
+            }),
+            ...errorResponse(400, 'Invalid mailbox or scope path'),
+            ...errorResponse(404, 'Mailbox not found'),
+            ...errorResponse(409, 'Mailbox conflict')
           }
         }
       },

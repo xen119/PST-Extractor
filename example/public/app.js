@@ -3,6 +3,7 @@
     casePath: 'pst-mail-explorer.casePath',
     scopePath: 'pst-mail-explorer.scopePath',
     mailboxScopeView: 'pst-mail-explorer.mailboxScopeView',
+    catalogMode: 'pst-mail-explorer.catalogMode',
     pstFileName: 'pst-mail-explorer.pstFileName',
     folderId: 'pst-mail-explorer.folderId',
     messageId: 'pst-mail-explorer.messageId',
@@ -21,6 +22,7 @@
     catalog: [],
     catalogLoaded: false,
     catalogMessage: '',
+    catalogMode: 'active',
     selectedCasePath: null,
     selectedScopePath: null,
     selectedScopeLabel: '',
@@ -183,6 +185,14 @@
     return scopePath ? String(scopePath).split('/').join(' / ') : 'PST root'
   }
 
+  function getCatalogModeLabel(mode) {
+    return mode === 'removed' ? 'Removed PSTs' : 'Mailboxes'
+  }
+
+  function getCatalogEndpoint() {
+    return state.catalogMode === 'removed' ? '/api/psts/removed' : '/api/psts'
+  }
+
   const ALL_PSTS_SCOPE_VALUE = '__all_psts__'
 
   function isAllPstsScopeValue(value) {
@@ -270,6 +280,81 @@
       createdAt: String(rule.createdAt || ''),
       updatedAt: String(rule.updatedAt || '')
     }
+  }
+
+  function buildHiddenRuleLookup(rules) {
+    const addresses = new Set()
+    const subjects = new Set()
+
+    for (const rule of Array.isArray(rules) ? rules : []) {
+      const normalizedValue = normalizeHiddenRuleValue(rule && rule.value)
+      if (!normalizedValue) {
+        continue
+      }
+
+      if (rule && rule.kind === 'address') {
+        addresses.add(normalizedValue)
+        for (const email of normalizedValue.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || []) {
+          addresses.add(normalizeHiddenRuleValue(email))
+        }
+      } else if (rule && rule.kind === 'subject') {
+        subjects.add(normalizedValue)
+      }
+    }
+
+    return { addresses, subjects }
+  }
+
+  function messageMatchesHiddenRules(item, hiddenLookup) {
+    if (!hiddenLookup || (!hiddenLookup.addresses.size && !hiddenLookup.subjects.size)) {
+      return false
+    }
+
+    if (hiddenLookup.addresses.size) {
+      const addressValues = [
+        item && item.senderEmailAddress,
+        item && item.displayTo,
+        item && item.displayCC,
+        item && item.displayBCC,
+        item && item.resolvedDisplayTo,
+        item && item.resolvedDisplayCC,
+        item && item.resolvedDisplayBCC,
+        item && item.recipientText
+      ]
+        .map((value) => normalizeHiddenRuleValue(value))
+        .filter(Boolean)
+
+      for (const value of addressValues) {
+        if (hiddenLookup.addresses.has(value)) {
+          return true
+        }
+        for (const email of value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || []) {
+          if (hiddenLookup.addresses.has(normalizeHiddenRuleValue(email))) {
+            return true
+          }
+        }
+      }
+    }
+
+    if (hiddenLookup.subjects.size) {
+      const subjectValues = [
+        normalizeHiddenRuleValue(item && item.subject),
+        normalizeHiddenRuleValue(item && item.originalSubject)
+      ].filter(Boolean)
+      if (subjectValues.some((value) => hiddenLookup.subjects.has(value))) {
+        return true
+      }
+    }
+
+    return false
+  }
+
+  function filterVisibleMessageItems(items) {
+    const hiddenLookup = buildHiddenRuleLookup(state.hiddenRules)
+    if (!hiddenLookup.addresses.size && !hiddenLookup.subjects.size) {
+      return Array.isArray(items) ? items : []
+    }
+    return (Array.isArray(items) ? items : []).filter((item) => !messageMatchesHiddenRules(item, hiddenLookup))
   }
 
   function isSearchResultView() {
@@ -738,15 +823,51 @@
 
   async function refreshActiveVisibleMessages() {
     const activePage = getActivePage()
-    if (!state.sessionId || !activePage) {
+    if (!activePage) {
       return
     }
 
     const preferredMessageId = state.selectedMessageId || null
+    if (state.currentSearchPage && state.activeSearch && hasSearchCriteria(state.activeSearch)) {
+      if (state.activeSearch.searchScope === 'pst' && !state.sessionId) {
+        return
+      }
+      await loadSearchResults(activePage.page || 1, {
+        selectPreferred: false,
+        preferredMessageId
+      })
+      return
+    }
+
+    if (!state.sessionId) {
+      return
+    }
     await loadVisibleMessages(activePage.page || 1, {
       selectPreferred: false,
       preferredMessageId
     })
+  }
+
+  function clearMailboxSessionState(options = {}) {
+    const preserveSearchResults = Boolean(options.preserveSearchResults)
+    state.sessionId = null
+    state.summary = null
+    state.tree = null
+    state.folderMap = new Map()
+    state.currentFolderId = null
+    state.currentFolderPage = null
+    state.currentMessageDetail = null
+    state.selectedMessageId = null
+    state.selectedPstFileName = null
+    if (!preserveSearchResults) {
+      state.currentSearchPage = null
+      state.activeSearch = null
+    }
+    renderSummary()
+    renderFolderTree()
+    renderMessageList()
+    renderMessageDetail()
+    saveState()
   }
 
   async function refreshSearchIndex() {
@@ -755,6 +876,98 @@
     })
     await loadHiddenFilters()
     return response
+  }
+
+  async function removeMailboxFromPlatform(fileName, scopePath) {
+    const normalizedScopePath = normalizeScopePath(scopePath || state.selectedScopePath || '')
+    const currentSessionId = state.sessionId
+    const hasGlobalSearch =
+      Boolean(state.currentSearchPage && state.activeSearch && hasSearchCriteria(state.activeSearch)) &&
+      state.activeSearch.searchScope !== 'pst'
+    const response = await fetchJson('/api/psts/remove', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        scopePath: normalizedScopePath,
+        fileName
+      })
+    })
+
+    const removedCurrentSession =
+      Boolean(currentSessionId) &&
+      Array.isArray(response.closedSessionIds) &&
+      response.closedSessionIds.includes(currentSessionId)
+
+    if (removedCurrentSession) {
+      if (hasGlobalSearch) {
+        clearMailboxSessionState({ preserveSearchResults: true })
+      } else {
+        clearMailboxSessionState()
+      }
+    }
+
+    await loadMailboxCatalog({
+      showBusy: false,
+      refreshOnly: true,
+      casePath: state.selectedCasePath || undefined,
+      scopePath: state.selectedScopePath || undefined,
+      preferredFileName: state.selectedPstFileName || undefined,
+      preferredScopePath: state.selectedScopePath || undefined
+    })
+
+    if (
+      hasGlobalSearch &&
+      state.activeSearch &&
+      state.activeSearch.searchScope === 'search'
+    ) {
+      const activeSearchScope = normalizeScopePath(
+        state.activeSearch.scopePath || state.selectedScopePath || ''
+      )
+      if (activeSearchScope && !getCatalogScope(activeSearchScope)) {
+        state.currentSearchPage = null
+        state.activeSearch = null
+        state.selectedMessageId = null
+        state.currentMessageDetail = null
+        renderMessageList()
+        renderMessageDetail()
+        saveState()
+      }
+    }
+
+    if (hasGlobalSearch && state.currentSearchPage && state.activeSearch) {
+      await refreshActiveVisibleMessages()
+    }
+    setStatus(`Removed ${fileName} from the platform.`, 'success')
+  }
+
+  async function restoreMailboxToPlatform(fileName, scopePath) {
+    const normalizedScopePath = normalizeScopePath(scopePath || '')
+    await fetchJson('/api/psts/restore', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        scopePath: normalizedScopePath,
+        fileName
+      })
+    })
+
+    await loadMailboxCatalog({
+      showBusy: false,
+      refreshOnly: true,
+      casePath: state.selectedCasePath || undefined,
+      scopePath: state.selectedScopePath || undefined,
+      preferredFileName: state.selectedPstFileName || undefined,
+      preferredScopePath: state.selectedScopePath || undefined
+    })
+
+    if (state.currentSearchPage || state.currentFolderPage) {
+      await refreshActiveVisibleMessages()
+    }
+    setStatus(`Restored ${fileName} to the active catalog.`, 'success')
   }
 
   function makeApiPath(...parts) {
@@ -824,6 +1037,7 @@
     )
     localStorage.setItem(STORAGE_KEYS.searchScope, state.searchScope)
     localStorage.setItem(STORAGE_KEYS.mailboxScopeView, state.mailboxScopeView)
+    localStorage.setItem(STORAGE_KEYS.catalogMode, state.catalogMode)
     localStorage.setItem(STORAGE_KEYS.flaggedBundleScope, state.bundleScope)
   }
 
@@ -954,25 +1168,21 @@
     ui.hiddenFiltersToggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false')
     ui.hiddenFiltersDropdown?.classList.toggle('is-open', isOpen)
     ui.hiddenFiltersPanel.hidden = !isOpen
+    ui.hiddenFiltersPanel.setAttribute('aria-hidden', isOpen ? 'false' : 'true')
+    ui.hiddenFiltersPanel.style.display = isOpen ? 'flex' : 'none'
 
     if (!isOpen) {
       return
     }
 
-    const bindCloseHandler = () => {
-      const closeButtons = ui.hiddenFiltersPanel.querySelectorAll('[data-action="close-hidden-filters"]')
-      closeButtons.forEach((button) => {
-        if (button.dataset.boundHiddenFiltersClose === 'true') {
-          return
-        }
-        button.dataset.boundHiddenFiltersClose = 'true'
-        button.addEventListener('click', (event) => {
-          event.preventDefault()
-          event.stopPropagation()
-          closeHiddenFiltersDropdown()
-        })
-      })
-    }
+    const closeButtons = ui.hiddenFiltersPanel.querySelectorAll('[data-action="close-hidden-filters"]')
+    closeButtons.forEach((button) => {
+      button.onclick = (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        closeHiddenFiltersDropdown()
+      }
+    })
 
     if (!rules.length) {
       ui.hiddenFiltersPanel.innerHTML = `
@@ -1065,6 +1275,72 @@
     }
   }
 
+  function renderPstRow(file) {
+    const modifiedAt = file.modifiedAt ? formatDate(file.modifiedAt) : 'Unknown date'
+    const size = Number.isFinite(file.size) ? formatBytes(file.size) : 'Unknown size'
+    const pathLine =
+      state.mailboxScopeView === 'all' && file.displayPath
+        ? `<span class="pst-item-path">${escapeHtml(file.displayPath)}</span>`
+        : ''
+    const commonContent = `
+      <span class="pst-item-name">${escapeHtml(file.fileName)}</span>
+      ${pathLine}
+      <span class="pst-item-meta">${escapeHtml(size)} · ${escapeHtml(modifiedAt)}</span>
+    `
+
+    if (state.catalogMode === 'removed') {
+      return `
+        <div class="pst-item-row">
+          <div class="pst-item pst-item-static" title="${escapeAttr(file.fileName)}">
+            ${commonContent}
+          </div>
+          <button
+            class="ghost-button small pst-item-action pst-item-action--compact"
+            type="button"
+            data-action="restore-pst"
+            data-pst-file-name="${escapeAttr(file.fileName)}"
+            data-scope-path="${escapeAttr(file.scopePath || '')}"
+            aria-label="Restore PST to active catalog"
+            title="Restore PST to active catalog"
+          >
+            +
+          </button>
+        </div>
+      `
+    }
+
+    const isActive =
+      file.fileName === state.selectedPstFileName &&
+      normalizeScopePath(file.scopePath) === normalizeScopePath(state.selectedScopePath)
+        ? ' active'
+        : ''
+
+    return `
+      <div class="pst-item-row">
+        <button
+          class="pst-item${isActive}"
+          type="button"
+          data-pst-file-name="${escapeAttr(file.fileName)}"
+          data-scope-path="${escapeAttr(file.scopePath || '')}"
+          title="${escapeAttr(file.fileName)}"
+        >
+          ${commonContent}
+        </button>
+        <button
+          class="ghost-button small pst-item-action pst-item-action--compact"
+          type="button"
+          data-action="remove-pst"
+          data-pst-file-name="${escapeAttr(file.fileName)}"
+          data-scope-path="${escapeAttr(file.scopePath || '')}"
+          aria-label="Remove PST from platform"
+          title="Remove PST from platform"
+        >
+          -
+        </button>
+      </div>
+    `
+  }
+
   function renderPstCatalog() {
     const cases = getCatalogCases()
     const selectedCase =
@@ -1081,17 +1357,24 @@
     state.selectedScopePath = selectedSearch ? selectedSearch.scopePath : ''
     state.selectedScopeLabel = selectedSearch ? selectedSearch.scopeLabel : getScopeLabel(state.selectedScopePath)
 
+    ui.mailboxesTitle.textContent = getCatalogModeLabel(state.catalogMode)
+    ui.catalogModeToggle.textContent =
+      state.catalogMode === 'removed' ? 'Active' : 'Removed'
+    ui.catalogModeToggle.setAttribute('aria-pressed', state.catalogMode === 'removed' ? 'true' : 'false')
+
     const allMailboxCount = selectedCase
       ? getMailboxEntriesForCase(selectedCase.casePath, 'all').length
       : 0
     const visibleMailboxes = selectedCase
       ? getMailboxEntriesForDisplay(selectedCase.casePath, state.mailboxScopeView)
       : []
-    const selectedMailboxVisible = visibleMailboxes.some(
-      (entry) =>
-        entry.fileName === state.selectedPstFileName &&
-        normalizeScopePath(entry.scopePath) === normalizeScopePath(state.selectedScopePath)
-    )
+    const selectedMailboxVisible =
+      state.catalogMode === 'active' &&
+      visibleMailboxes.some(
+        (entry) =>
+          entry.fileName === state.selectedPstFileName &&
+          normalizeScopePath(entry.scopePath) === normalizeScopePath(state.selectedScopePath)
+      )
 
     if (state.mailboxFilter && state.selectedPstFileName && !selectedMailboxVisible) {
       state.selectedPstFileName = null
@@ -1134,14 +1417,21 @@
     if (!state.catalogLoaded) {
       ui.pstEmpty.classList.remove('hidden')
       ui.pstEmpty.innerHTML =
-        '<strong>Loading PST files...</strong> Scanning the project <code>PST/</code> folder.'
+        `<strong>Loading ${
+          state.catalogMode === 'removed' ? 'removed PST files' : 'PST files'
+        }...</strong> Scanning the project <code>PST/</code> folder.`
       ui.pstList.innerHTML = ''
       return
     }
 
     if (!searches.length) {
       ui.pstEmpty.classList.remove('hidden')
-      ui.pstEmpty.innerHTML = escapeHtml(state.catalogMessage || 'No searches available.')
+      ui.pstEmpty.innerHTML = escapeHtml(
+        state.catalogMessage ||
+          (state.catalogMode === 'removed'
+            ? 'No removed PSTs are available yet.'
+            : 'No searches available.')
+      )
       ui.pstList.innerHTML = ''
       return
     }
@@ -1151,42 +1441,20 @@
       ui.pstEmpty.innerHTML = escapeHtml(
         state.mailboxFilter
           ? 'No PST files match the current mailbox filter.'
-          : state.mailboxScopeView === 'all'
-            ? 'No PST files were found for this case.'
-            : state.catalogMessage || 'No PST files found.'
+          : state.catalogMode === 'removed'
+            ? state.mailboxScopeView === 'all'
+              ? 'No removed PST files were found for this case.'
+              : state.catalogMessage || 'No removed PST files found.'
+            : state.mailboxScopeView === 'all'
+              ? 'No PST files were found for this case.'
+              : state.catalogMessage || 'No PST files found.'
       )
       ui.pstList.innerHTML = ''
       return
     }
 
     ui.pstEmpty.classList.add('hidden')
-    ui.pstList.innerHTML = visibleMailboxes
-      .map((file) => {
-        const isActive =
-          file.fileName === state.selectedPstFileName &&
-          normalizeScopePath(file.scopePath) === normalizeScopePath(state.selectedScopePath)
-            ? ' active'
-            : ''
-        const modifiedAt = file.modifiedAt ? formatDate(file.modifiedAt) : 'Unknown date'
-        const size = Number.isFinite(file.size) ? formatBytes(file.size) : 'Unknown size'
-        const pathLine =
-          state.mailboxScopeView === 'all' && file.displayPath
-            ? `<span class="pst-item-path">${escapeHtml(file.displayPath)}</span>`
-            : ''
-        return `
-          <button
-            class="pst-item${isActive}"
-            data-pst-file-name="${escapeAttr(file.fileName)}"
-            data-scope-path="${escapeAttr(file.scopePath || '')}"
-            title="${escapeAttr(file.fileName)}"
-          >
-            <span class="pst-item-name">${escapeHtml(file.fileName)}</span>
-            ${pathLine}
-            <span class="pst-item-meta">${escapeHtml(size)} · ${escapeHtml(modifiedAt)}</span>
-          </button>
-        `
-      })
-      .join('')
+    ui.pstList.innerHTML = visibleMailboxes.map((file) => renderPstRow(file)).join('')
   }
 
   function collectFoldersWithContent(node, depth = 0, output = []) {
@@ -1368,15 +1636,27 @@
       return
     }
 
+    const visibleItems = filterVisibleMessageItems(page.items)
+    const selectedVisible =
+      state.selectedMessageId &&
+      visibleItems.some((item) => resolveMessageId(item) === state.selectedMessageId)
+    if (state.selectedMessageId && !selectedVisible) {
+      state.selectedMessageId = null
+      state.currentMessageDetail = null
+      ui.messageDetail.innerHTML =
+        '<div class="panel-empty">Select a message to inspect it.</div>'
+      saveState()
+    }
+
     ui.messageCountBadge.textContent = String(state.summary?.stats?.messageCount ?? 0)
-    ui.messageList.innerHTML = page.items.length
-      ? page.items.map((item) => renderMessageRow(item)).join('')
+    ui.messageList.innerHTML = visibleItems.length
+      ? visibleItems.map((item) => renderMessageRow(item)).join('')
       : '<div class="panel-empty">No messages match the current filters.</div>'
 
     const folderName = page.folder?.displayName || page.scopeLabel || 'folder'
     const queryLabel = page.query ? ` filtered by "${page.query}"` : ''
-    ui.messageResultCount.textContent = page.items.length
-      ? `Showing ${page.items.length} of ${page.total} messages in ${folderName}${queryLabel}.`
+    ui.messageResultCount.textContent = visibleItems.length
+      ? `Showing ${visibleItems.length} of ${page.total} messages in ${folderName}${queryLabel}.`
       : `No messages found in ${folderName}${queryLabel}.`
     ui.pageInfo.textContent = `Page ${page.page} of ${page.totalPages}`
     updatePagingButtons()
@@ -1739,6 +2019,7 @@
   async function loadMailboxCatalog(options = {}) {
     const showBusy = options.showBusy !== false
     const hadSession = Boolean(state.sessionId)
+    const shouldAutoOpen = state.catalogMode === 'active' && options.refreshOnly !== true
     if (showBusy) {
       setBodyBusy(true)
     }
@@ -1757,7 +2038,7 @@
           ''
       )
       const response = await fetchJson(
-        `/api/psts${scopePath ? `?scopePath=${encodeURIComponent(scopePath)}` : ''}`
+        `${getCatalogEndpoint()}${scopePath ? `?scopePath=${encodeURIComponent(scopePath)}` : ''}`
       )
       state.catalogLoaded = true
       state.catalogMessage = response.message || ''
@@ -1792,6 +2073,12 @@
           mailboxEntries.find((item) => item.fileName === preferredFileName)
         : null
       const nextMailbox = preferred || mailboxEntries[0] || null
+
+      if (!shouldAutoOpen) {
+        renderPstCatalog()
+        setStatus(response.message || 'Catalog loaded.', 'success')
+        return
+      }
 
       if (!nextMailbox) {
         renderPstCatalog()
@@ -2211,7 +2498,7 @@
   }
 
   function wireEvents() {
-    ui.refreshCatalog.addEventListener('click', () => {
+    ui.pstCountBadge.addEventListener('click', () => {
       void (async () => {
         setStatus('Refreshing mailbox catalog and search cache...')
         try {
@@ -2221,6 +2508,7 @@
         }
         await loadMailboxCatalog({
           showBusy: true,
+          refreshOnly: state.catalogMode === 'removed',
           casePath: state.selectedCasePath || undefined,
           scopePath: state.selectedScopePath || undefined,
           preferredFileName: state.selectedPstFileName || undefined
@@ -2237,6 +2525,7 @@
       saveState()
       void loadMailboxCatalog({
         showBusy: true,
+        refreshOnly: state.catalogMode === 'removed',
         casePath: state.selectedCasePath || undefined,
         scopePath: state.selectedScopePath || undefined,
         preferredFileName: state.selectedPstFileName || undefined,
@@ -2259,6 +2548,7 @@
       saveState()
       void loadMailboxCatalog({
         showBusy: true,
+        refreshOnly: state.catalogMode === 'removed',
         casePath: state.selectedCasePath || undefined,
         scopePath: state.selectedScopePath || undefined,
         preferredFileName: state.selectedPstFileName || undefined,
@@ -2285,8 +2575,24 @@
     }
 
     ui.pstList.addEventListener('click', (event) => {
+      const actionButton = event.target.closest('[data-action]')
+      if (actionButton && actionButton.dataset.action) {
+        const action = actionButton.dataset.action
+        const fileName = actionButton.dataset.pstFileName || ''
+        const scopePath = actionButton.dataset.scopePath || ''
+        if (action === 'remove-pst' && fileName) {
+          void removeMailboxFromPlatform(fileName, scopePath)
+        } else if (action === 'restore-pst' && fileName) {
+          void restoreMailboxToPlatform(fileName, scopePath)
+        }
+        return
+      }
+
       const button = event.target.closest('[data-pst-file-name]')
       if (!button) {
+        return
+      }
+      if (state.catalogMode === 'removed') {
         return
       }
       const fileName = button.dataset.pstFileName
@@ -2296,6 +2602,21 @@
       }
       void openMailbox(fileName, { showBusy: true, scopePath })
     })
+
+    if (ui.catalogModeToggle) {
+      ui.catalogModeToggle.addEventListener('click', () => {
+        state.catalogMode = state.catalogMode === 'removed' ? 'active' : 'removed'
+        saveState()
+        void loadMailboxCatalog({
+          showBusy: true,
+          refreshOnly: true,
+          casePath: state.selectedCasePath || undefined,
+          scopePath: state.selectedScopePath || undefined,
+          preferredFileName: state.selectedPstFileName || undefined,
+          preferredScopePath: state.selectedScopePath || undefined
+        })
+      })
+    }
 
     ui.folderTree.addEventListener('click', (event) => {
       const button = event.target.closest('[data-folder-id]')
@@ -2513,9 +2834,10 @@
   }
 
   async function bootstrap() {
-    ui.refreshCatalog = getElement('refresh-catalog')
     ui.sessionSummary = getElement('session-summary')
     ui.pstCountBadge = getElement('pst-count-badge')
+    ui.catalogModeToggle = getElement('catalog-mode-toggle')
+    ui.mailboxesTitle = getElement('mailboxes-section-title')
     ui.pstEmpty = getElement('pst-empty')
     ui.pstList = getElement('pst-list')
     ui.folderTree = getElement('folder-tree')
@@ -2556,6 +2878,7 @@
       : 'pst'
     state.mailboxScopeView =
       localStorage.getItem(STORAGE_KEYS.mailboxScopeView) === 'all' ? 'all' : 'search'
+    state.catalogMode = localStorage.getItem(STORAGE_KEYS.catalogMode) === 'removed' ? 'removed' : 'active'
     state.selectedCasePath = normalizeScopePath(localStorage.getItem(STORAGE_KEYS.casePath) || '')
     state.selectedScopePath = normalizeScopePath(localStorage.getItem(STORAGE_KEYS.scopePath) || '')
     state.selectedScopeLabel = getScopeLabel(state.selectedScopePath)
@@ -2576,6 +2899,7 @@
     renderPstCatalog()
     await loadMailboxCatalog({
       showBusy: true,
+      refreshOnly: state.catalogMode === 'removed',
       casePath: state.selectedCasePath || undefined,
       scopePath: state.selectedScopePath || undefined,
       preferredFileName: state.selectedPstFileName || undefined

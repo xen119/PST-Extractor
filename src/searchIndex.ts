@@ -65,6 +65,7 @@ export interface SearchIndexSearchOptions {
   scope: SearchScope
   scopePath?: string
   mailboxKey?: string
+  allowedMailboxKeys?: string[]
   query: string
   mode: SearchMode
   mailOnly: boolean
@@ -101,6 +102,7 @@ export interface SearchIndexStore {
   kind: 'memory' | 'mongo'
   isPersistent: boolean
   replaceMailboxDocuments(mailboxKey: string, documents: SearchIndexDocument[]): Promise<void>
+  deleteMailboxDocuments(mailboxKey: string): Promise<void>
   updateReviewState(mailboxKey: string, messageId: string, review: ReviewState | null): Promise<void>
   clearAllDocuments(): Promise<void>
   listHiddenRules(): Promise<HiddenRuleRecord[]>
@@ -172,6 +174,10 @@ function escapeRegex(value: string): string {
 
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.map((value) => normalizeExactValue(value)).filter(Boolean))]
+}
+
+function uniqueTextValues(values: string[]): string[] {
+  return [...new Set(values.map((value) => normalizeText(value)).filter(Boolean))]
 }
 
 function tokenizeSearchText(value: string): string[] {
@@ -424,10 +430,12 @@ function buildFilterMatch(
   hiddenRules: HiddenRuleRecord[]
 ): Record<string, unknown> {
   const filter: Record<string, unknown> = {}
+  const mailboxKeysProvided = options.allowedMailboxKeys !== undefined
+  const allowedMailboxKeys = uniqueTextValues(options.allowedMailboxKeys || [])
 
   if (options.scope === 'pst') {
     if (options.mailboxKey) {
-      filter.mailboxKey = normalizeText(options.mailboxKey)
+      allowedMailboxKeys.push(normalizeText(options.mailboxKey))
     }
   } else if (options.scope === 'search') {
     const scopePath = normalizeText(options.scopePath)
@@ -450,6 +458,11 @@ function buildFilterMatch(
 
   if (options.reviewTag) {
     filter.reviewTagValues = normalizeExactValue(options.reviewTag)
+  }
+
+  const normalizedMailboxKeys = uniqueTextValues(allowedMailboxKeys)
+  if (mailboxKeysProvided) {
+    filter.mailboxKey = { $in: normalizedMailboxKeys }
   }
 
   const hiddenAddresses = uniqueStrings(
@@ -666,6 +679,10 @@ export class MemorySearchIndexStore implements SearchIndexStore {
     this.documents.set(key, records)
   }
 
+  async deleteMailboxDocuments(mailboxKey: string): Promise<void> {
+    this.documents.delete(normalizeText(mailboxKey))
+  }
+
   async updateReviewState(
     mailboxKey: string,
     messageId: string,
@@ -707,7 +724,12 @@ export class MemorySearchIndexStore implements SearchIndexStore {
 
   async search(options: SearchIndexSearchOptions): Promise<SearchIndexPage> {
     const hiddenRules = this.hiddenRules.listHiddenRules()
-    const records = [...this.documents.values()].flatMap((mailbox) => [...mailbox.values()])
+    const mailboxKeysProvided = options.allowedMailboxKeys !== undefined
+    const allowedMailboxKeys = uniqueTextValues(options.allowedMailboxKeys || [])
+    const allRecords = [...this.documents.values()].flatMap((mailbox) => [...mailbox.values()])
+    const records = mailboxKeysProvided
+      ? allRecords.filter((record) => allowedMailboxKeys.includes(record.mailboxKey))
+      : allRecords
     const matched = records
       .filter((record) => matchesDocument(record, options, hiddenRules))
       .sort((left, right) => sortDocuments(left, right, options.sort))
@@ -907,6 +929,10 @@ export class MongoSearchIndexStore implements SearchIndexStore {
       return
     }
     await this.documents.insertMany(documents.map((document) => ({ ...document, mailboxKey: key })))
+  }
+
+  async deleteMailboxDocuments(mailboxKey: string): Promise<void> {
+    await this.documents.deleteMany({ mailboxKey: normalizeText(mailboxKey) })
   }
 
   async updateReviewState(

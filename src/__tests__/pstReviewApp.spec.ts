@@ -510,6 +510,121 @@ describe('pst review api', () => {
     expect(docsHtml).toContain('/api/openapi.json')
   })
 
+  it('moves PSTs into and out of the removed archive without deleting them', async () => {
+    rootDir = makeTempDir('pst-review-archive-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
+    stageFixture(enronPath, path.join(pstDir, 'Case1', 'Search1', 'sample.pst'))
+
+    const started = await startApp(pstDir)
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const opened = await requestJson(`${started.baseUrl}/api/psts/open`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        scopePath: 'Case1/Search1',
+        fileName: 'sample.pst'
+      })
+    })
+
+    const folder = findMailFolder(opened.tree)
+    expect(folder).toBeTruthy()
+
+    const folderPage = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/folders/${encodeURIComponent(
+        folder!.id
+      )}/messages?page=1&pageSize=20`
+    )
+    const message = folderPage.page.items.find((item: { isMailLike: boolean }) => item.isMailLike)
+    expect(message).toBeTruthy()
+
+    const detail = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
+        message.id
+      )}`
+    )
+    const searchTerm = String(detail.detail.subject || message.subject || '').trim()
+    expect(searchTerm).toBeTruthy()
+
+    const beforeRemove = await requestJson(
+      `${started.baseUrl}/api/search?scope=all&query=${encodeURIComponent(
+        searchTerm
+      )}&mailOnly=1&pageSize=100`
+    )
+    expect(beforeRemove.page.total).toBeGreaterThan(0)
+
+    const removal = await requestJson(`${started.baseUrl}/api/psts/remove`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        scopePath: 'Case1/Search1',
+        fileName: 'sample.pst'
+      })
+    })
+    expect(removal.removed.scopePath).toBe('Case1/Search1')
+    expect(removal.closedSessionIds).toContain(opened.sessionId)
+
+    await expect(
+      requestJson(`${started.baseUrl}/api/sessions/${opened.sessionId}`)
+    ).rejects.toThrow('Session not found')
+
+    const activeCatalog = await requestJson(`${started.baseUrl}/api/psts`)
+    expect(activeCatalog.scopes).toHaveLength(0)
+    expect(activeCatalog.files).toHaveLength(0)
+
+    const removedCatalog = await requestJson(`${started.baseUrl}/api/psts/removed`)
+    expect(removedCatalog.scopes.map((scope: { scopeLabel: string }) => scope.scopeLabel)).toEqual([
+      'Case1 / Search1'
+    ])
+    expect(removedCatalog.files.map((file: { fileName: string }) => file.fileName)).toEqual([
+      'sample.pst'
+    ])
+
+    const afterRemove = await requestJson(
+      `${started.baseUrl}/api/search?scope=all&query=${encodeURIComponent(
+        searchTerm
+      )}&mailOnly=1&pageSize=100`
+    )
+    expect(afterRemove.page.total).toBeLessThan(beforeRemove.page.total)
+    expect(
+      afterRemove.page.items.every((item: { fileName: string }) => item.fileName !== 'sample.pst')
+    ).toBe(true)
+
+    const restore = await requestJson(`${started.baseUrl}/api/psts/restore`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        scopePath: 'Case1/Search1',
+        fileName: 'sample.pst'
+      })
+    })
+    expect(restore.restored.scopePath).toBe('Case1/Search1')
+
+    const restoredCatalog = await requestJson(`${started.baseUrl}/api/psts`)
+    expect(restoredCatalog.scopes.map((scope: { scopeLabel: string }) => scope.scopeLabel)).toEqual([
+      'Case1 / Search1'
+    ])
+    expect(restoredCatalog.files.map((file: { fileName: string }) => file.fileName)).toEqual([
+      'sample.pst'
+    ])
+
+    const afterRestore = await requestJson(
+      `${started.baseUrl}/api/search?scope=all&query=${encodeURIComponent(
+        searchTerm
+      )}&mailOnly=1&pageSize=100`
+    )
+    expect(afterRestore.page.total).toBe(beforeRemove.page.total)
+  })
+
   it('allows appointment items to be flagged and cleared', async () => {
     rootDir = makeTempDir('pst-review-api-appt-')
     const pstDir = path.join(rootDir, 'PST')

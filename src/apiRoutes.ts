@@ -1,6 +1,9 @@
 export const API_ROUTES = {
   pstCatalog: '/api/psts',
+  pstRemovedCatalog: '/api/psts/removed',
   pstOpen: '/api/psts/open',
+  pstRemove: '/api/psts/remove',
+  pstRestore: '/api/psts/restore',
   searchIndexRefresh: '/api/search/index/refresh',
   searchFilters: '/api/search/filters',
   searchFilter: '/api/search/filters/:filterId',

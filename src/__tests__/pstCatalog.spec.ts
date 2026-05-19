@@ -3,8 +3,11 @@ import * as os from 'os'
 import * as path from 'path'
 import {
   listPstMailboxFiles,
+  listRemovedPstMailboxFiles,
+  movePstMailboxToRemoved,
   openPstMailbox,
-  resolvePstMailboxPath
+  resolvePstMailboxPath,
+  restorePstMailboxFromRemoved
 } from '../pstCatalog'
 
 const resolve = path.resolve
@@ -30,8 +33,10 @@ describe('pst catalog helpers', () => {
     fs.mkdirSync(path.join(rootDir, 'Case1', 'Search1'), { recursive: true })
     fs.mkdirSync(path.join(rootDir, 'Case1', 'Search2'), { recursive: true })
     fs.mkdirSync(path.join(rootDir, 'Case2', 'Search1'), { recursive: true })
+    fs.mkdirSync(path.join(rootDir, '_removed', 'Case9', 'Search9'), { recursive: true })
     stageFixture(enronPath, path.join(rootDir, 'Case1', 'Search1', 'enron.pst'))
     stageFixture(outlookPath, path.join(rootDir, 'Case2', 'Search1', 'mail.ost'))
+    stageFixture(enronPath, path.join(rootDir, '_removed', 'Case9', 'Search9', 'removed.pst'))
     fs.writeFileSync(path.join(rootDir, 'Case1', 'Search2', 'notes.txt'), 'ignore me')
 
     const result = listPstMailboxFiles(rootDir)
@@ -47,6 +52,11 @@ describe('pst catalog helpers', () => {
     expect(result.scopes[0].files.map((file) => file.fileName)).toEqual(['enron.pst'])
     expect(result.scopes[1].files.map((file) => file.fileName)).toEqual(['mail.ost'])
     expect(result.message).toContain('mailbox file')
+
+    const removed = listRemovedPstMailboxFiles(rootDir)
+    expect(removed.rootExists).toBe(true)
+    expect(removed.scopes.map((scope) => scope.scopeLabel)).toEqual(['Case9 / Search9'])
+    expect(removed.files.map((file) => file.fileName)).toEqual(['removed.pst'])
   })
 
   it('includes PST root when direct mailbox files exist there', () => {
@@ -87,6 +97,9 @@ describe('pst catalog helpers', () => {
     expect(() => resolvePstMailboxPath(rootDir, '../Case1/Search1', 'enron.pst')).toThrow(
       'Scope path must stay within the PST folder'
     )
+    expect(() => resolvePstMailboxPath(rootDir, '_removed/Case1/Search1', 'enron.pst')).toThrow(
+      'Scope path must stay within the PST folder'
+    )
     expect(() => resolvePstMailboxPath(rootDir, 'Case1/Search1', '../enron.pst')).toThrow(
       'Mailbox file name must not include a path'
     )
@@ -99,5 +112,29 @@ describe('pst catalog helpers', () => {
     expect(session.mailboxName).toBe('Personal folders')
     expect(session.stats.folderCount).toBe(11)
     expect(session.stats.messageCount).toBe(71)
+  })
+
+  it('moves mailbox files into and out of the removed archive without deleting them', () => {
+    const rootDir = makeTempDir('pst-catalog-archive-')
+    fs.mkdirSync(path.join(rootDir, 'Case1', 'Search1'), { recursive: true })
+    stageFixture(enronPath, path.join(rootDir, 'Case1', 'Search1', 'enron.pst'))
+
+    const removal = movePstMailboxToRemoved(rootDir, 'Case1/Search1', 'enron.pst')
+    expect(fs.existsSync(removal.sourcePath)).toBe(false)
+    expect(fs.existsSync(removal.destinationPath)).toBe(true)
+    expect(
+      listPstMailboxFiles(rootDir).scopes.some((scope) => scope.scopePath === 'Case1/Search1')
+    ).toBe(false)
+    expect(listRemovedPstMailboxFiles(rootDir).scopes[0].files.map((file) => file.fileName)).toEqual([
+      'enron.pst'
+    ])
+
+    const restore = restorePstMailboxFromRemoved(rootDir, 'Case1/Search1', 'enron.pst')
+    expect(fs.existsSync(restore.sourcePath)).toBe(false)
+    expect(fs.existsSync(restore.destinationPath)).toBe(true)
+    expect(listPstMailboxFiles(rootDir).scopes[0].files.map((file) => file.fileName)).toEqual([
+      'enron.pst'
+    ])
+    expect(listRemovedPstMailboxFiles(rootDir).files).toHaveLength(0)
   })
 })

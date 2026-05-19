@@ -31,13 +31,28 @@
           </section>
 
           <section class="sidebar-section mailboxes-section" aria-label="Mailbox list">
-            <div class="panel-head slim">
-              <h2>Mailboxes</h2>
-              <div class="mailboxes-head-actions">
-                <span id="pst-count-badge" class="badge">0</span>
-                <button id="refresh-catalog" class="ghost-button small" type="button">
-                  Refresh
-                </button>
+            <div class="panel-head slim mailboxes-head">
+              <div class="mailboxes-head-row">
+                <h2 id="mailboxes-section-title">Mailboxes</h2>
+                <div class="mailboxes-head-actions mailboxes-head-actions--top">
+                  <button
+                    id="pst-count-badge"
+                    class="badge badge-button"
+                    type="button"
+                    aria-label="Refresh mailbox catalog"
+                    title="Refresh mailbox catalog"
+                  >
+                    0
+                  </button>
+                  <button
+                    id="catalog-mode-toggle"
+                    class="ghost-button small"
+                    type="button"
+                    aria-pressed="false"
+                  >
+                    Removed
+                  </button>
+                </div>
               </div>
             </div>
             <label class="search-field mailbox-filter-field" for="pst-filter">

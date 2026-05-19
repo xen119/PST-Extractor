@@ -180,6 +180,37 @@ describe('search index cache', () => {
     expect(selectedMailbox.total).toBe(1)
     expect(selectedMailbox.scopeLabel).toBe('Selected PST')
 
+    const activeMailboxOnly = await store.search({
+      scope: 'all',
+      allowedMailboxKeys: ['C:/PST/Case1/Search1/beta.pst'],
+      query: 'signature',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'date-desc',
+      page: 1,
+      pageSize: 20,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: ''
+    })
+    expect(activeMailboxOnly.total).toBe(0)
+
+    const activeMailboxMatch = await store.search({
+      scope: 'all',
+      allowedMailboxKeys: ['C:/PST/Case1/Search1/alpha.pst'],
+      query: 'signature',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'date-desc',
+      page: 1,
+      pageSize: 20,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: ''
+    })
+    expect(activeMailboxMatch.total).toBe(1)
+    expect(activeMailboxMatch.items[0].mailboxKey).toBe('C:/PST/Case1/Search1/alpha.pst')
+
     const hiddenRule = await store.upsertHiddenRule({
       kind: 'subject',
       value: 'Project Alpha',
