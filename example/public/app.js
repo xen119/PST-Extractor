@@ -959,20 +959,57 @@
       return
     }
 
+    const bindCloseHandler = () => {
+      const closeButtons = ui.hiddenFiltersPanel.querySelectorAll('[data-action="close-hidden-filters"]')
+      closeButtons.forEach((button) => {
+        if (button.dataset.boundHiddenFiltersClose === 'true') {
+          return
+        }
+        button.dataset.boundHiddenFiltersClose = 'true'
+        button.addEventListener('click', (event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          closeHiddenFiltersDropdown()
+        })
+      })
+    }
+
     if (!rules.length) {
       ui.hiddenFiltersPanel.innerHTML = `
+        <div class="hidden-filters-head">
+          <div class="hidden-filters-title">Hidden filters</div>
+          <button
+            class="ghost-button small hidden-filters-close"
+            type="button"
+            data-action="close-hidden-filters"
+            aria-label="Close hidden filters"
+          >
+            ×
+          </button>
+        </div>
         <div class="panel-empty compact-note">
           Hidden filters will appear here. Click <strong>-</strong> on an address or subject to
           hide it globally.
         </div>
       `
+      bindCloseHandler()
       return
     }
 
     ui.hiddenFiltersPanel.innerHTML = `
       <div class="hidden-filters-head">
         <div class="hidden-filters-title">Hidden filters</div>
-        <span class="badge">${escapeHtml(String(rules.length))}</span>
+        <div class="hidden-filters-head-actions">
+          <span class="badge">${escapeHtml(String(rules.length))}</span>
+          <button
+            class="ghost-button small hidden-filters-close"
+            type="button"
+            data-action="close-hidden-filters"
+            aria-label="Close hidden filters"
+          >
+            ×
+          </button>
+        </div>
       </div>
       <div class="hidden-filters-list">
         ${rules
@@ -995,6 +1032,7 @@
           .join('')}
       </div>
     `
+    bindCloseHandler()
   }
 
   function setHiddenFiltersOpen(isOpen) {
@@ -2359,6 +2397,10 @@
     ui.hiddenFiltersPanel.addEventListener('click', (event) => {
       const actionButton = event.target.closest('[data-action="remove-hidden-filter"]')
       if (!actionButton) {
+        const closeButton = event.target.closest('[data-action="close-hidden-filters"]')
+        if (closeButton) {
+          closeHiddenFiltersDropdown()
+        }
         return
       }
       void removeHiddenRule(actionButton.dataset.filterId || '')

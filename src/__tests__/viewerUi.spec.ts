@@ -52,6 +52,7 @@ describe('viewer UI shell', () => {
     expect(script).toContain('hiddenFiltersCount')
     expect(script).toContain('hiddenFiltersPanel')
     expect(script).toContain('hiddenFiltersOpen')
+    expect(script).toContain('data-action="close-hidden-filters"')
     expect(script).toContain('refreshActiveVisibleMessages')
     expect(script).toContain('bundleScope')
     expect(script).toContain('downloadFlaggedBundle')

@@ -199,6 +199,32 @@ describe('viewer integration', () => {
     expect(
       addressHidden.items.some((item) => item.senderEmailAddress === hiddenAddress)
     ).toBe(false)
+
+    const displayAddress = baseline.items[0]?.recipientText || baseline.items[0]?.displayTo || ''
+    expect(displayAddress).toBeTruthy()
+    const displayAddressHidden = listFolderMessages(
+      enronSession,
+      targetFolder!.id,
+      {
+        pageSize: 20
+      },
+      [
+        {
+          filterId: 'display-address-rule',
+          kind: 'address',
+          value: displayAddress,
+          label: displayAddress,
+          createdAt: '',
+          updatedAt: ''
+        }
+      ]
+    )
+    expect(displayAddressHidden.total).toBeLessThan(baseline.total)
+    expect(
+      displayAddressHidden.items.some((item) =>
+        (item.recipientText || item.displayTo || '').includes(displayAddress)
+      )
+    ).toBe(false)
   })
 
   it('matches metadata, plain body text, and normalized html body text', () => {

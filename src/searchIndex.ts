@@ -257,6 +257,21 @@ function extractEmailAddresses(...values: Array<string | undefined | null>): str
   return [...emails]
 }
 
+function buildAddressMatchValues(...values: Array<string | undefined | null>): string[] {
+  const matches = new Set<string>()
+  for (const value of values) {
+    const text = normalizeText(value)
+    if (!text) {
+      continue
+    }
+    matches.add(normalizeExactValue(text))
+    for (const email of extractEmailAddresses(text)) {
+      matches.add(email)
+    }
+  }
+  return [...matches]
+}
+
 function buildSearchTextParts(
   document: Pick<
     SearchIndexDocument,
@@ -738,17 +753,29 @@ function matchesDocument(
   }
 
   const hiddenAddresses = uniqueStrings(
-    hiddenRules.filter((rule) => rule.kind === 'address').map((rule) => rule.value)
+    hiddenRules
+      .filter((rule) => rule.kind === 'address')
+      .flatMap((rule) => buildAddressMatchValues(rule.value))
   )
   const hiddenSubjects = uniqueStrings(
     hiddenRules.filter((rule) => rule.kind === 'subject').map((rule) => rule.value)
   )
 
-  if (
-    hiddenAddresses.length &&
-    record.addressValues.some((value) => hiddenAddresses.includes(value))
-  ) {
-    return false
+  if (hiddenAddresses.length) {
+    const addressValues = buildAddressMatchValues(
+      record.senderEmailAddress,
+      record.displayTo,
+      record.displayCC,
+      record.displayBCC,
+      record.resolvedDisplayTo,
+      record.resolvedDisplayCC,
+      record.resolvedDisplayBCC,
+      record.recipientText,
+      ...record.addressValues
+    )
+    if (addressValues.some((value) => hiddenAddresses.includes(value))) {
+      return false
+    }
   }
 
   if (

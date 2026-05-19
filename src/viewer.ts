@@ -1496,6 +1496,21 @@ function extractEmailAddresses(...values: Array<string | undefined | null>): str
   return [...emails]
 }
 
+function buildAddressMatchValues(...values: Array<string | undefined | null>): string[] {
+  const matches = new Set<string>()
+  for (const value of values) {
+    const text = normalizeHiddenRuleValue(value)
+    if (!text) {
+      continue
+    }
+    matches.add(text)
+    for (const email of extractEmailAddresses(text)) {
+      matches.add(email)
+    }
+  }
+  return [...matches]
+}
+
 function buildHiddenRuleLookup(hiddenRules: HiddenRuleRecord[]): {
   addresses: Set<string>
   subjects: Set<string>
@@ -1510,6 +1525,9 @@ function buildHiddenRuleLookup(hiddenRules: HiddenRuleRecord[]): {
     }
     if (rule.kind === 'address') {
       addresses.add(normalizedValue)
+      for (const email of extractEmailAddresses(normalizedValue)) {
+        addresses.add(email)
+      }
     } else if (rule.kind === 'subject') {
       subjects.add(normalizedValue)
     }
@@ -1533,14 +1551,15 @@ function messageMatchesHiddenRules(
   }
 
   if (hiddenLookup.addresses.size) {
-    const addressValues = extractEmailAddresses(
+    const addressValues = buildAddressMatchValues(
       summary.senderEmailAddress,
       summary.displayTo,
       summary.displayCC,
       summary.displayBCC,
       summary.resolvedDisplayTo,
       summary.resolvedDisplayCC,
-      summary.resolvedDisplayBCC
+      summary.resolvedDisplayBCC,
+      summary.recipientText
     )
     if (addressValues.some((value) => hiddenLookup.addresses.has(value))) {
       return true
