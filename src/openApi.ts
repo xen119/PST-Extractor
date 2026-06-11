@@ -201,6 +201,49 @@ function hiddenRuleSchema(): Record<string, unknown> {
   }
 }
 
+function authUserSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['username'],
+    properties: {
+      username: { type: 'string' }
+    }
+  }
+}
+
+function authStatusSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['authenticated', 'enabled', 'user', 'expiresAt'],
+    properties: {
+      authenticated: { type: 'boolean' },
+      enabled: { type: 'boolean' },
+      user: {
+        nullable: true,
+        ...authUserSchema()
+      },
+      expiresAt: {
+        type: 'string',
+        nullable: true
+      }
+    }
+  }
+}
+
+function authLoginRequestSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['username', 'password'],
+    properties: {
+      username: { type: 'string' },
+      password: { type: 'string' }
+    }
+  }
+}
+
 function searchResultItemSchema(): Record<string, unknown> {
   return {
     allOf: [
@@ -297,6 +340,7 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
     },
     servers: [{ url: '/' }],
     tags: [
+      { name: 'Auth' },
       { name: 'PST catalog' },
       { name: 'PST archive' },
       { name: 'Sessions' },
@@ -304,6 +348,43 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
       { name: 'Review' }
     ],
     paths: {
+      [openApiPath(API_ROUTES.authLogin)]: {
+        post: {
+          tags: ['Auth'],
+          summary: 'Sign in to the viewer and receive a session cookie',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: authLoginRequestSchema()
+              }
+            }
+          },
+          responses: {
+            200: jsonResponse(authStatusSchema()),
+            ...errorResponse(401, 'Invalid username or password')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authMe)]: {
+        get: {
+          tags: ['Auth'],
+          summary: 'Check the current auth session',
+          responses: {
+            200: jsonResponse(authStatusSchema()),
+            ...errorResponse(401, 'Authentication required')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authLogout)]: {
+        post: {
+          tags: ['Auth'],
+          summary: 'Clear the current auth session cookie',
+          responses: {
+            200: jsonResponse(authStatusSchema())
+          }
+        }
+      },
       [openApiPath(API_ROUTES.pstCatalog)]: {
         get: {
           tags: ['PST catalog'],
@@ -1059,6 +1140,8 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
     },
     components: {
       schemas: {
+        AuthStatus: authStatusSchema(),
+        AuthUser: authUserSchema(),
         MessageSummary: messageSummarySchema(),
         ReviewState: reviewStateSchema(),
         ReviewRecord: reviewRecordSchema(),

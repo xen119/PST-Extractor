@@ -13,10 +13,19 @@
     sort: 'pst-mail-explorer.sort',
     reviewFlaggedOnly: 'pst-mail-explorer.reviewFlaggedOnly',
     reviewTaggedOnly: 'pst-mail-explorer.reviewTaggedOnly',
-    flaggedBundleScope: 'pst-mail-explorer.flaggedBundleScope'
+    flaggedBundleScope: 'pst-mail-explorer.flaggedBundleScope',
+    theme: 'pst-mail-explorer.theme'
   }
 
+  const DEFAULT_AUTH_MESSAGE = 'Use the local account configured on the server to unlock the viewer.'
+
   const state = {
+    authEnabled: true,
+    authenticated: false,
+    authChecked: false,
+    authLoading: false,
+    authUser: '',
+    theme: 'light',
     sessionId: null,
     catalogScopes: [],
     catalog: [],
@@ -48,6 +57,7 @@
     reviewFlaggedOnly: false,
     reviewTaggedOnly: false,
     bundleScope: 'all',
+    viewerInitialized: false,
     pageSize: 50
   }
 
@@ -985,12 +995,165 @@
     document.body.classList.toggle('is-busy', isBusy)
   }
 
+  function setAuthBusy(isBusy) {
+    state.authLoading = isBusy
+    if (ui.authSubmit) {
+      ui.authSubmit.disabled = isBusy
+      ui.authSubmit.textContent = isBusy ? 'Signing in...' : 'Sign in'
+    }
+    if (ui.authUsername) {
+      ui.authUsername.disabled = isBusy
+    }
+    if (ui.authPassword) {
+      ui.authPassword.disabled = isBusy
+    }
+    if (ui.authLogout) {
+      ui.authLogout.disabled = isBusy
+    }
+  }
+
+  function setAuthError(message = '') {
+    if (ui.authError) {
+      ui.authError.textContent = message
+    }
+  }
+
+  function showAuthScreen(message = DEFAULT_AUTH_MESSAGE) {
+    state.authenticated = false
+    if (ui.appShell) {
+      ui.appShell.hidden = true
+    }
+    if (ui.authScreen) {
+      ui.authScreen.hidden = false
+    }
+    if (ui.authMessage) {
+      ui.authMessage.textContent = message || DEFAULT_AUTH_MESSAGE
+    }
+    setAuthError('')
+    setAuthBusy(false)
+    setBodyBusy(false)
+    if (ui.authPassword) {
+      ui.authPassword.value = ''
+    }
+    if (ui.authUsername) {
+      window.requestAnimationFrame(() => {
+        ui.authUsername.focus()
+        if (typeof ui.authUsername.select === 'function') {
+          ui.authUsername.select()
+        }
+      })
+    }
+  }
+
+  function showViewerShell(username) {
+    state.authenticated = true
+    state.authUser = String(username || state.authUser || '').trim()
+    if (ui.authScreen) {
+      ui.authScreen.hidden = true
+    }
+    if (ui.appShell) {
+      ui.appShell.hidden = false
+    }
+    if (ui.authUser) {
+      ui.authUser.textContent = state.authUser || 'Signed in'
+    }
+    setAuthError('')
+    setAuthBusy(false)
+    setBodyBusy(false)
+  }
+
+  function handleAuthFailure(message = 'Session expired. Sign in again.') {
+    showAuthScreen(message)
+    setStatus(message, 'error')
+  }
+
+  function getErrorMessage(error) {
+    if (!error) {
+      return 'Request failed'
+    }
+    if (error && typeof error === 'object' && 'payload' in error) {
+      const payload = error.payload
+      if (payload && typeof payload === 'object' && typeof payload.error === 'string') {
+        return payload.error
+      }
+    }
+    return error.message || String(error)
+  }
+
   function readStorageBool(key, fallback) {
     const raw = localStorage.getItem(key)
     if (raw == null) {
       return fallback
     }
     return !['0', 'false', 'no', 'off'].includes(raw.toLowerCase())
+  }
+
+  function normalizeTheme(value) {
+    return String(value || '').toLowerCase() === 'dark' ? 'dark' : 'light'
+  }
+
+  function getSystemThemePreference() {
+    try {
+      if (
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(prefers-color-scheme: dark)').matches
+      ) {
+        return 'dark'
+      }
+    } catch (error) {
+      // Ignore media query errors and fall back to light mode.
+    }
+
+    return 'light'
+  }
+
+  function readThemePreference() {
+    const stored = localStorage.getItem(STORAGE_KEYS.theme)
+    if (stored === 'dark' || stored === 'light') {
+      return stored
+    }
+
+    return getSystemThemePreference()
+  }
+
+  function persistThemePreference(theme) {
+    try {
+      localStorage.setItem(STORAGE_KEYS.theme, normalizeTheme(theme))
+    } catch (error) {
+      // Ignore storage failures in private browsing or restricted contexts.
+    }
+  }
+
+  function updateThemeToggleButtons(theme) {
+    const normalized = normalizeTheme(theme)
+    const nextTheme = normalized === 'dark' ? 'light' : 'dark'
+    const label = nextTheme === 'dark' ? 'Dark mode' : 'Light mode'
+    const ariaLabel = `Switch to ${nextTheme} mode`
+
+    for (const button of Array.isArray(ui.themeToggleButtons) ? ui.themeToggleButtons : []) {
+      button.textContent = label
+      button.setAttribute('aria-pressed', String(normalized === 'dark'))
+      button.setAttribute('aria-label', ariaLabel)
+      button.title = ariaLabel
+    }
+  }
+
+  function applyTheme(theme) {
+    const normalized = normalizeTheme(theme)
+    state.theme = normalized
+    document.documentElement.dataset.theme = normalized
+    document.documentElement.style.colorScheme = normalized
+    updateThemeToggleButtons(normalized)
+
+    if (state.currentMessageDetail) {
+      renderMessageDetail()
+    }
+  }
+
+  function toggleTheme() {
+    const nextTheme = state.theme === 'dark' ? 'light' : 'dark'
+    applyTheme(nextTheme)
+    persistThemePreference(nextTheme)
   }
 
   function saveState() {
@@ -1677,6 +1840,13 @@
   }
 
   function buildHtmlFrame(html) {
+    const isDark = state.theme === 'dark'
+    const frameText = isDark ? '#e6edf7' : '#1f2a37'
+    const frameBackground = isDark ? '#111a29' : '#ffffff'
+    const frameLink = isDark ? '#7ab8ff' : '#2b6cb0'
+    const frameQuoteBorder = isDark ? '#3a4760' : '#c2ccd9'
+    const frameQuoteText = isDark ? '#a8b3c4' : '#526072'
+
     const srcdoc = `<!doctype html>
       <html>
         <head>
@@ -1684,7 +1854,7 @@
           <base target="_blank" />
           <style>
             :root {
-              color-scheme: light;
+              color-scheme: ${isDark ? 'dark' : 'light'};
             }
             body {
               margin: 0;
@@ -1692,17 +1862,17 @@
               font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
               font-size: 13px;
               line-height: 1.5;
-              color: #1f2a37;
-              background: #ffffff;
+              color: ${frameText};
+              background: ${frameBackground};
             }
             img { max-width: 100%; height: auto; }
             table { border-collapse: collapse; }
-            a { color: #2b6cb0; }
+            a { color: ${frameLink}; }
             blockquote {
-              border-left: 3px solid #c2ccd9;
+              border-left: 3px solid ${frameQuoteBorder};
               margin-left: 0;
               padding-left: 1rem;
-              color: #526072;
+              color: ${frameQuoteText};
             }
           </style>
         </head>
@@ -1938,12 +2108,15 @@
   }
 
   async function fetchJson(url, init = {}) {
-    const response = await fetch(url, {
+    const requestUrl = String(url || '')
+    const { headers: initHeaders, ...requestInit } = init
+    const response = await fetch(requestUrl, {
+      ...requestInit,
+      credentials: 'include',
       headers: {
         Accept: 'application/json',
-        ...(init.headers || {})
-      },
-      ...init
+        ...(initHeaders || {})
+      }
     })
 
     const contentType = response.headers.get('content-type') || ''
@@ -1957,7 +2130,17 @@
         (typeof payload === 'string' ? payload : '') ||
         response.statusText ||
         'Request failed'
-      throw new Error(message)
+      if (
+        response.status === 401 &&
+        !requestUrl.startsWith('/api/auth/') &&
+        state.authEnabled !== false
+      ) {
+        handleAuthFailure('Session expired. Sign in again.')
+      }
+      const error = new Error(message)
+      error.statusCode = response.status
+      error.payload = payload
+      throw error
     }
 
     return payload
@@ -2511,6 +2694,142 @@
     updatePagingButtons()
   }
 
+  async function initializeViewer() {
+    if (state.viewerInitialized) {
+      refreshControls()
+      return
+    }
+
+    state.viewerInitialized = true
+    try {
+      refreshControls()
+      wireEvents()
+      renderPstCatalog()
+      await loadMailboxCatalog({
+        showBusy: true,
+        refreshOnly: state.catalogMode === 'removed',
+        casePath: state.selectedCasePath || undefined,
+        scopePath: state.selectedScopePath || undefined,
+        preferredFileName: state.selectedPstFileName || undefined
+      })
+      await loadHiddenFilters()
+    } catch (error) {
+      state.viewerInitialized = false
+      throw error
+    }
+  }
+
+  async function loadAuthState() {
+    try {
+      const response = await fetchJson('/api/auth/me', {
+        cache: 'no-store'
+      })
+      state.authEnabled = Boolean(response.enabled)
+      state.authChecked = true
+      if (!response.enabled) {
+        state.authUser = 'Local access'
+        showViewerShell(state.authUser)
+        return true
+      }
+
+      if (response.authenticated) {
+        state.authUser = (response.user && response.user.username) || state.authUser || ''
+        showViewerShell(state.authUser)
+        return true
+      } else {
+        state.authUser = ''
+        showAuthScreen(DEFAULT_AUTH_MESSAGE)
+        return false
+      }
+    } catch (error) {
+      state.authChecked = true
+      state.authEnabled = true
+      if (error && typeof error === 'object' && error.statusCode === 401) {
+        showAuthScreen(DEFAULT_AUTH_MESSAGE)
+        return false
+      }
+      showAuthScreen(DEFAULT_AUTH_MESSAGE)
+      setAuthError(`Unable to verify sign-in status: ${getErrorMessage(error)}`)
+      return false
+    }
+  }
+
+  function wireAuthEvents() {
+    if (ui.authForm) {
+      ui.authForm.addEventListener('submit', (event) => {
+        void (async () => {
+          event.preventDefault()
+          setAuthError('')
+          const username = String(ui.authUsername?.value || '').trim()
+          const password = String(ui.authPassword?.value || '')
+          if (!username || !password) {
+            setAuthError('Enter both a username and password.')
+            return
+          }
+
+          setAuthBusy(true)
+          try {
+            const response = await fetchJson('/api/auth/login', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                username,
+                password
+              })
+            })
+
+            if (!response.authenticated) {
+              throw new Error('Unable to sign in.')
+            }
+
+            showViewerShell((response.user && response.user.username) || username)
+            try {
+              await initializeViewer()
+            } catch (error) {
+              if (
+                !(error && typeof error === 'object' && Number(error.statusCode) === 401)
+              ) {
+                setStatus(`Signed in, but unable to load the viewer: ${getErrorMessage(error)}`, 'error')
+              }
+            }
+          } catch (error) {
+            setAuthError(getErrorMessage(error))
+          } finally {
+            setAuthBusy(false)
+          }
+        })()
+      })
+    }
+
+    if (ui.authLogout) {
+      ui.authLogout.addEventListener('click', () => {
+        void (async () => {
+          setAuthBusy(true)
+          try {
+            await fetchJson('/api/auth/logout', {
+              method: 'POST'
+            })
+            window.location.reload()
+          } catch (error) {
+            setAuthError(getErrorMessage(error))
+          } finally {
+            setAuthBusy(false)
+          }
+        })()
+      })
+    }
+  }
+
+  function wireThemeEvents() {
+    for (const button of Array.isArray(ui.themeToggleButtons) ? ui.themeToggleButtons : []) {
+      button.addEventListener('click', () => {
+        toggleTheme()
+      })
+    }
+  }
+
   function wireEvents() {
     ui.pstCountBadge.addEventListener('click', () => {
       void (async () => {
@@ -2868,6 +3187,16 @@
   }
 
   async function bootstrap() {
+    ui.authScreen = getElement('auth-screen')
+    ui.appShell = getElement('app-shell')
+    ui.authForm = getElement('auth-form')
+    ui.authUsername = getElement('auth-username')
+    ui.authPassword = getElement('auth-password')
+    ui.authSubmit = getElement('auth-submit')
+    ui.authMessage = getElement('auth-message')
+    ui.authError = getElement('auth-error')
+    ui.authLogout = getElement('auth-logout')
+    ui.authUser = getElement('auth-user')
     ui.sessionSummary = getElement('session-summary')
     ui.pstCountBadge = getElement('pst-count-badge')
     ui.catalogModeToggle = getElement('catalog-mode-toggle')
@@ -2903,6 +3232,9 @@
     ui.messagePrev = getElement('message-prev')
     ui.messageNext = getElement('message-next')
     ui.statusBar = getElement('status-bar')
+    ui.themeToggleButtons = Array.from(document.querySelectorAll('[data-theme-toggle]'))
+
+    applyTheme(readThemePreference())
 
     state.query = localStorage.getItem(STORAGE_KEYS.query) || ''
     state.searchScope = ['pst', 'search', 'all'].includes(
@@ -2928,17 +3260,16 @@
     state.hiddenFiltersOpen = false
     state.selectedPstFileName = localStorage.getItem(STORAGE_KEYS.pstFileName) || null
     state.mailboxFilter = ''
-    refreshControls()
-    wireEvents()
-    renderPstCatalog()
-    await loadMailboxCatalog({
-      showBusy: true,
-      refreshOnly: state.catalogMode === 'removed',
-      casePath: state.selectedCasePath || undefined,
-      scopePath: state.selectedScopePath || undefined,
-      preferredFileName: state.selectedPstFileName || undefined
-    })
-    await loadHiddenFilters()
+    ui.authMessage.textContent = DEFAULT_AUTH_MESSAGE
+
+    wireThemeEvents()
+    wireAuthEvents()
+    const authenticated = await loadAuthState()
+    if (!authenticated) {
+      return
+    }
+
+    await initializeViewer()
   }
 
   bootstrap().catch((error) => {

@@ -4,7 +4,7 @@ import * as os from 'os'
 import * as path from 'path'
 import { AddressInfo } from 'net'
 import { buildOpenApiDocument } from '../openApi'
-import { createPstReviewApp, type ApiSecurityConfig } from '../pstReviewApp'
+import { createPstReviewApp, type ApiSecurityConfig, type AppAuthConfig } from '../pstReviewApp'
 import { MemoryReviewStore } from '../reviewStore'
 import { MemorySearchIndexStore, refreshSearchIndexFromCatalog } from '../searchIndex'
 
@@ -107,6 +107,14 @@ async function requestBuffer(url: string, init?: RequestInit): Promise<{ respons
   return { response, buffer }
 }
 
+function getSetCookieHeader(response: Response): string {
+  return response.headers.get('set-cookie') || ''
+}
+
+function getCookiePair(setCookieHeader: string): string {
+  return setCookieHeader.split(';')[0] || ''
+}
+
 function parseStoredZipEntries(buffer: Buffer): Map<string, Buffer> {
   const entries = new Map<string, Buffer>()
   let offset = 0
@@ -135,7 +143,11 @@ function parseStoredZipEntries(buffer: Buffer): Map<string, Buffer> {
   return entries
 }
 
-async function startApp(pstRootDir: string, apiSecurity?: ApiSecurityConfig) {
+async function startApp(
+  pstRootDir: string,
+  apiSecurity?: ApiSecurityConfig,
+  auth?: AppAuthConfig
+) {
   const reviewStore = new MemoryReviewStore()
   const searchIndexStore = new MemorySearchIndexStore()
   await refreshSearchIndexFromCatalog(pstRootDir, reviewStore, searchIndexStore)
@@ -148,6 +160,7 @@ async function startApp(pstRootDir: string, apiSecurity?: ApiSecurityConfig) {
       version: 'test',
       reviewStorageMode: reviewStore.kind
     }),
+    auth,
     apiSecurity
   })
 
@@ -1037,5 +1050,143 @@ describe('pst review api', () => {
     expect(response.ok).toBe(true)
     expect(response.headers.get('access-control-allow-origin')).toBe('https://app.example.test')
     expect(authCheck).toHaveBeenCalled()
+  })
+
+  it('authenticates the default viewer account and protects session cookies', async () => {
+    rootDir = makeTempDir('pst-review-api-auth-login-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(pstDir)
+    stageFixture(enronPath, path.join(pstDir, 'sample.pst'))
+
+    const started = await startApp(pstDir, undefined, {
+      username: 'admin',
+      password: 'pst-extractor',
+      sessionTtlMinutes: 180
+    })
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const failedLoginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'admin',
+        password: 'wrong-password'
+      })
+    })
+    const failedLoginPayload = await readJson(failedLoginResponse)
+    expect(failedLoginResponse.status).toBe(401)
+    expect(failedLoginPayload.error).toBe('Invalid username or password')
+
+    const loginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'admin',
+        password: 'pst-extractor'
+      })
+    })
+    const loginPayload = await readJson(loginResponse)
+    const setCookie = getSetCookieHeader(loginResponse)
+    const cookiePair = getCookiePair(setCookie)
+
+    expect(loginResponse.status).toBe(200)
+    expect(loginPayload.authenticated).toBe(true)
+    expect(loginPayload.enabled).toBe(true)
+    expect(loginPayload.user.username).toBe('admin')
+    expect(setCookie).toContain('HttpOnly')
+    expect(cookiePair).toContain('pst-review-session=')
+
+    const meResponse = await fetch(`${started.baseUrl}/api/auth/me`, {
+      headers: {
+        Cookie: cookiePair
+      }
+    })
+    const mePayload = await readJson(meResponse)
+    expect(meResponse.status).toBe(200)
+    expect(mePayload.authenticated).toBe(true)
+    expect(mePayload.user.username).toBe('admin')
+
+    const catalog = await requestJson(`${started.baseUrl}/api/psts`, {
+      headers: {
+        Cookie: cookiePair
+      }
+    })
+    expect(catalog.files).toHaveLength(1)
+
+    const logoutResponse = await fetch(`${started.baseUrl}/api/auth/logout`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookiePair
+      }
+    })
+    const logoutPayload = await readJson(logoutResponse)
+    expect(logoutResponse.status).toBe(200)
+    expect(logoutPayload.authenticated).toBe(false)
+
+    const postLogoutMeResponse = await fetch(`${started.baseUrl}/api/auth/me`, {
+      headers: {
+        Cookie: cookiePair
+      }
+    })
+    const postLogoutMePayload = await readJson(postLogoutMeResponse)
+    expect(postLogoutMeResponse.status).toBe(401)
+    expect(postLogoutMePayload.error).toBe('Authentication required')
+  })
+
+  it('expires viewer sessions after the configured ttl', async () => {
+    rootDir = makeTempDir('pst-review-api-auth-expiry-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(pstDir)
+    stageFixture(enronPath, path.join(pstDir, 'sample.pst'))
+
+    const started = await startApp(pstDir, undefined, {
+      username: 'admin',
+      password: 'pst-extractor',
+      sessionTtlMinutes: 0.02
+    })
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const loginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'admin',
+        password: 'pst-extractor'
+      })
+    })
+    const loginPayload = await readJson(loginResponse)
+    const cookiePair = getCookiePair(getSetCookieHeader(loginResponse))
+    expect(loginResponse.status).toBe(200)
+    expect(loginPayload.authenticated).toBe(true)
+
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+
+    const expiredMeResponse = await fetch(`${started.baseUrl}/api/auth/me`, {
+      headers: {
+        Cookie: cookiePair
+      }
+    })
+    const expiredMePayload = await readJson(expiredMeResponse)
+    expect(expiredMeResponse.status).toBe(401)
+    expect(expiredMePayload.error).toBe('Authentication required')
+
+    const expiredCatalogResponse = await fetch(`${started.baseUrl}/api/psts`, {
+      headers: {
+        Cookie: cookiePair
+      }
+    })
+    const expiredCatalogPayload = await readJson(expiredCatalogResponse)
+    expect(expiredCatalogResponse.status).toBe(401)
+    expect(expiredCatalogPayload.error).toBe('Authentication required')
   })
 })

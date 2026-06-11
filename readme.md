@@ -66,14 +66,19 @@ npm start
 
 You can set `HOST`, `PORT`, `MONGODB_URI`, `MONGODB_DB`, `M365_AUTH_BYPASS_IPS`, and `CORS_ALLOWED_ORIGINS` in `example/.env` and the server will load them automatically. A sample file is provided at [example/.env.example](example/.env.example).
 
+The example viewer also has a built-in login screen. By default, sign in with `admin` / `pst-extractor`. You can override that account with `AUTH_USERNAME`, `AUTH_PASSWORD`, and `AUTH_SESSION_TTL_MINUTES` in `example/.env`.
+
+The viewer also includes a light/dark mode switcher on the login screen and in the signed-in session bar.
+
 Open the address printed by the server, then:
 
-1. Pick a case/search scope from the dropdown in the left pane, then pick a `.pst` or `.ost` file from the mailbox list.
-2. Browse the folder tree, message list, and reading pane.
-3. Search and filter by message metadata, switch between newest-first and folder-order sorting, and page through large folders.
-4. Flag or tag mail items from the reading pane for later review.
-5. Open a message to inspect headers, HTML or plain-text bodies, attachment metadata, embedded email previews, and transport headers.
-6. Download the current message as JSON or EML, or download individual attachments directly from the message detail pane.
+1. Sign in on the auth screen.
+2. Pick a case/search scope from the dropdown in the left pane, then pick a `.pst` or `.ost` file from the mailbox list.
+3. Browse the folder tree, message list, and reading pane.
+4. Search and filter by message metadata, switch between newest-first and folder-order sorting, and page through large folders.
+5. Flag or tag mail items from the reading pane for later review.
+6. Open a message to inspect headers, HTML or plain-text bodies, attachment metadata, embedded email previews, and transport headers.
+7. Download the current message as JSON or EML, or download individual attachments directly from the message detail pane.
 
 Swagger docs are available at `/api/docs`, and the OpenAPI JSON is served at `/api/openapi.json`.
 

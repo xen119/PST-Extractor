@@ -1,4 +1,7 @@
 export const API_ROUTES = {
+  authLogin: '/api/auth/login',
+  authMe: '/api/auth/me',
+  authLogout: '/api/auth/logout',
   pstCatalog: '/api/psts',
   pstRemovedCatalog: '/api/psts/removed',
   pstOpen: '/api/psts/open',

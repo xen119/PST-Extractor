@@ -3,7 +3,7 @@ import * as fs from 'fs'
 import * as http from 'http'
 import * as path from 'path'
 import { buildOpenApiDocument } from '../src/openApi'
-import { createPstReviewApp, type ApiSecurityConfig } from '../src/pstReviewApp'
+import { createPstReviewApp, type ApiSecurityConfig, type AppAuthConfig } from '../src/pstReviewApp'
 import { createReviewStoreFromEnv } from '../src/reviewStore'
 import {
   createSearchIndexStoreFromEnv,
@@ -33,6 +33,14 @@ function parseList(value: string | undefined): string[] {
     .split(/[,\n;]/g)
     .map((item) => item.trim())
     .filter(Boolean)
+}
+
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  if (!value) {
+    return fallback
+  }
+  const parsed = Number.parseInt(value, 10)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 
 function getFallbackRequestInfo(req: any) {
@@ -88,6 +96,12 @@ const apiSecurity: ApiSecurityConfig = {
   m365Auth,
   bypassIps: parseList(process.env.M365_AUTH_BYPASS_IPS),
   allowedOrigins: parseList(process.env.CORS_ALLOWED_ORIGINS)
+}
+
+const auth: AppAuthConfig = {
+  username: (process.env.AUTH_USERNAME || 'admin').trim() || 'admin',
+  password: (process.env.AUTH_PASSWORD || 'pst-extractor').trim() || 'pst-extractor',
+  sessionTtlMinutes: parsePositiveInt(process.env.AUTH_SESSION_TTL_MINUTES, 180)
 }
 
 let server: http.Server | null = null
@@ -157,6 +171,7 @@ async function main(): Promise<void> {
     reviewStore,
     searchIndexStore,
     openApiSpec,
+    auth,
     apiSecurity
   })
 

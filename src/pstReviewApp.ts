@@ -64,7 +64,15 @@ export interface CreatePstReviewAppOptions {
   searchIndexStore: SearchIndexStore
   openApiSpec: Record<string, unknown>
   pstRootDir?: string
+  auth?: AppAuthConfig
   apiSecurity?: ApiSecurityConfig
+}
+
+export interface AppAuthConfig {
+  username: string
+  password: string
+  sessionTtlMinutes?: number
+  cookieName?: string
 }
 
 interface RequestInfoLike {
@@ -90,6 +98,21 @@ export interface ApiSecurityConfig {
   allowedOrigins?: string[]
   webChecks?: WebChecksLike
   m365Auth?: M365AuthLike
+}
+
+interface AuthSessionRecord {
+  token: string
+  username: string
+  expiresAt: number
+}
+
+interface AuthStatusResponse {
+  authenticated: boolean
+  enabled: boolean
+  user: {
+    username: string
+  } | null
+  expiresAt: string | null
 }
 
 interface SessionRecord {
@@ -236,6 +259,8 @@ const DEFAULT_DOC_TITLE = 'PST API Documentation'
 const DEFAULT_SWAGGER_ASSET_PATH = path.dirname(
   require.resolve('swagger-ui-dist/swagger-ui.css')
 )
+const DEFAULT_AUTH_SESSION_COOKIE = 'pst-review-session'
+const DEFAULT_AUTH_SESSION_TTL_MINUTES = 180
 const DEFAULT_AUTH_BYPASS_IPS = ['127.0.0.1', '::1', '::ffff:127.0.0.1', 'localhost']
 const DEFAULT_CORS_ALLOW_HEADERS = [
   'Accept',
@@ -318,6 +343,43 @@ function parseList(value: string[] | undefined, fallback: string[] = []): string
   return values
 }
 
+function normalizeAuthConfig(auth?: AppAuthConfig): {
+  enabled: boolean
+  username: string
+  password: string
+  sessionTtlMinutes: number
+  cookieName: string
+} {
+  if (!auth) {
+    return {
+      enabled: false,
+      username: '',
+      password: '',
+      sessionTtlMinutes: DEFAULT_AUTH_SESSION_TTL_MINUTES,
+      cookieName: DEFAULT_AUTH_SESSION_COOKIE
+    }
+  }
+
+  const username = normalizeText(auth.username)
+  const password = normalizeText(auth.password)
+  if (!username || !password) {
+    throw createAppError(500, 'Authentication requires both a username and password')
+  }
+
+  const sessionTtlMinutes =
+    Number.isFinite(auth.sessionTtlMinutes) && Number(auth.sessionTtlMinutes) > 0
+      ? Number(auth.sessionTtlMinutes)
+      : DEFAULT_AUTH_SESSION_TTL_MINUTES
+
+  return {
+    enabled: true,
+    username,
+    password,
+    sessionTtlMinutes,
+    cookieName: normalizeText(auth.cookieName) || DEFAULT_AUTH_SESSION_COOKIE
+  }
+}
+
 function canonicalRequestOrigin(req: express.Request): string {
   const host = req.headers.host
   if (!host) {
@@ -366,17 +428,61 @@ function getRequestInfo(req: express.Request, webChecks?: WebChecksLike): Reques
   return getFallbackRequestInfo(req)
 }
 
+function parseCookieHeader(value: string | undefined): Map<string, string> {
+  const cookies = new Map<string, string>()
+  for (const part of String(value || '').split(';')) {
+    const index = part.indexOf('=')
+    if (index < 0) {
+      continue
+    }
+    const name = part.slice(0, index).trim()
+    if (!name) {
+      continue
+    }
+    const rawValue = part.slice(index + 1).trim()
+    try {
+      cookies.set(name, decodeURIComponent(rawValue))
+    } catch {
+      cookies.set(name, rawValue)
+    }
+  }
+  return cookies
+}
+
+function getCookieValue(req: express.Request, cookieName: string): string {
+  if (!cookieName) {
+    return ''
+  }
+  return parseCookieHeader(req.headers.cookie).get(cookieName) || ''
+}
+
 function isPublicApiPath(pathname: string): boolean {
-  return pathname === API_ROUTES.openApiJson || pathname === API_ROUTES.docs || pathname.startsWith(`${API_ROUTES.docs}/`)
+  return (
+    pathname === API_ROUTES.openApiJson ||
+    pathname === API_ROUTES.docs ||
+    pathname.startsWith(`${API_ROUTES.docs}/`) ||
+    pathname === API_ROUTES.authLogin ||
+    pathname === API_ROUTES.authMe ||
+    pathname === API_ROUTES.authLogout
+  )
+}
+
+function isAuthApiPath(pathname: string): boolean {
+  return (
+    pathname === API_ROUTES.authLogin ||
+    pathname === API_ROUTES.authMe ||
+    pathname === API_ROUTES.authLogout
+  )
 }
 
 function isProtectedApiPath(pathname: string): boolean {
-  return pathname.startsWith('/api/') && !isPublicApiPath(pathname)
+  return pathname.startsWith('/api/') && !isPublicApiPath(pathname) && !isAuthApiPath(pathname)
 }
 
 function buildCorsHeaders(origin: string): Record<string, string> {
   return {
     'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Credentials': 'true',
     'Access-Control-Allow-Headers': DEFAULT_CORS_ALLOW_HEADERS,
     'Access-Control-Allow-Methods': DEFAULT_CORS_ALLOW_METHODS,
     'Access-Control-Expose-Headers': 'Content-Disposition, Content-Length',
@@ -396,7 +502,9 @@ function createApiSecurityMiddleware(
 
   return async (req, res, next) => {
     const pathname = (req.originalUrl || req.url || '').split('?')[0] || ''
-    if (!isProtectedApiPath(pathname)) {
+    const isAuthRoute = isAuthApiPath(pathname)
+    const isProtectedRoute = isProtectedApiPath(pathname)
+    if (!isProtectedRoute && !isAuthRoute) {
       return next()
     }
 
@@ -421,6 +529,10 @@ function createApiSecurityMiddleware(
 
     if (req.method === 'OPTIONS') {
       return res.status(204).end()
+    }
+
+    if (isAuthRoute) {
+      return next()
     }
 
     if (isBypassed) {
@@ -1039,6 +1151,168 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   const pstRootDir = options.pstRootDir || getDefaultPstRootDirectory()
   const reviewStore = options.reviewStore
   const searchIndexStore = options.searchIndexStore
+  const authConfig = normalizeAuthConfig(options.auth)
+  const authSessions = new Map<string, AuthSessionRecord>()
+
+  function cleanupExpiredAuthSessions(): void {
+    if (!authConfig.enabled) {
+      return
+    }
+
+    const now = Date.now()
+    for (const [token, session] of authSessions.entries()) {
+      if (session.expiresAt <= now) {
+        authSessions.delete(token)
+      }
+    }
+  }
+
+  function getAuthSessionFromRequest(req: express.Request): AuthSessionRecord | null {
+    if (!authConfig.enabled) {
+      return null
+    }
+
+    cleanupExpiredAuthSessions()
+    const token = getCookieValue(req, authConfig.cookieName)
+    if (!token) {
+      return null
+    }
+
+    const session = authSessions.get(token) || null
+    if (!session) {
+      return null
+    }
+
+    if (session.expiresAt <= Date.now()) {
+      authSessions.delete(token)
+      return null
+    }
+
+    return session
+  }
+
+  function buildAuthStatus(session: AuthSessionRecord | null): AuthStatusResponse {
+    if (!authConfig.enabled) {
+      return {
+        authenticated: true,
+        enabled: false,
+        user: null,
+        expiresAt: null
+      }
+    }
+
+    if (!session) {
+      return {
+        authenticated: false,
+        enabled: true,
+        user: null,
+        expiresAt: null
+      }
+    }
+
+    return {
+      authenticated: true,
+      enabled: true,
+      user: {
+        username: session.username
+      },
+      expiresAt: new Date(session.expiresAt).toISOString()
+    }
+  }
+
+  function createAuthSession(username: string): AuthSessionRecord {
+    const session: AuthSessionRecord = {
+      token: randomBytes(24).toString('hex'),
+      username,
+      expiresAt: Date.now() + authConfig.sessionTtlMinutes * 60 * 1000
+    }
+    authSessions.set(session.token, session)
+    return session
+  }
+
+  function clearAuthSession(req: express.Request): void {
+    if (!authConfig.enabled) {
+      return
+    }
+
+    const token = getCookieValue(req, authConfig.cookieName)
+    if (token) {
+      authSessions.delete(token)
+    }
+  }
+
+  function setAuthCookie(res: express.Response, req: express.Request, session: AuthSessionRecord): void {
+    if (!authConfig.enabled) {
+      return
+    }
+
+    res.cookie(authConfig.cookieName, session.token, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: Boolean(req.secure || String(req.headers['x-forwarded-proto'] || '').split(',')[0] === 'https'),
+      path: '/',
+      maxAge: authConfig.sessionTtlMinutes * 60 * 1000
+    })
+  }
+
+  function clearAuthCookie(res: express.Response): void {
+    if (!authConfig.enabled) {
+      return
+    }
+
+    res.clearCookie(authConfig.cookieName, {
+      path: '/',
+      sameSite: 'lax'
+    })
+  }
+
+  function createAuthGateMiddleware(): express.RequestHandler {
+    const allowedOrigins = new Set(
+      parseList(options.apiSecurity?.allowedOrigins).map(normalizeOrigin).filter(Boolean)
+    )
+
+    return (req, res, next) => {
+      const pathname = (req.originalUrl || req.url || '').split('?')[0] || ''
+      if (!isProtectedApiPath(pathname)) {
+        return next()
+      }
+
+      if (!authConfig.enabled) {
+        return next()
+      }
+
+      const info = getRequestInfo(req, options.apiSecurity?.webChecks)
+      const requestOrigin = normalizeOrigin(info.origin || req.headers.origin || '')
+      const requestHostOrigin = canonicalRequestOrigin(req)
+      const isSameOrigin = Boolean(requestOrigin && requestOrigin === requestHostOrigin)
+      const originAllowed = !requestOrigin || isSameOrigin || allowedOrigins.has(requestOrigin)
+
+      if (!originAllowed) {
+        return res.status(403).json({
+          error: 'CORS origin not allowed',
+          origin: requestOrigin || info.origin || ''
+        })
+      }
+
+      if (requestOrigin && !isSameOrigin && allowedOrigins.has(requestOrigin)) {
+        res.set(buildCorsHeaders(requestOrigin))
+      }
+
+      if (req.method === 'OPTIONS') {
+        return res.status(204).end()
+      }
+
+      const session = getAuthSessionFromRequest(req)
+      if (!session) {
+        res.set('Cache-Control', 'no-store')
+        return res.status(401).json({
+          error: 'Authentication required'
+        })
+      }
+
+      return next()
+    }
+  }
 
   async function syncSearchIndexForMailbox(session: SessionRecord): Promise<void> {
     const messageIds = [...session.index.messages.keys()]
@@ -1072,6 +1346,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.disable('x-powered-by')
   app.use(express.json({ limit: '2mb' }))
   app.use(express.static(publicDir))
+  app.use(createAuthGateMiddleware())
   app.use(createApiSecurityMiddleware(options.apiSecurity))
 
   app.get(API_ROUTES.openApiJson, (_req, res) => {
@@ -1086,6 +1361,69 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   )
   app.get(API_ROUTES.docs, (_req, res) => {
     res.status(200).type('html').send(buildDocsHtml())
+  })
+
+  app.get(API_ROUTES.authMe, (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      const session = getAuthSessionFromRequest(req)
+      if (!authConfig.enabled && !session) {
+        responseJson(res, 200, buildAuthStatus(null))
+        return
+      }
+
+      if (!session) {
+        responseJson(res, 401, {
+          ...buildAuthStatus(null),
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      responseJson(res, 200, buildAuthStatus(session))
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.post(API_ROUTES.authLogin, (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        responseJson(res, 200, buildAuthStatus(null))
+        return
+      }
+
+      const body = (req.body || {}) as { username?: string; password?: string }
+      const username = normalizeText(body.username)
+      const password = normalizeText(body.password)
+      if (username !== authConfig.username || password !== authConfig.password) {
+        responseJson(res, 401, {
+          ...buildAuthStatus(null),
+          error: 'Invalid username or password'
+        })
+        return
+      }
+
+      const session = createAuthSession(username)
+      setAuthCookie(res, req, session)
+      responseJson(res, 200, buildAuthStatus(session))
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.post(API_ROUTES.authLogout, (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (authConfig.enabled) {
+        clearAuthSession(req)
+        clearAuthCookie(res)
+      }
+      responseJson(res, 200, buildAuthStatus(null))
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
   })
 
   app.get(API_ROUTES.pstCatalog, (req, res) => {

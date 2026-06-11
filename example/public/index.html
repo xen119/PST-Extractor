@@ -3,12 +3,108 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="light" />
+    <meta name="color-scheme" content="light dark" />
     <title>PST Mail Explorer</title>
+    <script>
+      ;(function () {
+        try {
+          var storageKey = 'pst-mail-explorer.theme'
+          var storedTheme = localStorage.getItem(storageKey)
+          var prefersDark =
+            typeof window.matchMedia === 'function' &&
+            window.matchMedia('(prefers-color-scheme: dark)').matches
+          var theme = storedTheme === 'dark' || storedTheme === 'light'
+            ? storedTheme
+            : prefersDark
+              ? 'dark'
+              : 'light'
+          document.documentElement.dataset.theme = theme
+          document.documentElement.style.colorScheme = theme
+        } catch (error) {
+          document.documentElement.dataset.theme = 'light'
+          document.documentElement.style.colorScheme = 'light'
+        }
+      })()
+    </script>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <div class="app-shell">
+    <section id="auth-screen" class="auth-screen" aria-labelledby="auth-title">
+      <div class="auth-shell">
+        <div class="auth-card">
+          <div class="auth-card-top">
+            <div class="auth-card-copy">
+              <div class="auth-eyebrow">Local viewer</div>
+              <h1 id="auth-title">Sign in to continue</h1>
+              <p>
+                The mailbox workspace is locked behind a local account before any PST content loads.
+              </p>
+            </div>
+            <button
+              id="auth-theme-toggle"
+              class="theme-toggle ghost-button small"
+              type="button"
+              data-theme-toggle
+              aria-pressed="false"
+            >
+              Dark mode
+            </button>
+          </div>
+
+          <form id="auth-form" class="auth-form" autocomplete="on">
+            <label class="auth-field" for="auth-username">
+              <span>Username</span>
+              <input
+                id="auth-username"
+                type="text"
+                name="username"
+                autocomplete="username"
+                spellcheck="false"
+                value="admin"
+              />
+            </label>
+            <label class="auth-field" for="auth-password">
+              <span>Password</span>
+              <input
+                id="auth-password"
+                type="password"
+                name="password"
+                autocomplete="current-password"
+              />
+            </label>
+            <button id="auth-submit" class="primary-button auth-submit" type="submit">
+              Sign in
+            </button>
+          </form>
+
+          <p id="auth-message" class="auth-message">
+            Use the local account configured on the server to unlock the viewer.
+          </p>
+          <div id="auth-error" class="auth-error" aria-live="polite"></div>
+        </div>
+      </div>
+    </section>
+
+    <div id="app-shell" class="app-shell" hidden>
+      <header class="session-bar" aria-label="Authentication status">
+        <div class="session-bar-copy">
+          <span class="session-bar-label">Signed in as</span>
+          <strong id="auth-user">admin</strong>
+        </div>
+        <div class="session-bar-actions">
+          <button
+            id="shell-theme-toggle"
+            class="theme-toggle ghost-button small"
+            type="button"
+            data-theme-toggle
+            aria-pressed="false"
+          >
+            Dark mode
+          </button>
+          <button id="auth-logout" class="ghost-button small" type="button">Logout</button>
+        </div>
+      </header>
+
       <main class="workspace">
         <aside class="panel navigator-panel" aria-label="Mailbox navigation">
           <section class="sidebar-section" aria-label="Case and search selection">
@@ -213,6 +309,21 @@
       </footer>
     </div>
 
+    <script>
+      ;(function () {
+        var theme = document.documentElement.dataset.theme || 'light'
+        var nextTheme = theme === 'dark' ? 'light' : 'dark'
+        var label = nextTheme === 'dark' ? 'Dark mode' : 'Light mode'
+        var ariaLabel = 'Switch to ' + nextTheme + ' mode'
+        var buttons = document.querySelectorAll('[data-theme-toggle]')
+        for (var index = 0; index < buttons.length; index += 1) {
+          buttons[index].textContent = label
+          buttons[index].setAttribute('aria-label', ariaLabel)
+          buttons[index].setAttribute('aria-pressed', String(theme === 'dark'))
+          buttons[index].title = ariaLabel
+        }
+      })()
+    </script>
     <script src="/search-utils.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
