@@ -5,6 +5,7 @@ export const API_ROUTES = {
   authUsers: '/api/auth/users',
   authUser: '/api/auth/users/:username',
   activityLog: '/api/activity-log',
+  activityLogCsv: '/api/activity-log.csv',
   pstCatalog: '/api/psts',
   pstRemovedCatalog: '/api/psts/removed',
   pstOpen: '/api/psts/open',

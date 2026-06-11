@@ -29,6 +29,7 @@ export interface AuditLogEntry {
 export interface AuditLogStore {
   append(entry: AuditLogEntry): Promise<void>
   listRecent(limit?: number, actorUsername?: string): Promise<AuditLogEntry[]>
+  listAll(actorUsername?: string): Promise<AuditLogEntry[]>
   close(): Promise<void>
 }
 
@@ -164,7 +165,7 @@ export class FileAuditLogStore implements AuditLogStore {
     fs.appendFileSync(this.filePath, `${JSON.stringify(normalizedEntry)}\n`, 'utf8')
   }
 
-  async listRecent(limit = DEFAULT_RECENT_LIMIT, actorUsername = ''): Promise<AuditLogEntry[]> {
+  private readEntries(): AuditLogEntry[] {
     if (!fs.existsSync(this.filePath)) {
       return []
     }
@@ -192,6 +193,12 @@ export class FileAuditLogStore implements AuditLogStore {
       }
     }
 
+    return entries
+  }
+
+  async listRecent(limit = DEFAULT_RECENT_LIMIT, actorUsername = ''): Promise<AuditLogEntry[]> {
+    const entries = this.readEntries()
+
     const recentLimit = normalizeRecentLimit(limit)
     const normalizedActorUsername = normalizeUsernameFilter(actorUsername)
     const filteredEntries = normalizedActorUsername
@@ -201,6 +208,18 @@ export class FileAuditLogStore implements AuditLogStore {
       : entries
 
     return filteredEntries.slice(Math.max(0, filteredEntries.length - recentLimit)).reverse()
+  }
+
+  async listAll(actorUsername = ''): Promise<AuditLogEntry[]> {
+    const entries = this.readEntries()
+    const normalizedActorUsername = normalizeUsernameFilter(actorUsername)
+    const filteredEntries = normalizedActorUsername
+      ? entries.filter(
+          (entry) => normalizeUsernameFilter(entry.actor.username) === normalizedActorUsername
+        )
+      : entries
+
+    return filteredEntries.slice().reverse()
   }
 
   async close(): Promise<void> {}

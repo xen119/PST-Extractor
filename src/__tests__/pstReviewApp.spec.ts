@@ -1572,6 +1572,30 @@ describe('pst review api', () => {
       entry.action === 'message.review.update' && entry.metadata?.flagged === true
     )).toBe(true)
 
+    const activityLogCsvResponse = await fetch(
+      `${started.baseUrl}/api/activity-log.csv?username=admin`,
+      {
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    const activityLogCsvText = await activityLogCsvResponse.text()
+    expect(activityLogCsvResponse.status).toBe(200)
+    expect(activityLogCsvResponse.headers.get('content-type')).toContain('text/csv')
+    expect(activityLogCsvResponse.headers.get('content-disposition')).toContain('activity-log-admin.csv')
+    expect(activityLogCsvText).toContain('timestamp,actorUsername,actorAuthenticated,actorAdmin')
+    expect(activityLogCsvText).toContain('auth.login')
+    expect(activityLogCsvText).toContain('search.index.refresh')
+    expect(readAuditLogEntries(started.auditLogPath)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: 'activity.log.export',
+          outcome: 'success'
+        })
+      ])
+    )
+
     await new Promise<void>((resolveClose) => {
       started.server.close(() => resolveClose())
     })

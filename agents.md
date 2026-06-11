@@ -5,6 +5,7 @@
 - Keep UI and UX consistent throughout the project.
 - Reuse the established layout, spacing, typography, colors, modal patterns, and interaction behavior.
 - When adding new screens or controls, match the existing viewer shell rather than introducing a new visual language.
+- Use icons instead of text for buttons where possible, but keep labels when an icon alone would be ambiguous.
 
 ## Persistent Data
 

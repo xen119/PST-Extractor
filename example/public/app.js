@@ -106,6 +106,27 @@
     return escapeHtml(value).replace(/`/g, '&#96;')
   }
 
+  function renderDownloadIcon() {
+    return `
+      <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M12 4.5v8.25" />
+        <path d="m8.25 9 3.75 3.75L15.75 9" />
+        <path d="M5 17.25h14" />
+      </svg>
+    `
+  }
+
+  function renderTrashIcon() {
+    return `
+      <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M4.75 7h14.5" />
+        <path d="M9 7V5.75A1.75 1.75 0 0 1 10.75 4h2.5A1.75 1.75 0 0 1 15 5.75V7" />
+        <path d="m8.5 7 .65 10.95A1.75 1.75 0 0 0 10.9 19.5h2.2a1.75 1.75 0 0 0 1.75-1.55L15.5 7" />
+        <path d="M10.5 10v5m3-5v5" />
+      </svg>
+    `
+  }
+
   function hasText(value) {
     return Boolean(String(value ?? '').trim())
   }
@@ -1252,6 +1273,9 @@
     if (ui.userActivityRefresh) {
       ui.userActivityRefresh.disabled = state.userActivityLoading
     }
+    if (ui.userActivityExport) {
+      ui.userActivityExport.disabled = state.userActivityLoading || !selectedUsername
+    }
   }
 
   function setUserActivityBusy(isBusy, label = 'Refresh') {
@@ -1259,6 +1283,10 @@
     if (ui.userActivityRefresh) {
       ui.userActivityRefresh.disabled = isBusy || !String(state.selectedUserActivityUsername || '').trim()
       ui.userActivityRefresh.textContent = isBusy ? label : 'Refresh'
+    }
+    if (ui.userActivityExport) {
+      ui.userActivityExport.disabled =
+        isBusy || !String(state.selectedUserActivityUsername || '').trim()
     }
   }
 
@@ -1653,13 +1681,15 @@
               <span class="user-item-hint">${isSelected ? 'Selected' : 'Open'}</span>
             </button>
             <button
-              class="ghost-button small user-delete-button"
+              class="ghost-button small icon-button user-delete-button"
               type="button"
               data-action="delete-user"
               data-username="${escapeAttr(user.username)}"
+              aria-label="Delete ${escapeAttr(user.username)}"
+              title="Delete user"
               ${isCurrent ? 'disabled' : ''}
             >
-              Delete
+              ${renderTrashIcon()}
             </button>
           </div>
         `
@@ -1756,6 +1786,9 @@
     if (ui.activityLogRefresh) {
       ui.activityLogRefresh.disabled = isBusy
       ui.activityLogRefresh.textContent = isBusy ? label : 'Refresh'
+    }
+    if (ui.activityLogExport) {
+      ui.activityLogExport.disabled = isBusy
     }
   }
 
@@ -1893,6 +1926,31 @@
         setActivityLogBusy(false)
       }
     }
+  }
+
+  function buildActivityLogCsvUrl(username = '') {
+    const params = new URLSearchParams()
+    const normalizedUsername = String(username || '').trim()
+    if (normalizedUsername) {
+      params.set('username', normalizedUsername)
+    }
+    const query = params.toString()
+    return query ? `/api/activity-log.csv?${query}` : '/api/activity-log.csv'
+  }
+
+  function downloadActivityLogCsv(username = '') {
+    if (!state.authEnabled || !state.authenticated || !state.authCanManageUsers) {
+      setStatus('Admin access required.', 'error')
+      return
+    }
+
+    const normalizedUsername = String(username || '').trim()
+    if (normalizedUsername) {
+      window.location.assign(buildActivityLogCsvUrl(normalizedUsername))
+      return
+    }
+
+    window.location.assign(buildActivityLogCsvUrl())
   }
 
   function getErrorMessage(error) {
@@ -3744,9 +3802,26 @@
       })
     }
 
+    if (ui.userActivityExport) {
+      ui.userActivityExport.addEventListener('click', () => {
+        const selectedUsername = String(state.selectedUserActivityUsername || '').trim()
+        if (!selectedUsername) {
+          setUserActivityMessage('Select a user before exporting.', 'error')
+          return
+        }
+        downloadActivityLogCsv(selectedUsername)
+      })
+    }
+
     if (ui.activityLogClose) {
       ui.activityLogClose.addEventListener('click', () => {
         closeActivityLogModal()
+      })
+    }
+
+    if (ui.activityLogExport) {
+      ui.activityLogExport.addEventListener('click', () => {
+        downloadActivityLogCsv()
       })
     }
 
@@ -4273,11 +4348,13 @@
     ui.userActivityMessage = getElement('user-activity-message')
     ui.userActivityList = getElement('user-activity-list')
     ui.userActivityCountBadge = getElement('user-activity-count-badge')
+    ui.userActivityExport = getElement('user-activity-export')
     ui.userActivityRefresh = getElement('user-activity-refresh')
     ui.userActivityTitle = getElement('user-activity-title')
     ui.activityLogModal = getElement('activity-log-modal')
     ui.activityLogClose = getElement('activity-log-close')
     ui.activityLogBackdrop = ui.activityLogModal.querySelector('[data-action="close-activity-log"]')
+    ui.activityLogExport = getElement('activity-log-export')
     ui.activityLogRefresh = getElement('activity-log-refresh')
     ui.activityLogMessage = getElement('activity-log-message')
     ui.activityLogList = getElement('activity-log-list')

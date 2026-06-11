@@ -1161,6 +1161,21 @@ function responseBinary(
     .send(data)
 }
 
+function responseText(
+  res: express.Response,
+  statusCode: number,
+  contentType: string,
+  fileName: string,
+  content: string
+): void {
+  const body = Buffer.from(content, 'utf8')
+  res.status(statusCode)
+    .type(contentType)
+    .set('Content-Disposition', `attachment; filename="${fileName}"`)
+    .set('Content-Length', String(body.length))
+    .send(content)
+}
+
 function toOpenApiPath(pathTemplate: string): string {
   return pathTemplate.replace(/:([A-Za-z0-9_]+)/g, '{$1}')
 }
@@ -1268,6 +1283,68 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     }
 
     return auditLogStore.listRecent(limit, actorUsername)
+  }
+
+  async function listAllAuditEntries(actorUsername = ''): Promise<AuditLogEntry[]> {
+    if (!auditLogStore) {
+      return []
+    }
+
+    return auditLogStore.listAll(actorUsername)
+  }
+
+  function csvCell(value: unknown): string {
+    const normalized = String(value ?? '')
+    const safeValue = normalized && /^[=+\-@]/.test(normalized) ? `'${normalized}` : normalized
+    return `"${safeValue.replace(/"/g, '""')}"`
+  }
+
+  function buildActivityLogCsv(entries: AuditLogEntry[]): string {
+    const header = [
+      'timestamp',
+      'actorUsername',
+      'actorAuthenticated',
+      'actorAdmin',
+      'action',
+      'target',
+      'outcome',
+      'requestMethod',
+      'requestPath',
+      'requestOrigin',
+      'requestIp',
+      'metadataJson'
+    ]
+
+    const lines = entries.map((entry) =>
+      [
+        entry.timestamp,
+        entry.actor.username,
+        entry.actor.authenticated,
+        entry.actor.admin,
+        entry.action,
+        entry.target,
+        entry.outcome,
+        entry.request.method,
+        entry.request.path,
+        entry.request.origin,
+        entry.request.ip,
+        JSON.stringify(entry.metadata || {})
+      ]
+        .map(csvCell)
+        .join(',')
+    )
+
+    return [header.join(','), ...lines].join('\r\n')
+  }
+
+  function buildActivityLogCsvFileName(actorUsername = ''): string {
+    const normalized = normalizeText(actorUsername)
+    if (!normalized) {
+      return 'activity-log.csv'
+    }
+
+    const safeSegment = normalized.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
+    return `activity-log-${safeSegment || 'user'}.csv`
   }
 
   function cleanupExpiredAuthSessions(): void {
@@ -1859,6 +1936,67 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       responseJson(res, 200, {
         entries: await listRecentAuditEntries(limit, actorUsername)
       } satisfies ActivityLogResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.activityLogCsv, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        const csv = buildActivityLogCsv([])
+        responseText(res, 200, 'text/csv; charset=utf-8', 'activity-log.csv', csv)
+        return
+      }
+
+      const session = getAuthSessionFromRequest(req)
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      if (!isAdminAuthSession(session, authConfig)) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'access.denied',
+          target: getRequestPathname(req),
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Admin access required'
+        })
+        return
+      }
+
+      const actorUsername =
+        typeof req.query.username === 'string' ? normalizeAuthUsername(req.query.username) : ''
+      const entries = await listAllAuditEntries(actorUsername)
+      const csv = buildActivityLogCsv(entries)
+      responseText(
+        res,
+        200,
+        'text/csv; charset=utf-8',
+        buildActivityLogCsvFileName(actorUsername),
+        csv
+      )
+      recordAuditEvent({
+        req,
+        session,
+        action: 'activity.log.export',
+        target: actorUsername || 'all activity',
+        outcome: 'success',
+        metadata: {
+          username: actorUsername || '',
+          entryCount: entries.length
+        }
+      })
     } catch (error) {
       createRouteErrorHandler(res, error)
     }

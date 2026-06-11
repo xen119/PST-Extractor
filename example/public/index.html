@@ -368,51 +368,71 @@
           </button>
         </header>
         <div class="modal-body user-management-body">
-          <form id="user-management-form" class="auth-form user-management-form" autocomplete="off">
-            <label class="auth-field" for="user-management-username">
-              <span>Username</span>
-              <input
-                id="user-management-username"
-                type="text"
-                name="username"
-                autocomplete="off"
-                spellcheck="false"
-              />
-            </label>
-            <label class="auth-field" for="user-management-password">
-              <span>Password</span>
-              <input
-                id="user-management-password"
-                type="password"
-                name="password"
-                autocomplete="new-password"
-              />
-            </label>
-            <button
-              id="user-management-submit"
-              class="primary-button user-management-submit"
-              type="submit"
-            >
-              Add user
-            </button>
-          </form>
-          <div class="modal-section user-management-summary">
-            <div class="panel-head slim">
-              <h3>User list</h3>
-              <span id="user-count-badge" class="badge">0</span>
+          <div class="user-management-sidebar">
+            <form id="user-management-form" class="auth-form user-management-form" autocomplete="off">
+              <label class="auth-field" for="user-management-username">
+                <span>Username</span>
+                <input
+                  id="user-management-username"
+                  type="text"
+                  name="username"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+              <label class="auth-field" for="user-management-password">
+                <span>Password</span>
+                <input
+                  id="user-management-password"
+                  type="password"
+                  name="password"
+                  autocomplete="new-password"
+                />
+              </label>
+              <button
+                id="user-management-submit"
+                class="primary-button user-management-submit"
+                type="submit"
+              >
+                Add user
+              </button>
+            </form>
+            <div class="modal-section user-management-summary">
+              <div class="panel-head slim">
+                <h3>User list</h3>
+                <span id="user-count-badge" class="badge">0</span>
+              </div>
+              <div
+                id="user-management-message"
+                class="user-management-message"
+                aria-live="polite"
+              ></div>
+              <div id="user-list" class="user-list" aria-live="polite"></div>
             </div>
-            <div id="user-management-message" class="user-management-message" aria-live="polite"></div>
-            <div id="user-list" class="user-list" aria-live="polite"></div>
           </div>
           <div class="modal-section user-activity-summary">
             <div class="panel-head slim">
               <h3 id="user-activity-title">User activity</h3>
-              <div class="modal-header-actions user-activity-actions">
-                <span id="user-activity-count-badge" class="badge">0</span>
-                <button id="user-activity-refresh" class="ghost-button small" type="button" disabled>
-                  Refresh
-                </button>
-              </div>
+            <div class="modal-header-actions user-activity-actions">
+              <span id="user-activity-count-badge" class="badge">0</span>
+              <button
+                id="user-activity-export"
+                class="ghost-button small icon-button"
+                type="button"
+                aria-label="Export user activity as CSV"
+                title="Export CSV"
+                disabled
+              >
+                <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M12 4.5v8.25" />
+                  <path d="m8.25 9 3.75 3.75L15.75 9" />
+                  <path d="M5 17.25h14" />
+                </svg>
+              </button>
+              <button id="user-activity-refresh" class="ghost-button small" type="button" disabled>
+                Refresh
+              </button>
+            </div>
             </div>
             <div id="user-activity-selected" class="user-activity-selected">
               Select a user to view activity.
@@ -443,6 +463,20 @@
             <h2 id="activity-log-title">Activity log</h2>
           </div>
           <div class="modal-header-actions">
+            <button
+              id="activity-log-export"
+              class="ghost-button small icon-button"
+              type="button"
+              aria-label="Export activity log as CSV"
+              title="Export CSV"
+              disabled
+            >
+              <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M12 4.5v8.25" />
+                <path d="m8.25 9 3.75 3.75L15.75 9" />
+                <path d="M5 17.25h14" />
+              </svg>
+            </button>
             <button id="activity-log-refresh" class="ghost-button small modal-close" type="button">
               Refresh
             </button>

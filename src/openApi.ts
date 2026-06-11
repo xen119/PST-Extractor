@@ -573,6 +573,33 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
           }
         }
       },
+      [openApiPath(API_ROUTES.activityLogCsv)]: {
+        get: {
+          tags: ['Activity log'],
+          summary: 'Export activity log entries as CSV',
+          parameters: [
+            {
+              name: 'username',
+              in: 'query',
+              required: false,
+              schema: { type: 'string' },
+              description: 'Filter entries to a specific actor username.'
+            }
+          ],
+          responses: {
+            200: {
+              description: 'CSV export',
+              content: {
+                'text/csv': {
+                  schema: { type: 'string' }
+                }
+              }
+            },
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Admin access required')
+          }
+        }
+      },
       [openApiPath(API_ROUTES.pstCatalog)]: {
         get: {
           tags: ['PST catalog'],
