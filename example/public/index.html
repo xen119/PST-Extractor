@@ -7,23 +7,8 @@
     <title>PST Mail Explorer</title>
     <script>
       ;(function () {
-        try {
-          var storageKey = 'pst-mail-explorer.theme'
-          var storedTheme = localStorage.getItem(storageKey)
-          var prefersDark =
-            typeof window.matchMedia === 'function' &&
-            window.matchMedia('(prefers-color-scheme: dark)').matches
-          var theme = storedTheme === 'dark' || storedTheme === 'light'
-            ? storedTheme
-            : prefersDark
-              ? 'dark'
-              : 'light'
-          document.documentElement.dataset.theme = theme
-          document.documentElement.style.colorScheme = theme
-        } catch (error) {
-          document.documentElement.dataset.theme = 'light'
-          document.documentElement.style.colorScheme = 'light'
-        }
+        document.documentElement.dataset.theme = 'light'
+        document.documentElement.style.colorScheme = 'light'
       })()
     </script>
     <link rel="stylesheet" href="/styles.css" />
@@ -32,24 +17,7 @@
     <section id="auth-screen" class="auth-screen" aria-labelledby="auth-title">
       <div class="auth-shell">
         <div class="auth-card">
-          <div class="auth-card-top">
-            <div class="auth-card-copy">
-              <div class="auth-eyebrow">Local viewer</div>
-              <h1 id="auth-title">Sign in to continue</h1>
-              <p>
-                The mailbox workspace is locked behind a local account before any PST content loads.
-              </p>
-            </div>
-            <button
-              id="auth-theme-toggle"
-              class="theme-toggle ghost-button small"
-              type="button"
-              data-theme-toggle
-              aria-pressed="false"
-            >
-              Dark mode
-            </button>
-          </div>
+          <h1 id="auth-title">Sign in</h1>
 
           <form id="auth-form" class="auth-form" autocomplete="on">
             <label class="auth-field" for="auth-username">
@@ -76,11 +44,6 @@
               Sign in
             </button>
           </form>
-
-          <p id="auth-message" class="auth-message">
-            Use the local account configured on the server to unlock the viewer.
-          </p>
-          <div id="auth-error" class="auth-error" aria-live="polite"></div>
         </div>
       </div>
     </section>
@@ -92,6 +55,34 @@
           <strong id="auth-user">admin</strong>
         </div>
         <div class="session-bar-actions">
+          <div class="settings-menu-shell">
+            <button
+              id="settings-button"
+              class="ghost-button small settings-button"
+              type="button"
+              aria-label="Settings"
+              aria-haspopup="menu"
+              aria-expanded="false"
+              aria-controls="settings-menu"
+            >
+              <svg class="settings-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path
+                  d="M19.14 12.94a7.86 7.86 0 0 0 .05-.94 7.86 7.86 0 0 0-.05-.94l2.03-1.58a.5.5 0 0 0 .12-.63l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.4 7.4 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.43h-3.84a.5.5 0 0 0-.5.43l-.36 2.54c-.58.24-1.13.54-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.7 7.85a.5.5 0 0 0 .12.63l2.03 1.58c-.03.31-.05.62-.05.94s.02.63.05.94l-2.03 1.58a.5.5 0 0 0-.12.63l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.5.4 1.05.71 1.63.94l.36 2.54a.5.5 0 0 0 .5.43h3.84a.5.5 0 0 0 .5-.43l.36-2.54c.58-.24 1.13-.54 1.63-.94l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.63l-2.03-1.58ZM12 15.25A3.25 3.25 0 1 1 12 8.75a3.25 3.25 0 0 1 0 6.5Z"
+                />
+              </svg>
+              <span>Settings</span>
+            </button>
+            <div id="settings-menu" class="settings-menu" hidden role="menu" aria-label="Settings menu">
+              <button
+                id="manage-users-button"
+                class="settings-menu-item"
+                type="button"
+                role="menuitem"
+              >
+                Manage users
+              </button>
+            </div>
+          </div>
           <button
             id="shell-theme-toggle"
             class="theme-toggle ghost-button small"
@@ -170,8 +161,8 @@
           <section id="session-summary" class="summary-card" aria-live="polite">
             <div class="summary-empty">
               Select a PST file from the list to load its folders and messages.
-            </div>
-          </section>
+          </div>
+        </section>
 
           <section class="sidebar-section folders-section" aria-label="Folder tree">
             <div class="panel-head slim">
@@ -307,6 +298,69 @@
       <footer id="status-bar" class="status-bar" aria-live="polite">
         Select a mailbox from the list on the left.
       </footer>
+    </div>
+
+    <div id="user-management-modal" class="modal-overlay" hidden>
+      <button
+        class="modal-backdrop"
+        type="button"
+        data-action="close-user-management"
+        aria-label="Close user management"
+      ></button>
+      <section
+        class="modal-panel user-management-modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="user-management-title"
+      >
+        <header class="modal-header">
+          <div class="modal-header-copy">
+            <span class="modal-eyebrow">Settings</span>
+            <h2 id="user-management-title">User management</h2>
+          </div>
+          <button id="user-management-close" class="ghost-button small modal-close" type="button">
+            Close
+          </button>
+        </header>
+        <div class="modal-body user-management-body">
+          <form id="user-management-form" class="auth-form user-management-form" autocomplete="off">
+            <label class="auth-field" for="user-management-username">
+              <span>Username</span>
+              <input
+                id="user-management-username"
+                type="text"
+                name="username"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </label>
+            <label class="auth-field" for="user-management-password">
+              <span>Password</span>
+              <input
+                id="user-management-password"
+                type="password"
+                name="password"
+                autocomplete="new-password"
+              />
+            </label>
+            <button
+              id="user-management-submit"
+              class="primary-button user-management-submit"
+              type="submit"
+            >
+              Add user
+            </button>
+          </form>
+          <div class="modal-section user-management-summary">
+            <div class="panel-head slim">
+              <h3>User list</h3>
+              <span id="user-count-badge" class="badge">0</span>
+            </div>
+            <div id="user-management-message" class="user-management-message" aria-live="polite"></div>
+            <div id="user-list" class="user-list" aria-live="polite"></div>
+          </div>
+        </div>
+      </section>
     </div>
 
     <script>

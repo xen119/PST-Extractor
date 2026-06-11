@@ -66,9 +66,9 @@ npm start
 
 You can set `HOST`, `PORT`, `MONGODB_URI`, `MONGODB_DB`, `M365_AUTH_BYPASS_IPS`, and `CORS_ALLOWED_ORIGINS` in `example/.env` and the server will load them automatically. A sample file is provided at [example/.env.example](example/.env.example).
 
-The example viewer also has a built-in login screen. By default, sign in with `admin` / `pst-extractor`. You can override that account with `AUTH_USERNAME`, `AUTH_PASSWORD`, and `AUTH_SESSION_TTL_MINUTES` in `example/.env`.
+The example viewer also has a built-in login screen. By default, sign in with `admin` / `pst-extractor`. You can override that account with `AUTH_USERNAME`, `AUTH_PASSWORD`, and `AUTH_SESSION_TTL_MINUTES` in `example/.env`. When `MONGODB_URI` is set, the viewer stores local users in MongoDB in the `pst_auth_users` collection. After signing in as the admin account, open the settings cog in the top bar and choose **Manage users** to add more local viewer accounts. User management is admin-only.
 
-The viewer also includes a light/dark mode switcher on the login screen and in the signed-in session bar.
+The viewer includes a light/dark mode switcher in the signed-in session bar. The login screen stays light.
 
 Open the address printed by the server, then:
 

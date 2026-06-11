@@ -3,6 +3,7 @@ import * as fs from 'fs'
 import * as http from 'http'
 import * as path from 'path'
 import { buildOpenApiDocument } from '../src/openApi'
+import { MongoAuthUserStore } from '../src/authUsers'
 import { createPstReviewApp, type ApiSecurityConfig, type AppAuthConfig } from '../src/pstReviewApp'
 import { createReviewStoreFromEnv } from '../src/reviewStore'
 import {
@@ -107,6 +108,7 @@ const auth: AppAuthConfig = {
 let server: http.Server | null = null
 let reviewStore = null as Awaited<ReturnType<typeof createReviewStoreFromEnv>> | null
 let searchIndexStore = null as Awaited<ReturnType<typeof createSearchIndexStoreFromEnv>> | null
+let authUserStore = null as Awaited<ReturnType<typeof MongoAuthUserStore.connect>> | null
 let shuttingDown = false
 
 async function shutdown(exitCode = 0): Promise<void> {
@@ -147,6 +149,14 @@ async function shutdown(exitCode = 0): Promise<void> {
     console.error(error)
   }
 
+  try {
+    if (authUserStore) {
+      await authUserStore.close()
+    }
+  } catch (error) {
+    console.error(error)
+  }
+
   if (exitCode !== 0) {
     process.exitCode = exitCode
   }
@@ -155,6 +165,14 @@ async function shutdown(exitCode = 0): Promise<void> {
 async function main(): Promise<void> {
   reviewStore = await createReviewStoreFromEnv(process.env)
   searchIndexStore = await createSearchIndexStoreFromEnv(process.env)
+  const mongoUri = String(process.env.MONGODB_URI || '').trim()
+  if (mongoUri) {
+    authUserStore = await MongoAuthUserStore.connect(
+      mongoUri,
+      process.env.MONGODB_DB || 'pst-extractor',
+      [{ username: auth.username, password: auth.password }]
+    )
+  }
   await refreshSearchIndexFromCatalog(
     getDefaultPstRootDirectory(),
     reviewStore,
@@ -172,6 +190,7 @@ async function main(): Promise<void> {
     searchIndexStore,
     openApiSpec,
     auth,
+    authUserStore: authUserStore || undefined,
     apiSecurity
   })
 

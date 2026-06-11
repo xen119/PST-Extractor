@@ -17,14 +17,18 @@
     theme: 'pst-mail-explorer.theme'
   }
 
-  const DEFAULT_AUTH_MESSAGE = 'Use the local account configured on the server to unlock the viewer.'
-
   const state = {
     authEnabled: true,
     authenticated: false,
     authChecked: false,
     authLoading: false,
     authUser: '',
+    authUsers: [],
+    authUsersLoading: false,
+    authUsersLoaded: false,
+    authCanManageUsers: false,
+    settingsMenuOpen: false,
+    userManagementOpen: false,
     theme: 'light',
     sessionId: null,
     catalogScopes: [],
@@ -1013,25 +1017,29 @@
   }
 
   function setAuthError(message = '') {
-    if (ui.authError) {
-      ui.authError.textContent = message
-    }
+    void message
   }
 
-  function showAuthScreen(message = DEFAULT_AUTH_MESSAGE) {
+  function showAuthScreen() {
     state.authenticated = false
+    state.authUser = ''
+    state.authCanManageUsers = false
+    state.authUsers = []
+    state.authUsersLoaded = false
+    applyTheme('light')
+    closeSettingsMenu()
+    closeUserManagementModal()
+    updateUserManagementVisibility()
+    setAuthBusy(false)
+    setUserManagementBusy(false)
+    setUserManagementMessage('')
+    setBodyBusy(false)
     if (ui.appShell) {
       ui.appShell.hidden = true
     }
     if (ui.authScreen) {
       ui.authScreen.hidden = false
     }
-    if (ui.authMessage) {
-      ui.authMessage.textContent = message || DEFAULT_AUTH_MESSAGE
-    }
-    setAuthError('')
-    setAuthBusy(false)
-    setBodyBusy(false)
     if (ui.authPassword) {
       ui.authPassword.value = ''
     }
@@ -1045,9 +1053,10 @@
     }
   }
 
-  function showViewerShell(username) {
+  function showViewerShell(username, canManageUsers = false) {
     state.authenticated = true
     state.authUser = String(username || state.authUser || '').trim()
+    state.authCanManageUsers = Boolean(canManageUsers)
     if (ui.authScreen) {
       ui.authScreen.hidden = true
     }
@@ -1057,14 +1066,229 @@
     if (ui.authUser) {
       ui.authUser.textContent = state.authUser || 'Signed in'
     }
+    closeSettingsMenu()
+    closeUserManagementModal()
+    updateUserManagementVisibility()
     setAuthError('')
     setAuthBusy(false)
+    setUserManagementBusy(false)
+    setUserManagementMessage('')
     setBodyBusy(false)
   }
 
   function handleAuthFailure(message = 'Session expired. Sign in again.') {
-    showAuthScreen(message)
+    showAuthScreen()
     setStatus(message, 'error')
+  }
+
+  function updateUserManagementVisibility() {
+    const canManageUsers =
+      Boolean(state.authEnabled) && Boolean(state.authenticated) && Boolean(state.authCanManageUsers)
+
+    if (ui.settingsButton) {
+      ui.settingsButton.hidden = !canManageUsers
+      ui.settingsButton.setAttribute('aria-expanded', 'false')
+    }
+    if (ui.settingsMenu) {
+      ui.settingsMenu.hidden = true
+    }
+    if (ui.userManagementModal) {
+      ui.userManagementModal.hidden = true
+    }
+    state.settingsMenuOpen = false
+    state.userManagementOpen = false
+  }
+
+  function closeSettingsMenu() {
+    state.settingsMenuOpen = false
+    if (ui.settingsMenu) {
+      ui.settingsMenu.hidden = true
+    }
+    if (ui.settingsButton) {
+      ui.settingsButton.setAttribute('aria-expanded', 'false')
+    }
+  }
+
+  function openSettingsMenu() {
+    if (!state.authEnabled || !state.authenticated || !state.authCanManageUsers) {
+      return
+    }
+    if (!ui.settingsMenu || !ui.settingsButton) {
+      return
+    }
+
+    ui.settingsMenu.hidden = false
+    state.settingsMenuOpen = true
+    ui.settingsButton.setAttribute('aria-expanded', 'true')
+  }
+
+  function toggleSettingsMenu() {
+    if (state.settingsMenuOpen) {
+      closeSettingsMenu()
+      return
+    }
+
+    openSettingsMenu()
+  }
+
+  function focusUserManagementUsername() {
+    if (!ui.userManagementUsername) {
+      return
+    }
+
+    window.requestAnimationFrame(() => {
+      ui.userManagementUsername.focus()
+      if (typeof ui.userManagementUsername.select === 'function') {
+        ui.userManagementUsername.select()
+      }
+    })
+  }
+
+  function closeUserManagementModal() {
+    state.userManagementOpen = false
+    if (ui.userManagementModal) {
+      ui.userManagementModal.hidden = true
+    }
+    setUserManagementBusy(false)
+    setUserManagementMessage('')
+    closeSettingsMenu()
+  }
+
+  function openUserManagementModal() {
+    if (!state.authEnabled || !state.authenticated || !state.authCanManageUsers) {
+      setStatus('Admin access required.', 'error')
+      return
+    }
+
+    if (!ui.userManagementModal) {
+      return
+    }
+
+    closeSettingsMenu()
+    ui.userManagementModal.hidden = false
+    state.userManagementOpen = true
+    setUserManagementMessage('')
+    void (async () => {
+      const loaded = await loadAuthUsers({
+        showBusy: true,
+        silent: false
+      })
+
+      if (loaded && state.userManagementOpen) {
+        focusUserManagementUsername()
+      }
+    })()
+  }
+
+  function setUserManagementBusy(isBusy, label = 'Add user') {
+    state.authUsersLoading = isBusy
+    if (ui.userManagementSubmit) {
+      ui.userManagementSubmit.disabled = isBusy
+      ui.userManagementSubmit.textContent = isBusy ? label : 'Add user'
+    }
+    if (ui.userManagementUsername) {
+      ui.userManagementUsername.disabled = isBusy
+    }
+    if (ui.userManagementPassword) {
+      ui.userManagementPassword.disabled = isBusy
+    }
+  }
+
+  function setUserManagementMessage(message = '', tone = 'neutral') {
+    if (!ui.userManagementMessage) {
+      return
+    }
+
+    const normalizedMessage = String(message || '')
+    ui.userManagementMessage.textContent = normalizedMessage
+    if (normalizedMessage) {
+      ui.userManagementMessage.dataset.tone = tone
+    } else {
+      delete ui.userManagementMessage.dataset.tone
+    }
+  }
+
+  function renderAuthUsers(users) {
+    const normalizedUsers = Array.isArray(users)
+      ? users
+          .map((user) => ({
+            username: String(user && user.username ? user.username : '').trim(),
+            createdAt: String(user && user.createdAt ? user.createdAt : '')
+          }))
+          .filter((user) => Boolean(user.username))
+      : []
+
+    state.authUsers = normalizedUsers
+    state.authUsersLoaded = true
+
+    if (ui.userCountBadge) {
+      ui.userCountBadge.textContent = String(normalizedUsers.length)
+    }
+
+    if (!ui.userList) {
+      return
+    }
+
+    if (!normalizedUsers.length) {
+      ui.userList.innerHTML =
+        '<div class="user-list-empty">No local users are configured.</div>'
+      return
+    }
+
+    ui.userList.innerHTML = normalizedUsers
+      .map((user) => {
+        const isCurrent = state.authUser && user.username === state.authUser
+        return `
+          <div class="user-item${isCurrent ? ' current' : ''}">
+            <span class="user-item-name">${escapeHtml(user.username)}</span>
+            ${isCurrent ? '<span class="user-item-meta">Current</span>' : ''}
+          </div>
+        `
+      })
+      .join('')
+  }
+
+  async function loadAuthUsers(options = {}) {
+    if (!state.authEnabled || !state.authCanManageUsers) {
+      renderAuthUsers([])
+      updateUserManagementVisibility()
+      return true
+    }
+
+    const showBusy = options.showBusy !== false
+    const silent = Boolean(options.silent)
+    if (showBusy) {
+      setUserManagementBusy(true, 'Loading...')
+    }
+    if (!silent) {
+      setUserManagementMessage('Loading users...')
+    }
+
+    try {
+      const response = await fetchJson('/api/auth/users', {
+        cache: 'no-store'
+      })
+      renderAuthUsers((response && response.users) || [])
+      if (!silent) {
+        setUserManagementMessage('')
+      }
+      return true
+    } catch (error) {
+      if (error && typeof error === 'object' && Number(error.statusCode) === 401) {
+        handleAuthFailure()
+        return false
+      }
+      if (error && typeof error === 'object' && Number(error.statusCode) === 403) {
+        setUserManagementMessage('Admin access required.', 'error')
+        return false
+      }
+      setUserManagementMessage(`Unable to load users: ${getErrorMessage(error)}`, 'error')
+      return false
+    } finally {
+      if (showBusy) {
+        setUserManagementBusy(false)
+      }
+    }
   }
 
   function getErrorMessage(error) {
@@ -2130,9 +2354,10 @@
         (typeof payload === 'string' ? payload : '') ||
         response.statusText ||
         'Request failed'
+      const requestPath = requestUrl.split('?')[0]
       if (
         response.status === 401 &&
-        !requestUrl.startsWith('/api/auth/') &&
+        !['/api/auth/login', '/api/auth/me', '/api/auth/logout'].includes(requestPath) &&
         state.authEnabled !== false
       ) {
         handleAuthFailure('Session expired. Sign in again.')
@@ -2728,28 +2953,29 @@
       state.authChecked = true
       if (!response.enabled) {
         state.authUser = 'Local access'
-        showViewerShell(state.authUser)
+        showViewerShell(state.authUser, false)
+        applyTheme(readThemePreference())
         return true
       }
 
       if (response.authenticated) {
         state.authUser = (response.user && response.user.username) || state.authUser || ''
-        showViewerShell(state.authUser)
+        showViewerShell(state.authUser, Boolean(response.canManageUsers))
+        applyTheme(readThemePreference())
         return true
       } else {
         state.authUser = ''
-        showAuthScreen(DEFAULT_AUTH_MESSAGE)
+        showAuthScreen()
         return false
       }
     } catch (error) {
       state.authChecked = true
       state.authEnabled = true
       if (error && typeof error === 'object' && error.statusCode === 401) {
-        showAuthScreen(DEFAULT_AUTH_MESSAGE)
+        showAuthScreen()
         return false
       }
-      showAuthScreen(DEFAULT_AUTH_MESSAGE)
-      setAuthError(`Unable to verify sign-in status: ${getErrorMessage(error)}`)
+      showAuthScreen()
       return false
     }
   }
@@ -2784,7 +3010,14 @@
               throw new Error('Unable to sign in.')
             }
 
-            showViewerShell((response.user && response.user.username) || username)
+            showViewerShell(
+              (response.user && response.user.username) || username,
+              Boolean(response.canManageUsers)
+            )
+            applyTheme(readThemePreference())
+            if (!state.authenticated) {
+              return
+            }
             try {
               await initializeViewer()
             } catch (error) {
@@ -2816,6 +3049,145 @@
             setAuthError(getErrorMessage(error))
           } finally {
             setAuthBusy(false)
+          }
+        })()
+      })
+    }
+  }
+
+  function wireUserManagementEvents() {
+    if (ui.settingsButton) {
+      ui.settingsButton.addEventListener('click', (event) => {
+        event.preventDefault()
+        toggleSettingsMenu()
+      })
+    }
+
+    if (ui.manageUsersButton) {
+      ui.manageUsersButton.addEventListener('click', (event) => {
+        event.preventDefault()
+        openUserManagementModal()
+      })
+    }
+
+    if (ui.userManagementClose) {
+      ui.userManagementClose.addEventListener('click', () => {
+        closeUserManagementModal()
+      })
+    }
+
+    if (ui.userManagementModal) {
+      ui.userManagementModal.addEventListener('click', (event) => {
+        const target = event.target
+        if (!(target instanceof Element)) {
+          return
+        }
+        if (
+          target === ui.userManagementModal ||
+          target.getAttribute('data-action') === 'close-user-management'
+        ) {
+          closeUserManagementModal()
+        }
+      })
+    }
+
+    document.addEventListener('click', (event) => {
+      if (!state.settingsMenuOpen) {
+        return
+      }
+
+      const target = event.target
+      if (!(target instanceof Node)) {
+        return
+      }
+
+      if (ui.settingsMenu && ui.settingsMenu.contains(target)) {
+        return
+      }
+
+      if (ui.settingsButton && ui.settingsButton.contains(target)) {
+        return
+      }
+
+      closeSettingsMenu()
+    })
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') {
+        return
+      }
+
+      if (ui.userManagementModal && !ui.userManagementModal.hidden) {
+        closeUserManagementModal()
+        return
+      }
+
+      if (state.settingsMenuOpen) {
+        closeSettingsMenu()
+      }
+    })
+
+    if (ui.userManagementForm) {
+      ui.userManagementForm.addEventListener('submit', (event) => {
+        void (async () => {
+          event.preventDefault()
+          setUserManagementMessage('')
+
+          const username = String(ui.userManagementUsername?.value || '').trim()
+          const password = String(ui.userManagementPassword?.value || '')
+          if (!username || !password.trim()) {
+            setUserManagementMessage('Enter both a username and password.', 'error')
+            return
+          }
+
+          setUserManagementBusy(true, 'Adding...')
+          try {
+            const response = await fetchJson('/api/auth/users', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                username,
+                password
+              })
+            })
+
+            if (!response.user || !response.user.username) {
+              throw new Error('Unable to add user.')
+            }
+
+            if (ui.userManagementUsername) {
+              ui.userManagementUsername.value = ''
+            }
+            if (ui.userManagementPassword) {
+              ui.userManagementPassword.value = ''
+            }
+
+            const reloaded = await loadAuthUsers({
+              showBusy: false,
+              silent: true
+            })
+            if (!reloaded || !state.authenticated) {
+              return
+            }
+
+            setUserManagementMessage(`Added ${response.user.username}.`, 'success')
+          } catch (error) {
+            if (error && typeof error === 'object' && Number(error.statusCode) === 401) {
+              handleAuthFailure()
+              return
+            }
+            if (error && typeof error === 'object' && Number(error.statusCode) === 403) {
+              setUserManagementMessage('Admin access required.', 'error')
+              return
+            }
+            setUserManagementMessage(
+              `Unable to add user: ${getErrorMessage(error)}`,
+              'error'
+            )
+          } finally {
+            setUserManagementBusy(false)
           }
         })()
       })
@@ -3193,10 +3565,21 @@
     ui.authUsername = getElement('auth-username')
     ui.authPassword = getElement('auth-password')
     ui.authSubmit = getElement('auth-submit')
-    ui.authMessage = getElement('auth-message')
-    ui.authError = getElement('auth-error')
     ui.authLogout = getElement('auth-logout')
     ui.authUser = getElement('auth-user')
+    ui.settingsButton = getElement('settings-button')
+    ui.settingsMenu = getElement('settings-menu')
+    ui.manageUsersButton = getElement('manage-users-button')
+    ui.userManagementModal = getElement('user-management-modal')
+    ui.userManagementClose = getElement('user-management-close')
+    ui.userManagementBackdrop = ui.userManagementModal.querySelector('[data-action="close-user-management"]')
+    ui.userManagementForm = getElement('user-management-form')
+    ui.userManagementUsername = getElement('user-management-username')
+    ui.userManagementPassword = getElement('user-management-password')
+    ui.userManagementSubmit = getElement('user-management-submit')
+    ui.userManagementMessage = getElement('user-management-message')
+    ui.userList = getElement('user-list')
+    ui.userCountBadge = getElement('user-count-badge')
     ui.sessionSummary = getElement('session-summary')
     ui.pstCountBadge = getElement('pst-count-badge')
     ui.catalogModeToggle = getElement('catalog-mode-toggle')
@@ -3234,7 +3617,7 @@
     ui.statusBar = getElement('status-bar')
     ui.themeToggleButtons = Array.from(document.querySelectorAll('[data-theme-toggle]'))
 
-    applyTheme(readThemePreference())
+    applyTheme('light')
 
     state.query = localStorage.getItem(STORAGE_KEYS.query) || ''
     state.searchScope = ['pst', 'search', 'all'].includes(
@@ -3260,10 +3643,9 @@
     state.hiddenFiltersOpen = false
     state.selectedPstFileName = localStorage.getItem(STORAGE_KEYS.pstFileName) || null
     state.mailboxFilter = ''
-    ui.authMessage.textContent = DEFAULT_AUTH_MESSAGE
-
     wireThemeEvents()
     wireAuthEvents()
+    wireUserManagementEvents()
     const authenticated = await loadAuthState()
     if (!authenticated) {
       return

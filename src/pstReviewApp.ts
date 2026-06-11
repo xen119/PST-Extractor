@@ -4,6 +4,11 @@ import * as path from 'path'
 import { randomBytes } from 'crypto'
 import { API_ROUTES } from './apiRoutes'
 import {
+  type AuthUserListItem,
+  type AuthUserStore,
+  createMemoryAuthUserStore
+} from './authUsers'
+import {
   buildFolderExtractionPage,
   buildMessageExtractionRecord,
   buildSummaryExtractionRecord,
@@ -65,6 +70,7 @@ export interface CreatePstReviewAppOptions {
   openApiSpec: Record<string, unknown>
   pstRootDir?: string
   auth?: AppAuthConfig
+  authUserStore?: AuthUserStore
   apiSecurity?: ApiSecurityConfig
 }
 
@@ -109,10 +115,19 @@ interface AuthSessionRecord {
 interface AuthStatusResponse {
   authenticated: boolean
   enabled: boolean
+  canManageUsers: boolean
   user: {
     username: string
   } | null
   expiresAt: string | null
+}
+
+interface AuthUsersResponse {
+  users: AuthUserListItem[]
+}
+
+interface AuthUserCreateResponse {
+  user: AuthUserListItem
 }
 
 interface SessionRecord {
@@ -343,26 +358,45 @@ function parseList(value: string[] | undefined, fallback: string[] = []): string
   return values
 }
 
+function normalizeAuthUsername(value: unknown): string {
+  return normalizeText(value)
+}
+
+function normalizeAuthUsernameKey(value: unknown): string {
+  return normalizeAuthUsername(value).toLowerCase()
+}
+
+function isAdminAuthSession(
+  session: AuthSessionRecord | null,
+  auth: { enabled: boolean; username: string }
+): boolean {
+  if (!auth.enabled || !session) {
+    return false
+  }
+
+  return normalizeAuthUsernameKey(session.username) === normalizeAuthUsernameKey(auth.username)
+}
+
 function normalizeAuthConfig(auth?: AppAuthConfig): {
   enabled: boolean
   username: string
-  password: string
   sessionTtlMinutes: number
   cookieName: string
+  seedUsers: Array<{ username: string; password: string }>
 } {
   if (!auth) {
     return {
       enabled: false,
       username: '',
-      password: '',
       sessionTtlMinutes: DEFAULT_AUTH_SESSION_TTL_MINUTES,
-      cookieName: DEFAULT_AUTH_SESSION_COOKIE
+      cookieName: DEFAULT_AUTH_SESSION_COOKIE,
+      seedUsers: []
     }
   }
 
-  const username = normalizeText(auth.username)
-  const password = normalizeText(auth.password)
-  if (!username || !password) {
+  const username = normalizeAuthUsername(auth.username)
+  const password = String(auth.password ?? '')
+  if (!username || !password.trim()) {
     throw createAppError(500, 'Authentication requires both a username and password')
   }
 
@@ -374,9 +408,9 @@ function normalizeAuthConfig(auth?: AppAuthConfig): {
   return {
     enabled: true,
     username,
-    password,
     sessionTtlMinutes,
-    cookieName: normalizeText(auth.cookieName) || DEFAULT_AUTH_SESSION_COOKIE
+    cookieName: normalizeText(auth.cookieName) || DEFAULT_AUTH_SESSION_COOKIE,
+    seedUsers: [{ username, password }]
   }
 }
 
@@ -1152,6 +1186,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   const reviewStore = options.reviewStore
   const searchIndexStore = options.searchIndexStore
   const authConfig = normalizeAuthConfig(options.auth)
+  const authUserStore = options.authUserStore || createMemoryAuthUserStore(authConfig.seedUsers)
   const authSessions = new Map<string, AuthSessionRecord>()
 
   function cleanupExpiredAuthSessions(): void {
@@ -1192,10 +1227,12 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   }
 
   function buildAuthStatus(session: AuthSessionRecord | null): AuthStatusResponse {
+    const canManageUsers = isAdminAuthSession(session, authConfig)
     if (!authConfig.enabled) {
       return {
         authenticated: true,
         enabled: false,
+        canManageUsers: false,
         user: null,
         expiresAt: null
       }
@@ -1205,6 +1242,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       return {
         authenticated: false,
         enabled: true,
+        canManageUsers,
         user: null,
         expiresAt: null
       }
@@ -1213,6 +1251,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     return {
       authenticated: true,
       enabled: true,
+      canManageUsers,
       user: {
         username: session.username
       },
@@ -1386,7 +1425,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     }
   })
 
-  app.post(API_ROUTES.authLogin, (req, res) => {
+  app.post(API_ROUTES.authLogin, async (req, res) => {
     try {
       res.set('Cache-Control', 'no-store')
       if (!authConfig.enabled) {
@@ -1395,9 +1434,10 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       }
 
       const body = (req.body || {}) as { username?: string; password?: string }
-      const username = normalizeText(body.username)
-      const password = normalizeText(body.password)
-      if (username !== authConfig.username || password !== authConfig.password) {
+      const username = normalizeAuthUsername(body.username)
+      const password = String(body.password ?? '')
+      const user = await authUserStore.authenticate(username, password)
+      if (!user) {
         responseJson(res, 401, {
           ...buildAuthStatus(null),
           error: 'Invalid username or password'
@@ -1405,7 +1445,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         return
       }
 
-      const session = createAuthSession(username)
+      const session = createAuthSession(user.username)
       setAuthCookie(res, req, session)
       responseJson(res, 200, buildAuthStatus(session))
     } catch (error) {
@@ -1421,6 +1461,72 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         clearAuthCookie(res)
       }
       responseJson(res, 200, buildAuthStatus(null))
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.authUsers, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        responseJson(res, 200, { users: [] } satisfies AuthUsersResponse)
+        return
+      }
+
+      const session = getAuthSessionFromRequest(req)
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      if (!isAdminAuthSession(session, authConfig)) {
+        responseJson(res, 403, {
+          error: 'Admin access required'
+        })
+        return
+      }
+
+      responseJson(res, 200, {
+        users: await authUserStore.listUsers()
+      } satisfies AuthUsersResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.post(API_ROUTES.authUsers, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        throw createAppError(400, 'Authentication is disabled')
+      }
+
+      const session = getAuthSessionFromRequest(req)
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      if (!isAdminAuthSession(session, authConfig)) {
+        responseJson(res, 403, {
+          error: 'Admin access required'
+        })
+        return
+      }
+
+      const body = (req.body || {}) as { username?: string; password?: string }
+      const user = await authUserStore.addUser(
+        normalizeAuthUsername(body.username),
+        String(body.password ?? '')
+      )
+      responseJson(res, 200, {
+        user
+      } satisfies AuthUserCreateResponse)
     } catch (error) {
       createRouteErrorHandler(res, error)
     }

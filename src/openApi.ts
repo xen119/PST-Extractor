@@ -212,14 +212,53 @@ function authUserSchema(): Record<string, unknown> {
   }
 }
 
+function authManagedUserSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['username', 'createdAt'],
+    properties: {
+      username: { type: 'string' },
+      createdAt: { type: 'string' }
+    }
+  }
+}
+
+function authUsersResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['users'],
+    properties: {
+      users: {
+        type: 'array',
+        items: authManagedUserSchema()
+      }
+    }
+  }
+}
+
+function authUserCreateRequestSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['username', 'password'],
+    properties: {
+      username: { type: 'string' },
+      password: { type: 'string' }
+    }
+  }
+}
+
 function authStatusSchema(): Record<string, unknown> {
   return {
     type: 'object',
     additionalProperties: true,
-    required: ['authenticated', 'enabled', 'user', 'expiresAt'],
+    required: ['authenticated', 'enabled', 'canManageUsers', 'user', 'expiresAt'],
     properties: {
       authenticated: { type: 'boolean' },
       enabled: { type: 'boolean' },
+      canManageUsers: { type: 'boolean' },
       user: {
         nullable: true,
         ...authUserSchema()
@@ -382,6 +421,36 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
           summary: 'Clear the current auth session cookie',
           responses: {
             200: jsonResponse(authStatusSchema())
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authUsers)]: {
+        get: {
+          tags: ['Auth'],
+          summary: 'List the configured local viewer users',
+          responses: {
+            200: jsonResponse(authUsersResponseSchema()),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Admin access required')
+          }
+        },
+        post: {
+          tags: ['Auth'],
+          summary: 'Add a new local viewer user',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: authUserCreateRequestSchema()
+              }
+            }
+          },
+          responses: {
+            200: jsonResponse({ type: 'object', additionalProperties: true, required: ['user'], properties: { user: authManagedUserSchema() } }),
+            ...errorResponse(400, 'Username is required'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Admin access required'),
+            ...errorResponse(409, 'User already exists')
           }
         }
       },
@@ -1142,6 +1211,8 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
       schemas: {
         AuthStatus: authStatusSchema(),
         AuthUser: authUserSchema(),
+        AuthManagedUser: authManagedUserSchema(),
+        AuthUsersResponse: authUsersResponseSchema(),
         MessageSummary: messageSummarySchema(),
         ReviewState: reviewStateSchema(),
         ReviewRecord: reviewRecordSchema(),

@@ -3,6 +3,7 @@ import * as http from 'http'
 import * as os from 'os'
 import * as path from 'path'
 import { AddressInfo } from 'net'
+import { createMemoryAuthUserStore, type AuthUserStore } from '../authUsers'
 import { buildOpenApiDocument } from '../openApi'
 import { createPstReviewApp, type ApiSecurityConfig, type AppAuthConfig } from '../pstReviewApp'
 import { MemoryReviewStore } from '../reviewStore'
@@ -146,7 +147,8 @@ function parseStoredZipEntries(buffer: Buffer): Map<string, Buffer> {
 async function startApp(
   pstRootDir: string,
   apiSecurity?: ApiSecurityConfig,
-  auth?: AppAuthConfig
+  auth?: AppAuthConfig,
+  authUserStore?: AuthUserStore
 ) {
   const reviewStore = new MemoryReviewStore()
   const searchIndexStore = new MemorySearchIndexStore()
@@ -161,6 +163,7 @@ async function startApp(
       reviewStorageMode: reviewStore.kind
     }),
     auth,
+    authUserStore,
     apiSecurity
   })
 
@@ -1098,6 +1101,7 @@ describe('pst review api', () => {
     expect(loginResponse.status).toBe(200)
     expect(loginPayload.authenticated).toBe(true)
     expect(loginPayload.enabled).toBe(true)
+    expect(loginPayload.canManageUsers).toBe(true)
     expect(loginPayload.user.username).toBe('admin')
     expect(setCookie).toContain('HttpOnly')
     expect(cookiePair).toContain('pst-review-session=')
@@ -1110,6 +1114,7 @@ describe('pst review api', () => {
     const mePayload = await readJson(meResponse)
     expect(meResponse.status).toBe(200)
     expect(mePayload.authenticated).toBe(true)
+    expect(mePayload.canManageUsers).toBe(true)
     expect(mePayload.user.username).toBe('admin')
 
     const catalog = await requestJson(`${started.baseUrl}/api/psts`, {
@@ -1137,6 +1142,146 @@ describe('pst review api', () => {
     const postLogoutMePayload = await readJson(postLogoutMeResponse)
     expect(postLogoutMeResponse.status).toBe(401)
     expect(postLogoutMePayload.error).toBe('Authentication required')
+  })
+
+  it('adds additional viewer users and persists them across restarts', async () => {
+    rootDir = makeTempDir('pst-review-api-auth-users-')
+    const pstDir = path.join(rootDir, 'PST')
+    const authUserStore = createMemoryAuthUserStore([
+      { username: 'admin', password: 'pst-extractor' }
+    ])
+    fs.mkdirSync(pstDir)
+    stageFixture(enronPath, path.join(pstDir, 'sample.pst'))
+
+    const started = await startApp(pstDir, undefined, {
+      username: 'admin',
+      password: 'pst-extractor',
+      sessionTtlMinutes: 180
+    }, authUserStore)
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const unauthUsersResponse = await fetch(`${started.baseUrl}/api/auth/users`)
+    const unauthUsersPayload = await readJson(unauthUsersResponse)
+    expect(unauthUsersResponse.status).toBe(401)
+    expect(unauthUsersPayload.error).toBe('Authentication required')
+
+    const loginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'admin',
+        password: 'pst-extractor'
+      })
+    })
+    const loginPayload = await readJson(loginResponse)
+    const cookiePair = getCookiePair(getSetCookieHeader(loginResponse))
+    expect(loginResponse.status).toBe(200)
+    expect(loginPayload.authenticated).toBe(true)
+    expect(loginPayload.canManageUsers).toBe(true)
+
+    const createResponse = await fetch(`${started.baseUrl}/api/auth/users`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookiePair,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'alice',
+        password: 'secret123'
+      })
+    })
+    const createPayload = await readJson(createResponse)
+    expect(createResponse.status).toBe(200)
+    expect(createPayload.user.username).toBe('alice')
+
+    const usersResponse = await fetch(`${started.baseUrl}/api/auth/users`, {
+      headers: {
+        Cookie: cookiePair
+      }
+    })
+    const usersPayload = await readJson(usersResponse)
+    expect(usersResponse.status).toBe(200)
+    expect(usersPayload.users.map((user: { username: string }) => user.username)).toEqual(
+      expect.arrayContaining(['admin', 'alice'])
+    )
+
+    const aliceLoginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'alice',
+        password: 'secret123'
+      })
+    })
+    const aliceLoginPayload = await readJson(aliceLoginResponse)
+    const aliceCookiePair = getCookiePair(getSetCookieHeader(aliceLoginResponse))
+    expect(aliceLoginResponse.status).toBe(200)
+    expect(aliceLoginPayload.authenticated).toBe(true)
+    expect(aliceLoginPayload.canManageUsers).toBe(false)
+
+    const aliceUsersResponse = await fetch(`${started.baseUrl}/api/auth/users`, {
+      headers: {
+        Cookie: aliceCookiePair
+      }
+    })
+    const aliceUsersPayload = await readJson(aliceUsersResponse)
+    expect(aliceUsersResponse.status).toBe(403)
+    expect(aliceUsersPayload.error).toBe('Admin access required')
+
+    const aliceCreateResponse = await fetch(`${started.baseUrl}/api/auth/users`, {
+      method: 'POST',
+      headers: {
+        Cookie: aliceCookiePair,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'charlie',
+        password: 'secret456'
+      })
+    })
+    const aliceCreatePayload = await readJson(aliceCreateResponse)
+    expect(aliceCreateResponse.status).toBe(403)
+    expect(aliceCreatePayload.error).toBe('Admin access required')
+
+    await new Promise<void>((resolveClose) => {
+      started.server.close(() => resolveClose())
+    })
+    server = null
+    await started.reviewStore.close()
+    reviewStore = null
+    await started.searchIndexStore.close()
+    searchIndexStore = null
+
+    const restarted = await startApp(pstDir, undefined, {
+      username: 'admin',
+      password: 'pst-extractor',
+      sessionTtlMinutes: 180
+    }, authUserStore)
+    server = restarted.server
+    reviewStore = restarted.reviewStore
+    searchIndexStore = restarted.searchIndexStore
+
+    const aliceRestartLoginResponse = await fetch(`${restarted.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'alice',
+        password: 'secret123'
+      })
+    })
+    const aliceRestartLoginPayload = await readJson(aliceRestartLoginResponse)
+    expect(aliceRestartLoginResponse.status).toBe(200)
+    expect(aliceRestartLoginPayload.authenticated).toBe(true)
+    expect(aliceRestartLoginPayload.canManageUsers).toBe(false)
+    expect(aliceRestartLoginPayload.user.username).toBe('alice')
   })
 
   it('expires viewer sessions after the configured ttl', async () => {
