@@ -304,7 +304,15 @@ body::before {
   line-height: 1.5;
 }
 
-.user-item {
+.user-item-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.user-item,
+.user-item-select {
+  flex: 1 1 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -313,11 +321,96 @@ body::before {
   border: 1px solid var(--line);
   border-radius: 12px;
   background: linear-gradient(180deg, var(--surface), var(--surface-soft));
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
 }
 
-.user-item.current {
+.user-item:hover,
+.user-item:focus-visible,
+.user-item-select:hover,
+.user-item-select:focus-visible {
+  border-color: var(--line-strong);
+}
+
+.user-item.selected,
+.user-item-select.selected {
   border-color: var(--accent-border-medium);
   background: var(--accent-soft);
+}
+
+.user-item-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.user-item-hint {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.user-delete-button {
+  flex: 0 0 auto;
+  align-self: center;
+  min-width: 5.2rem;
+}
+
+.user-management-summary,
+.user-activity-summary {
+  min-width: 0;
+}
+
+.user-management-form,
+.user-management-summary {
+  grid-column: 1;
+}
+
+.user-activity-summary {
+  display: grid;
+  gap: 10px;
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+
+.user-activity-actions {
+  margin-left: auto;
+}
+
+.user-activity-selected {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: linear-gradient(180deg, var(--surface), var(--surface-soft));
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.user-activity-selected[data-empty='false'] {
+  color: var(--text);
+}
+
+.user-activity-message {
+  min-height: 1.1rem;
+  padding: 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.user-activity-message[data-tone='success'] {
+  color: var(--success);
+}
+
+.user-activity-message[data-tone='error'] {
+  color: var(--danger);
+}
+
+.user-activity-list {
+  max-height: 360px;
 }
 
 .user-item-name {
@@ -456,6 +549,14 @@ body::before {
   flex: 0 0 auto;
 }
 
+.modal-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .modal-body {
   min-height: 0;
   overflow: auto;
@@ -470,16 +571,156 @@ body::before {
 }
 
 .user-management-body {
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+  align-items: start;
+}
+
+.activity-log-modal-panel {
+  width: min(100%, 860px);
+}
+
+.activity-log-body {
   grid-template-columns: minmax(0, 1fr);
 }
 
-.user-management-summary .panel-head {
+.activity-log-summary .panel-head {
   padding: 0 0 10px;
   border-bottom: 0;
   background: transparent;
 }
 
-.user-management-summary h3 {
+.activity-log-summary h3 {
+  margin: 0;
+  font-size: 0.84rem;
+  line-height: 1.2;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+
+.activity-log-message {
+  min-height: 1.1rem;
+  padding: 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.activity-log-message[data-tone='success'] {
+  color: var(--success);
+}
+
+.activity-log-message[data-tone='error'] {
+  color: var(--danger);
+}
+
+.activity-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: min(58vh, 560px);
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.activity-log-empty {
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.activity-log-item {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: linear-gradient(180deg, var(--surface), var(--surface-soft));
+}
+
+.activity-log-item[data-outcome='success'] {
+  border-color: var(--accent-border-subtle);
+}
+
+.activity-log-item[data-outcome='failure'] {
+  border-color: var(--warning-border);
+  background: linear-gradient(180deg, var(--warning-bg), var(--surface-soft));
+}
+
+.activity-log-item[data-outcome='denied'] {
+  border-color: rgba(197, 48, 48, 0.35);
+  background: linear-gradient(180deg, rgba(197, 48, 48, 0.08), var(--surface-soft));
+}
+
+.activity-log-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.activity-log-item-time {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.activity-log-item-outcome {
+  display: inline-flex;
+  align-self: flex-start;
+  padding: 0.28rem 0.55rem;
+  border-radius: 999px;
+  background: var(--accent-tint);
+  color: var(--accent-strong);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.activity-log-item[data-outcome='failure'] .activity-log-item-outcome {
+  background: rgba(214, 158, 46, 0.18);
+  color: var(--warning-border);
+}
+
+.activity-log-item[data-outcome='denied'] .activity-log-item-outcome {
+  background: rgba(197, 48, 48, 0.16);
+  color: var(--danger);
+}
+
+.activity-log-item-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  align-items: baseline;
+}
+
+.activity-log-item-user {
+  font-weight: 700;
+}
+
+.activity-log-item-action,
+.activity-log-item-target {
+  color: var(--muted);
+}
+
+.activity-log-item-meta,
+.activity-log-item-extra {
+  color: var(--soft);
+  font-size: 0.84rem;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.user-management-summary .panel-head,
+.user-activity-summary .panel-head {
+  padding: 0 0 10px;
+  border-bottom: 0;
+  background: transparent;
+}
+
+.user-management-summary h3,
+.user-activity-summary h3 {
   margin: 0;
   font-size: 0.84rem;
   line-height: 1.2;
@@ -2017,6 +2258,17 @@ textarea:focus-visible {
   .summary-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .user-management-body {
+    grid-template-columns: 1fr;
+  }
+
+  .user-management-form,
+  .user-management-summary,
+  .user-activity-summary {
+    grid-column: auto;
+    grid-row: auto;
+  }
 }
 
 @media (max-width: 640px) {
@@ -2048,6 +2300,15 @@ textarea:focus-visible {
 
   .session-bar-copy {
     flex: 1 1 auto;
+  }
+
+  .user-item-row {
+    flex-direction: column;
+  }
+
+  .user-delete-button {
+    width: 100%;
+    min-width: 0;
   }
 
   .navigator-header,

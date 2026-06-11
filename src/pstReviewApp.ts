@@ -4,6 +4,12 @@ import * as path from 'path'
 import { randomBytes } from 'crypto'
 import { API_ROUTES } from './apiRoutes'
 import {
+  type AuditActor,
+  type AuditLogEntry,
+  type AuditLogStore,
+  createFileAuditLogStore
+} from './auditLog'
+import {
   type AuthUserListItem,
   type AuthUserStore,
   createMemoryAuthUserStore
@@ -71,6 +77,7 @@ export interface CreatePstReviewAppOptions {
   pstRootDir?: string
   auth?: AppAuthConfig
   authUserStore?: AuthUserStore
+  auditLogDir?: string
   apiSecurity?: ApiSecurityConfig
 }
 
@@ -128,6 +135,14 @@ interface AuthUsersResponse {
 
 interface AuthUserCreateResponse {
   user: AuthUserListItem
+}
+
+interface AuthUserDeleteResponse {
+  user: AuthUserListItem
+}
+
+interface ActivityLogResponse {
+  entries: AuditLogEntry[]
 }
 
 interface SessionRecord {
@@ -1187,7 +1202,73 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   const searchIndexStore = options.searchIndexStore
   const authConfig = normalizeAuthConfig(options.auth)
   const authUserStore = options.authUserStore || createMemoryAuthUserStore(authConfig.seedUsers)
+  const auditLogStore = options.auditLogDir ? createFileAuditLogStore(options.auditLogDir) : null
   const authSessions = new Map<string, AuthSessionRecord>()
+
+  function getRequestPathname(req: express.Request): string {
+    return (req.originalUrl || req.url || '').split('?')[0] || ''
+  }
+
+  function buildAuditActor(
+    session: AuthSessionRecord | null,
+    fallbackUsername = 'anonymous'
+  ): AuditActor {
+    return {
+      username: normalizeText(session?.username || fallbackUsername) || 'anonymous',
+      authenticated: Boolean(session),
+      admin: isAdminAuthSession(session, authConfig)
+    }
+  }
+
+  function buildAuditRequest(req: express.Request): AuditLogEntry['request'] {
+    const info = getRequestInfo(req, options.apiSecurity?.webChecks)
+    return {
+      method: normalizeText(info.method || req.method || ''),
+      path: getRequestPathname(req),
+      origin: normalizeOrigin(info.origin || req.headers.origin || ''),
+      ip: normalizeIpAddress(info.ip || req.ip || req.socket?.remoteAddress || '')
+    }
+  }
+
+  function recordAuditEvent(input: {
+    req: express.Request
+    actor?: AuditActor
+    session?: AuthSessionRecord | null
+    action: string
+    target: string
+    outcome: AuditLogEntry['outcome']
+    metadata?: Record<string, unknown>
+  }): void {
+    if (!auditLogStore) {
+      return
+    }
+
+    const actor = input.actor || buildAuditActor(input.session || null)
+    void auditLogStore
+      .append({
+        timestamp: new Date().toISOString(),
+        actor,
+        action: normalizeText(input.action),
+        target: normalizeText(input.target),
+        outcome: input.outcome,
+        request: buildAuditRequest(input.req),
+        metadata: input.metadata && typeof input.metadata === 'object' ? input.metadata : {}
+      })
+      .catch((error) => {
+        console.warn('Unable to write activity log entry:', error)
+      })
+  }
+
+  async function listRecentAuditEntries(
+    limit: number,
+    actorUsername = ''
+  ): Promise<AuditLogEntry[]> {
+    if (!auditLogStore) {
+      return []
+    }
+
+    return auditLogStore.listRecent(limit, actorUsername)
+  }
 
   function cleanupExpiredAuthSessions(): void {
     if (!authConfig.enabled) {
@@ -1280,6 +1361,28 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     }
   }
 
+  function revokeAuthSessionsForUsername(username: string): number {
+    if (!authConfig.enabled) {
+      return 0
+    }
+
+    const normalizedUsername = normalizeAuthUsernameKey(username)
+    if (!normalizedUsername) {
+      return 0
+    }
+
+    let revokedCount = 0
+    for (const [token, session] of authSessions.entries()) {
+      if (normalizeAuthUsernameKey(session.username) !== normalizedUsername) {
+        continue
+      }
+      authSessions.delete(token)
+      revokedCount += 1
+    }
+
+    return revokedCount
+  }
+
   function setAuthCookie(res: express.Response, req: express.Request, session: AuthSessionRecord): void {
     if (!authConfig.enabled) {
       return
@@ -1321,12 +1424,23 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       }
 
       const info = getRequestInfo(req, options.apiSecurity?.webChecks)
+      const session = getAuthSessionFromRequest(req)
       const requestOrigin = normalizeOrigin(info.origin || req.headers.origin || '')
       const requestHostOrigin = canonicalRequestOrigin(req)
       const isSameOrigin = Boolean(requestOrigin && requestOrigin === requestHostOrigin)
       const originAllowed = !requestOrigin || isSameOrigin || allowedOrigins.has(requestOrigin)
 
       if (!originAllowed) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'access.denied',
+          target: pathname,
+          outcome: 'denied',
+          metadata: {
+            reason: 'CORS origin not allowed'
+          }
+        })
         return res.status(403).json({
           error: 'CORS origin not allowed',
           origin: requestOrigin || info.origin || ''
@@ -1341,8 +1455,17 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         return res.status(204).end()
       }
 
-      const session = getAuthSessionFromRequest(req)
       if (!session) {
+        recordAuditEvent({
+          req,
+          actor: buildAuditActor(null),
+          action: 'access.denied',
+          target: pathname,
+          outcome: 'denied',
+          metadata: {
+            reason: 'Authentication required'
+          }
+        })
         res.set('Cache-Control', 'no-store')
         return res.status(401).json({
           error: 'Authentication required'
@@ -1438,6 +1561,20 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       const password = String(body.password ?? '')
       const user = await authUserStore.authenticate(username, password)
       if (!user) {
+        recordAuditEvent({
+          req,
+          actor: {
+            username: username || 'anonymous',
+            authenticated: false,
+            admin: false
+          },
+          action: 'auth.login',
+          target: username || 'anonymous',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Invalid username or password'
+          }
+        })
         responseJson(res, 401, {
           ...buildAuthStatus(null),
           error: 'Invalid username or password'
@@ -1447,6 +1584,13 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
       const session = createAuthSession(user.username)
       setAuthCookie(res, req, session)
+      recordAuditEvent({
+        req,
+        actor: buildAuditActor(session, user.username),
+        action: 'auth.login',
+        target: user.username,
+        outcome: 'success'
+      })
       responseJson(res, 200, buildAuthStatus(session))
     } catch (error) {
       createRouteErrorHandler(res, error)
@@ -1457,6 +1601,16 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     try {
       res.set('Cache-Control', 'no-store')
       if (authConfig.enabled) {
+        const session = getAuthSessionFromRequest(req)
+        if (session) {
+          recordAuditEvent({
+            req,
+            session,
+            action: 'auth.logout',
+            target: session.username,
+            outcome: 'success'
+          })
+        }
         clearAuthSession(req)
         clearAuthCookie(res)
       }
@@ -1483,14 +1637,35 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       }
 
       if (!isAdminAuthSession(session, authConfig)) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.list',
+          target: 'local users',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin access required'
+          }
+        })
         responseJson(res, 403, {
           error: 'Admin access required'
         })
         return
       }
 
+      const users = await authUserStore.listUsers()
+      recordAuditEvent({
+        req,
+        session,
+        action: 'auth.users.list',
+        target: 'local users',
+        outcome: 'success',
+        metadata: {
+          count: users.length
+        }
+      })
       responseJson(res, 200, {
-        users: await authUserStore.listUsers()
+        users
       } satisfies AuthUsersResponse)
     } catch (error) {
       createRouteErrorHandler(res, error)
@@ -1513,6 +1688,16 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       }
 
       if (!isAdminAuthSession(session, authConfig)) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.create',
+          target: 'local users',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin access required'
+          }
+        })
         responseJson(res, 403, {
           error: 'Admin access required'
         })
@@ -1524,9 +1709,156 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         normalizeAuthUsername(body.username),
         String(body.password ?? '')
       )
+      recordAuditEvent({
+        req,
+        session,
+        action: 'auth.users.create',
+        target: user.username,
+        outcome: 'success'
+      })
       responseJson(res, 200, {
         user
       } satisfies AuthUserCreateResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.delete(API_ROUTES.authUser, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        throw createAppError(400, 'Authentication is disabled')
+      }
+
+      const session = getAuthSessionFromRequest(req)
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      const targetUsername = normalizeAuthUsername(req.params.username)
+      if (!isAdminAuthSession(session, authConfig)) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.delete',
+          target: targetUsername || 'local users',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Admin access required'
+        })
+        return
+      }
+
+      if (!targetUsername) {
+        responseJson(res, 400, {
+          error: 'Username is required'
+        })
+        return
+      }
+
+      if (normalizeAuthUsernameKey(targetUsername) === normalizeAuthUsernameKey(authConfig.username)) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.delete',
+          target: targetUsername,
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin account cannot be deleted'
+          }
+        })
+        responseJson(res, 400, {
+          error: 'Admin account cannot be deleted'
+        })
+        return
+      }
+
+      const user = await authUserStore.deleteUser(targetUsername)
+      if (!user) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.delete',
+          target: targetUsername,
+          outcome: 'denied',
+          metadata: {
+            reason: 'User not found'
+          }
+        })
+        responseJson(res, 404, {
+          error: 'User not found'
+        })
+        return
+      }
+
+      const revokedSessions = revokeAuthSessionsForUsername(user.username)
+      recordAuditEvent({
+        req,
+        session,
+        action: 'auth.users.delete',
+        target: user.username,
+        outcome: 'success',
+        metadata: {
+          revokedSessions
+        }
+      })
+      responseJson(res, 200, {
+        user
+      } satisfies AuthUserDeleteResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.activityLog, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        responseJson(res, 200, {
+          entries: []
+        } satisfies ActivityLogResponse)
+        return
+      }
+
+      const session = getAuthSessionFromRequest(req)
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      if (!isAdminAuthSession(session, authConfig)) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'access.denied',
+          target: getRequestPathname(req),
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Admin access required'
+        })
+        return
+      }
+
+      const limit = Math.min(parsePositiveInt(req.query.limit as string | string[] | undefined, 50), 200)
+      const actorUsername =
+        typeof req.query.username === 'string' ? normalizeAuthUsername(req.query.username) : ''
+      responseJson(res, 200, {
+        entries: await listRecentAuditEntries(limit, actorUsername)
+      } satisfies ActivityLogResponse)
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
@@ -1554,6 +1886,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.post(API_ROUTES.pstOpen, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
       const body = (req.body || {}) as OpenMailboxRequestBody
       const scopePath = normalizeText(body.scopePath)
       const fileName = normalizeText(body.fileName)
@@ -1585,6 +1918,19 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       }
 
       const summary = buildSessionSummary(index)
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'mailbox.open',
+        target: `${scopePath ? `${scopePath}/` : ''}${fileName}`,
+        outcome: 'success',
+        metadata: {
+          scopePath,
+          scopeLabel,
+          fileName,
+          messageCount: index.messages.size
+        }
+      })
       responseJson(res, 200, {
         sessionId,
         scopePath,
@@ -1600,6 +1946,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.post(API_ROUTES.pstRemove, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
       const body = (req.body || {}) as MoveMailboxRequestBody
       const scopePath = normalizeText(body.scopePath)
       const fileName = normalizeText(body.fileName)
@@ -1610,6 +1957,19 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       const removal = movePstMailboxToRemoved(pstRootDir, scopePath, fileName)
       await searchIndexStore.deleteMailboxDocuments(removal.sourcePath)
       const closedSessionIds = closeSessionsForMailboxKey(removal.sourcePath)
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'mailbox.remove',
+        target: `${removal.scopePath ? `${removal.scopePath}/` : ''}${removal.fileName}`,
+        outcome: 'success',
+        metadata: {
+          scopePath: removal.scopePath,
+          scopeLabel: getScopeLabel(removal.scopePath),
+          fileName: removal.fileName,
+          closedSessionCount: closedSessionIds.length
+        }
+      })
 
       responseJson(res, 200, {
         removed: {
@@ -1628,6 +1988,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.post(API_ROUTES.pstRestore, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
       const body = (req.body || {}) as MoveMailboxRequestBody
       const scopePath = normalizeText(body.scopePath)
       const fileName = normalizeText(body.fileName)
@@ -1646,6 +2007,18 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         scopeLabel: getScopeLabel(restore.scopePath),
         mailboxKey: restoredIndex.filePath
       })
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'mailbox.restore',
+        target: `${restore.scopePath ? `${restore.scopePath}/` : ''}${restore.fileName}`,
+        outcome: 'success',
+        metadata: {
+          scopePath: restore.scopePath,
+          scopeLabel: getScopeLabel(restore.scopePath),
+          fileName: restore.fileName
+        }
+      })
 
       responseJson(res, 200, {
         restored: {
@@ -1663,6 +2036,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.get(API_ROUTES.search, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
       const filters = parseReviewFilters(req.query as Record<string, string | string[] | undefined>)
       const scope = parseSearchScope(req.query.scope) as SearchScope
       const requestedScopePath = normalizeScopePath(req.query.scopePath)
@@ -1707,6 +2081,24 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         reviewTaggedOnly: filters.reviewTaggedOnly,
         reviewTag: filters.reviewTag
       })
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'search.execute',
+        target: scopeLabel,
+        outcome: 'success',
+        metadata: {
+          scope,
+          scopePath,
+          queryLength: filters.query.length,
+          mode: filters.mode,
+          mailOnly: filters.mailOnly,
+          sort: filters.sort,
+          page: filters.page,
+          pageSize: filters.pageSize,
+          resultCount: page.total
+        }
+      })
       responseJson(res, 200, {
         scope,
         scopePath: page.scopePath || scopePath,
@@ -1718,9 +2110,21 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     }
   })
 
-  app.post(API_ROUTES.searchIndexRefresh, async (_req, res) => {
+  app.post(API_ROUTES.searchIndexRefresh, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
       const summary = await refreshSearchIndexFromCatalog(pstRootDir, reviewStore, searchIndexStore)
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'search.index.refresh',
+        target: 'PST catalog',
+        outcome: 'success',
+        metadata: {
+          mailboxCount: summary.mailboxCount,
+          messageCount: summary.messageCount
+        }
+      })
       responseJson(res, 200, {
         summary,
         hiddenRules: await searchIndexStore.listHiddenRules()
@@ -1742,6 +2146,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.post(API_ROUTES.searchFilters, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
       const body = (req.body || {}) as HiddenRuleRequestBody
       const kind = body.kind
       const value = normalizeText(body.value)
@@ -1756,6 +2161,16 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         value,
         label: normalizeText(body.label || value)
       })
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'search.filter.create',
+        target: rule.filterId,
+        outcome: 'success',
+        metadata: {
+          kind: rule.kind
+        }
+      })
       responseJson(res, 200, { rule })
     } catch (error) {
       createRouteErrorHandler(res, error)
@@ -1764,11 +2179,19 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.delete(API_ROUTES.searchFilter, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
       const filterId = normalizeText(req.params.filterId)
       if (!filterId) {
         throw createAppError(400, 'Filter id is required')
       }
       const deleted = await searchIndexStore.deleteHiddenRule(filterId)
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'search.filter.delete',
+        target: filterId,
+        outcome: deleted ? 'success' : 'failure'
+      })
       responseJson(res, 200, { deleted })
     } catch (error) {
       createRouteErrorHandler(res, error)
@@ -1777,7 +2200,19 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.get(API_ROUTES.sessionSummary, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'mailbox.summary.view',
+        target: session.fileName,
+        outcome: 'success',
+        metadata: {
+          scopePath: session.scopePath,
+          scopeLabel: session.scopeLabel
+        }
+      })
       responseJson(res, 200, {
         sessionId: session.id,
         summary: buildSessionSummary(session.index)
@@ -1789,7 +2224,19 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.get(API_ROUTES.sessionTree, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'mailbox.tree.view',
+        target: session.fileName,
+        outcome: 'success',
+        metadata: {
+          scopePath: session.scopePath,
+          scopeLabel: session.scopeLabel
+        }
+      })
       responseJson(res, 200, {
         sessionId: session.id,
         tree: buildFolderTree(session.index)
@@ -1801,6 +2248,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.get(API_ROUTES.folderMessages, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const folderId = normalizeText(req.params.folderId)
       const filters = parseReviewFilters(req.query as Record<string, string | string[] | undefined>)
@@ -1812,6 +2260,21 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         reviewStore,
         hiddenRules
       )
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'folder.view',
+        target: folderId,
+        outcome: 'success',
+        metadata: {
+          fileName: session.fileName,
+          scopePath: session.scopePath,
+          scopeLabel: session.scopeLabel,
+          page: page.page,
+          pageSize: page.pageSize,
+          resultCount: page.items.length
+        }
+      })
       responseJson(res, 200, {
         sessionId: session.id,
         page
@@ -1823,9 +2286,22 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.get(API_ROUTES.messageDetail, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const messageId = normalizeText(req.params.messageId)
       const detail = await buildMessageDetailResponse(session, messageId, reviewStore)
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'message.view',
+        target: messageId,
+        outcome: 'success',
+        metadata: {
+          fileName: session.fileName,
+          folderId: detail.folderId,
+          folderPath: detail.folderPath
+        }
+      })
       responseJson(res, 200, {
         sessionId: session.id,
         detail
@@ -1837,10 +2313,22 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.get(API_ROUTES.messageExtract, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const messageId = normalizeText(req.params.messageId)
       const detail = await buildMessageDetailResponse(session, messageId, reviewStore)
       const fields = normalizeExtractionFields(req.query.fields)
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'message.extract',
+        target: messageId,
+        outcome: 'success',
+        metadata: {
+          fileName: session.fileName,
+          fields: [...fields]
+        }
+      })
       responseJson(res, 200, {
         sessionId: session.id,
         messageId,
@@ -1854,6 +2342,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.get(API_ROUTES.folderExtract, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const folderId = normalizeText(req.params.folderId)
       const filters = parseReviewFilters(req.query as Record<string, string | string[] | undefined>)
@@ -1879,6 +2368,20 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           return buildMessageExtractionRecord(detail, review, fieldList)
         }
       )
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'folder.extract',
+        target: folderId,
+        outcome: 'success',
+        metadata: {
+          fileName: session.fileName,
+          fields: [...fields],
+          page: page.page,
+          pageSize: page.pageSize,
+          resultCount: extraction.items.length
+        }
+      })
 
       responseJson(res, 200, {
         sessionId: session.id,
@@ -1899,6 +2402,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.get(API_ROUTES.messageExportJson, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const messageId = normalizeText(req.params.messageId)
       const detail = await buildMessageDetailResponse(session, messageId, reviewStore)
@@ -1910,6 +2414,17 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         fileName,
         Buffer.from(exportMessageAsJson(detail), 'utf8')
       )
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'message.export.json',
+        target: messageId,
+        outcome: 'success',
+        metadata: {
+          fileName: session.fileName,
+          downloadName: fileName
+        }
+      })
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
@@ -1917,6 +2432,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.get(API_ROUTES.messageExportEml, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const messageId = normalizeText(req.params.messageId)
       const summary = getMessageSummary(session.index, messageId)
@@ -1931,6 +2447,17 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         fileName,
         Buffer.from(eml, 'utf8')
       )
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'message.export.eml',
+        target: messageId,
+        outcome: 'success',
+        metadata: {
+          fileName: session.fileName,
+          downloadName: fileName
+        }
+      })
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
@@ -1938,6 +2465,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.get(API_ROUTES.flaggedBundleExport, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
       const query = req.query as FlaggedBundleQuery
       const scope = parseFlaggedBundleScope(query.scope)
       const scopePath = normalizeScopePath(query.scopePath)
@@ -2140,6 +2668,20 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         mtime: new Date(manifest.generatedAt)
       })
       await writer.finalize()
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'bundle.export',
+        target: scopeLabel,
+        outcome: 'success',
+        metadata: {
+          scope,
+          scopePath: manifest.scope.scopePath,
+          scopeLabel: manifest.scope.scopeLabel,
+          exported: manifest.counts.exported,
+          failed: manifest.counts.failed
+        }
+      })
       res.end()
     } catch (error) {
       if (!res.headersSent) {
@@ -2152,6 +2694,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.get(API_ROUTES.messageAttachment, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const messageId = normalizeText(req.params.messageId)
       const attachmentIndex = parseZeroBasedInt(req.params.attachmentIndex)
@@ -2161,6 +2704,18 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       const payload = getAttachmentDownloadBuffer(session.index, messageId, attachmentIndex)
       const fileName = safeDownloadName(payload.filename, 'attachment')
       responseBinary(res, 200, payload.contentType, fileName, payload.buffer)
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'message.attachment.download',
+        target: messageId,
+        outcome: 'success',
+        metadata: {
+          fileName: session.fileName,
+          attachmentIndex,
+          downloadName: fileName
+        }
+      })
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
@@ -2183,6 +2738,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.patch(API_ROUTES.messageReview, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const messageId = normalizeText(req.params.messageId)
       const body = (req.body || {}) as ReviewPatchBody
@@ -2198,6 +2754,18 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         tags: body.tags
       })
       await searchIndexStore.updateReviewState(session.filePath, messageId, review)
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'message.review.update',
+        target: messageId,
+        outcome: 'success',
+        metadata: {
+          fileName: session.fileName,
+          flagged: review ? review.flagged : false,
+          tagCount: review ? review.tags.length : 0
+        }
+      })
 
       responseJson(res, 200, {
         sessionId: session.id,
@@ -2211,10 +2779,21 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.delete(API_ROUTES.messageReview, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const messageId = normalizeText(req.params.messageId)
       await reviewStore.deleteReview(session.filePath, messageId)
       await searchIndexStore.updateReviewState(session.filePath, messageId, null)
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'message.review.delete',
+        target: messageId,
+        outcome: 'success',
+        metadata: {
+          fileName: session.fileName
+        }
+      })
       responseJson(res, 200, {
         sessionId: session.id,
         messageId,

@@ -10,6 +10,7 @@ export interface AuthUserStore {
   listUsers(): Promise<AuthUserListItem[]>
   authenticate(username: string, password: string): Promise<AuthUserListItem | null>
   addUser(username: string, password: string): Promise<AuthUserListItem>
+  deleteUser(username: string): Promise<AuthUserListItem | null>
   close(): Promise<void>
 }
 
@@ -187,6 +188,17 @@ class MemoryAuthUserStore implements AuthUserStore {
     return toAuthUserListItem(record)
   }
 
+  async deleteUser(username: string): Promise<AuthUserListItem | null> {
+    const key = normalizeUsernameKey(username)
+    const record = this.users.get(key) || null
+    if (!record) {
+      return null
+    }
+
+    this.users.delete(key)
+    return toAuthUserListItem(record)
+  }
+
   async close(): Promise<void> {
     this.users.clear()
   }
@@ -297,6 +309,18 @@ export class MongoAuthUserStore implements AuthUserStore {
     const record = buildAuthUserRecord(normalizedUsername, String(password))
     await this.collection.insertOne(record)
     return toAuthUserListItem(record)
+  }
+
+  async deleteUser(username: string): Promise<AuthUserListItem | null> {
+    const key = normalizeUsernameKey(username)
+    const result = normalizeStoredAuthUserRecord(
+      await this.collection.findOneAndDelete({ usernameKey: key })
+    )
+    if (!result) {
+      return null
+    }
+
+    return toAuthUserListItem(result)
   }
 
   async close(): Promise<void> {

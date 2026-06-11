@@ -72,6 +72,7 @@ loadEnvFile(path.join(__dirname, '..', '.env'))
 
 const host = process.env.HOST || '127.0.0.1'
 const port = Number(process.env.PORT || 3030)
+const auditLogDir = path.join(__dirname, 'logs')
 const webChecks = loadOptionalModule(
   'C:\\Coding\\NodeFunctions\\httpSecurity.js',
   {
@@ -190,6 +191,7 @@ async function main(): Promise<void> {
     searchIndexStore,
     openApiSpec,
     auth,
+    auditLogDir,
     authUserStore: authUserStore || undefined,
     apiSecurity
   })

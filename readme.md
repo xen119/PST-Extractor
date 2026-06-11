@@ -66,7 +66,7 @@ npm start
 
 You can set `HOST`, `PORT`, `MONGODB_URI`, `MONGODB_DB`, `M365_AUTH_BYPASS_IPS`, and `CORS_ALLOWED_ORIGINS` in `example/.env` and the server will load them automatically. A sample file is provided at [example/.env.example](example/.env.example).
 
-The example viewer also has a built-in login screen. By default, sign in with `admin` / `pst-extractor`. You can override that account with `AUTH_USERNAME`, `AUTH_PASSWORD`, and `AUTH_SESSION_TTL_MINUTES` in `example/.env`. When `MONGODB_URI` is set, the viewer stores local users in MongoDB in the `pst_auth_users` collection. After signing in as the admin account, open the settings cog in the top bar and choose **Manage users** to add more local viewer accounts. User management is admin-only.
+The example viewer also has a built-in login screen. By default, sign in with `admin` / `pst-extractor`. You can override that account with `AUTH_USERNAME`, `AUTH_PASSWORD`, and `AUTH_SESSION_TTL_MINUTES` in `example/.env`. When `MONGODB_URI` is set, the viewer stores local users in MongoDB in the `pst_auth_users` collection. After signing in as the admin account, open the settings cog in the top bar and choose **Manage users** to add or delete local viewer accounts, or click a user row inside that modal to inspect that user’s activity log. The settings menu also exposes the global **Activity log** view for recent platform activity. User management and the activity log are admin-only. Activity log entries are written to `example/logs/activity.log`.
 
 The viewer includes a light/dark mode switcher in the signed-in session bar. The login screen stays light.
 
@@ -82,7 +82,7 @@ Open the address printed by the server, then:
 
 Swagger docs are available at `/api/docs`, and the OpenAPI JSON is served at `/api/openapi.json`.
 
-If you set `MONGODB_URI`, review state is stored in MongoDB. You can optionally set `MONGODB_DB=pst-extractor` to override the database name.
+If you set `MONGODB_URI`, review state is stored in MongoDB. You can optionally set `MONGODB_DB=pst-extractor` to override the database name. The activity log remains a file-based audit trail in `example/logs/activity.log`.
 
 `M365_AUTH_BYPASS_IPS` is a comma-separated list of IPs that can skip the M365 auth middleware. It defaults to the usual loopback addresses for local testing.
 

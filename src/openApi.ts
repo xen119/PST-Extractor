@@ -250,6 +250,75 @@ function authUserCreateRequestSchema(): Record<string, unknown> {
   }
 }
 
+function authUserDeleteResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['user'],
+    properties: {
+      user: authManagedUserSchema()
+    }
+  }
+}
+
+function auditLogActorSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['username', 'authenticated', 'admin'],
+    properties: {
+      username: { type: 'string' },
+      authenticated: { type: 'boolean' },
+      admin: { type: 'boolean' }
+    }
+  }
+}
+
+function auditLogRequestSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['method', 'path', 'origin', 'ip'],
+    properties: {
+      method: { type: 'string' },
+      path: { type: 'string' },
+      origin: { type: 'string' },
+      ip: { type: 'string' }
+    }
+  }
+}
+
+function auditLogEntrySchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['timestamp', 'actor', 'action', 'target', 'outcome', 'request', 'metadata'],
+    properties: {
+      timestamp: { type: 'string' },
+      actor: auditLogActorSchema(),
+      action: { type: 'string' },
+      target: { type: 'string' },
+      outcome: { type: 'string', enum: ['success', 'failure', 'denied'] },
+      request: auditLogRequestSchema(),
+      metadata: { type: 'object', additionalProperties: true }
+    }
+  }
+}
+
+function activityLogResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['entries'],
+    properties: {
+      entries: {
+        type: 'array',
+        items: auditLogEntrySchema()
+      }
+    }
+  }
+}
+
 function authStatusSchema(): Record<string, unknown> {
   return {
     type: 'object',
@@ -380,6 +449,7 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
     servers: [{ url: '/' }],
     tags: [
       { name: 'Auth' },
+      { name: 'Activity log' },
       { name: 'PST catalog' },
       { name: 'PST archive' },
       { name: 'Sessions' },
@@ -451,6 +521,55 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
             ...errorResponse(401, 'Authentication required'),
             ...errorResponse(403, 'Admin access required'),
             ...errorResponse(409, 'User already exists')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authUser)]: {
+        delete: {
+          tags: ['Auth'],
+          summary: 'Delete a local viewer user',
+          parameters: [
+            {
+              name: 'username',
+              in: 'path',
+              required: true,
+              schema: { type: 'string' },
+              description: 'Username of the local viewer account to delete.'
+            }
+          ],
+          responses: {
+            200: jsonResponse(authUserDeleteResponseSchema()),
+            ...errorResponse(400, 'Admin account cannot be deleted'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Admin access required'),
+            ...errorResponse(404, 'User not found')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.activityLog)]: {
+        get: {
+          tags: ['Activity log'],
+          summary: 'List recent activity log entries',
+          parameters: [
+            {
+              name: 'limit',
+              in: 'query',
+              required: false,
+              schema: { type: 'integer', minimum: 1, maximum: 200 },
+              description: 'Maximum number of entries to return, newest first.'
+            },
+            {
+              name: 'username',
+              in: 'query',
+              required: false,
+              schema: { type: 'string' },
+              description: 'Filter entries to a specific actor username.'
+            }
+          ],
+          responses: {
+            200: jsonResponse(activityLogResponseSchema()),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Admin access required')
           }
         }
       },
@@ -1213,6 +1332,9 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
         AuthUser: authUserSchema(),
         AuthManagedUser: authManagedUserSchema(),
         AuthUsersResponse: authUsersResponseSchema(),
+        AuthUserDeleteResponse: authUserDeleteResponseSchema(),
+        ActivityLogEntry: auditLogEntrySchema(),
+        ActivityLogResponse: activityLogResponseSchema(),
         MessageSummary: messageSummarySchema(),
         ReviewState: reviewStateSchema(),
         ReviewRecord: reviewRecordSchema(),

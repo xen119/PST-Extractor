@@ -81,6 +81,14 @@
               >
                 Manage users
               </button>
+              <button
+                id="activity-log-button"
+                class="settings-menu-item"
+                type="button"
+                role="menuitem"
+              >
+                Activity log
+              </button>
             </div>
           </div>
           <button
@@ -358,6 +366,62 @@
             </div>
             <div id="user-management-message" class="user-management-message" aria-live="polite"></div>
             <div id="user-list" class="user-list" aria-live="polite"></div>
+          </div>
+          <div class="modal-section user-activity-summary">
+            <div class="panel-head slim">
+              <h3 id="user-activity-title">User activity</h3>
+              <div class="modal-header-actions user-activity-actions">
+                <span id="user-activity-count-badge" class="badge">0</span>
+                <button id="user-activity-refresh" class="ghost-button small" type="button" disabled>
+                  Refresh
+                </button>
+              </div>
+            </div>
+            <div id="user-activity-selected" class="user-activity-selected">
+              Select a user to view activity.
+            </div>
+            <div id="user-activity-message" class="user-activity-message" aria-live="polite"></div>
+            <div id="user-activity-list" class="activity-log-list user-activity-list" aria-live="polite"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div id="activity-log-modal" class="modal-overlay" hidden>
+      <button
+        class="modal-backdrop"
+        type="button"
+        data-action="close-activity-log"
+        aria-label="Close activity log"
+      ></button>
+      <section
+        class="modal-panel activity-log-modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="activity-log-title"
+      >
+        <header class="modal-header">
+          <div class="modal-header-copy">
+            <span class="modal-eyebrow">Settings</span>
+            <h2 id="activity-log-title">Activity log</h2>
+          </div>
+          <div class="modal-header-actions">
+            <button id="activity-log-refresh" class="ghost-button small modal-close" type="button">
+              Refresh
+            </button>
+            <button id="activity-log-close" class="ghost-button small modal-close" type="button">
+              Close
+            </button>
+          </div>
+        </header>
+        <div class="modal-body activity-log-body">
+          <div class="modal-section activity-log-summary">
+            <div class="panel-head slim">
+              <h3>Recent activity</h3>
+              <span id="activity-log-count-badge" class="badge">0</span>
+            </div>
+            <div id="activity-log-message" class="activity-log-message" aria-live="polite"></div>
+            <div id="activity-log-list" class="activity-log-list" aria-live="polite"></div>
           </div>
         </div>
       </section>

@@ -116,6 +116,19 @@ function getCookiePair(setCookieHeader: string): string {
   return setCookieHeader.split(';')[0] || ''
 }
 
+function readAuditLogEntries(filePath: string): any[] {
+  if (!fs.existsSync(filePath)) {
+    return []
+  }
+
+  return fs
+    .readFileSync(filePath, 'utf8')
+    .split(/\r?\n/g)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+}
+
 function parseStoredZipEntries(buffer: Buffer): Map<string, Buffer> {
   const entries = new Map<string, Buffer>()
   let offset = 0
@@ -150,6 +163,7 @@ async function startApp(
   auth?: AppAuthConfig,
   authUserStore?: AuthUserStore
 ) {
+  const auditLogDir = path.join(path.dirname(pstRootDir), 'logs')
   const reviewStore = new MemoryReviewStore()
   const searchIndexStore = new MemorySearchIndexStore()
   await refreshSearchIndexFromCatalog(pstRootDir, reviewStore, searchIndexStore)
@@ -164,6 +178,7 @@ async function startApp(
     }),
     auth,
     authUserStore,
+    auditLogDir,
     apiSecurity
   })
 
@@ -177,6 +192,8 @@ async function startApp(
     baseUrl: `http://127.0.0.1:${address.port}`,
     reviewStore,
     searchIndexStore,
+    auditLogDir,
+    auditLogPath: path.join(auditLogDir, 'activity.log'),
     server
   }
 }
@@ -1225,6 +1242,48 @@ describe('pst review api', () => {
     expect(aliceLoginPayload.authenticated).toBe(true)
     expect(aliceLoginPayload.canManageUsers).toBe(false)
 
+    const aliceOpenResponse = await requestJson(`${started.baseUrl}/api/psts/open`, {
+      method: 'POST',
+      headers: {
+        Cookie: aliceCookiePair,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        scopePath: '',
+        fileName: 'sample.pst'
+      })
+    })
+    expect(aliceOpenResponse.sessionId).toBeTruthy()
+
+    const aliceFilteredActivityLogResponse = await fetch(
+      `${started.baseUrl}/api/activity-log?username=alice&limit=20`,
+      {
+        headers: {
+          Cookie: cookiePair
+        }
+      }
+    )
+    const aliceFilteredActivityLogPayload = await readJson(aliceFilteredActivityLogResponse)
+    expect(aliceFilteredActivityLogResponse.status).toBe(200)
+    expect(aliceFilteredActivityLogPayload.entries.length).toBeGreaterThan(0)
+    expect(
+      aliceFilteredActivityLogPayload.entries.every((entry: { actor?: { username?: string } }) =>
+        entry.actor?.username === 'alice'
+      )
+    ).toBe(true)
+    expect(aliceFilteredActivityLogPayload.entries.map((entry: { action: string }) => entry.action)).toEqual(
+      expect.arrayContaining(['auth.login', 'mailbox.open'])
+    )
+
+    const aliceActivityLogResponse = await fetch(`${started.baseUrl}/api/activity-log`, {
+      headers: {
+        Cookie: aliceCookiePair
+      }
+    })
+    const aliceActivityLogPayload = await readJson(aliceActivityLogResponse)
+    expect(aliceActivityLogResponse.status).toBe(403)
+    expect(aliceActivityLogPayload.error).toBe('Admin access required')
+
     const aliceUsersResponse = await fetch(`${started.baseUrl}/api/auth/users`, {
       headers: {
         Cookie: aliceCookiePair
@@ -1278,10 +1337,289 @@ describe('pst review api', () => {
       })
     })
     const aliceRestartLoginPayload = await readJson(aliceRestartLoginResponse)
+    const aliceRestartCookiePair = getCookiePair(getSetCookieHeader(aliceRestartLoginResponse))
     expect(aliceRestartLoginResponse.status).toBe(200)
     expect(aliceRestartLoginPayload.authenticated).toBe(true)
     expect(aliceRestartLoginPayload.canManageUsers).toBe(false)
     expect(aliceRestartLoginPayload.user.username).toBe('alice')
+
+    const adminRestartLoginResponse = await fetch(`${restarted.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'admin',
+        password: 'pst-extractor'
+      })
+    })
+    const adminRestartLoginPayload = await readJson(adminRestartLoginResponse)
+    const adminRestartCookiePair = getCookiePair(getSetCookieHeader(adminRestartLoginResponse))
+    expect(adminRestartLoginResponse.status).toBe(200)
+    expect(adminRestartLoginPayload.authenticated).toBe(true)
+    expect(adminRestartLoginPayload.canManageUsers).toBe(true)
+
+    const deleteAliceResponse = await fetch(`${restarted.baseUrl}/api/auth/users/alice`, {
+      method: 'DELETE',
+      headers: {
+        Cookie: adminRestartCookiePair
+      }
+    })
+    const deleteAlicePayload = await readJson(deleteAliceResponse)
+    expect(deleteAliceResponse.status).toBe(200)
+    expect(deleteAlicePayload.user.username).toBe('alice')
+
+    const aliceMeAfterDeleteResponse = await fetch(`${restarted.baseUrl}/api/auth/me`, {
+      headers: {
+        Cookie: aliceRestartCookiePair
+      }
+    })
+    const aliceMeAfterDeletePayload = await readJson(aliceMeAfterDeleteResponse)
+    expect(aliceMeAfterDeleteResponse.status).toBe(401)
+    expect(aliceMeAfterDeletePayload.error).toBe('Authentication required')
+
+    const aliceLoginAfterDeleteResponse = await fetch(`${restarted.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'alice',
+        password: 'secret123'
+      })
+    })
+    const aliceLoginAfterDeletePayload = await readJson(aliceLoginAfterDeleteResponse)
+    expect(aliceLoginAfterDeleteResponse.status).toBe(401)
+    expect(aliceLoginAfterDeletePayload.error).toBe('Invalid username or password')
+
+    const usersAfterDeleteResponse = await fetch(`${restarted.baseUrl}/api/auth/users`, {
+      headers: {
+        Cookie: adminRestartCookiePair
+      }
+    })
+    const usersAfterDeletePayload = await readJson(usersAfterDeleteResponse)
+    expect(usersAfterDeleteResponse.status).toBe(200)
+    expect(usersAfterDeletePayload.users.map((user: { username: string }) => user.username)).toEqual(
+      expect.not.arrayContaining(['alice'])
+    )
+  })
+
+  it('writes activity log entries to disk and replays them after restart', async () => {
+    rootDir = makeTempDir('pst-review-api-activity-log-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(pstDir)
+    stageFixture(enronPath, path.join(pstDir, 'sample.pst'))
+
+    const started = await startApp(pstDir, undefined, {
+      username: 'admin',
+      password: 'pst-extractor',
+      sessionTtlMinutes: 180
+    })
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const failedLoginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'admin',
+        password: 'wrong-password'
+      })
+    })
+    const failedLoginPayload = await readJson(failedLoginResponse)
+    expect(failedLoginResponse.status).toBe(401)
+    expect(failedLoginPayload.error).toBe('Invalid username or password')
+    expect(fs.existsSync(started.auditLogPath)).toBe(true)
+    expect(readAuditLogEntries(started.auditLogPath)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: 'auth.login',
+          outcome: 'denied'
+        })
+      ])
+    )
+
+    const loginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'admin',
+        password: 'pst-extractor'
+      })
+    })
+    const loginPayload = await readJson(loginResponse)
+    const adminCookie = getCookiePair(getSetCookieHeader(loginResponse))
+    expect(loginResponse.status).toBe(200)
+    expect(loginPayload.authenticated).toBe(true)
+
+    const usersResponse = await fetch(`${started.baseUrl}/api/auth/users`, {
+      headers: {
+        Cookie: adminCookie
+      }
+    })
+    const usersPayload = await readJson(usersResponse)
+    expect(usersResponse.status).toBe(200)
+    expect(usersPayload.users.map((user: { username: string }) => user.username)).toEqual(
+      expect.arrayContaining(['admin'])
+    )
+
+    const opened = await requestJson(`${started.baseUrl}/api/psts/open`, {
+      method: 'POST',
+      headers: {
+        Cookie: adminCookie,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        scopePath: '',
+        fileName: 'sample.pst'
+      })
+    })
+    const folder = findMailFolder(opened.tree)
+    expect(folder).toBeTruthy()
+
+    const folderPage = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/folders/${encodeURIComponent(
+        folder!.id
+      )}/messages?page=1&pageSize=10`,
+      {
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    expect(folderPage.page.items.length).toBeGreaterThan(0)
+
+    const message = folderPage.page.items.find((item: { isMailLike: boolean }) => item.isMailLike) ||
+      folderPage.page.items[0]
+    expect(message).toBeTruthy()
+
+    const detail = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
+        message.id
+      )}`,
+      {
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    expect(detail.detail).toBeTruthy()
+
+    const searchResults = await requestJson(
+      `${started.baseUrl}/api/search?scope=all&query=sample&pageSize=5`,
+      {
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    expect(searchResults.page).toBeTruthy()
+
+    const reviewResponse = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
+        message.id
+      )}/review`,
+      {
+        method: 'PATCH',
+        headers: {
+          Cookie: adminCookie,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          flagged: true,
+          tags: ['audit']
+        })
+      }
+    )
+    expect(reviewResponse.review.flagged).toBe(true)
+
+    const refreshResponse = await requestJson(`${started.baseUrl}/api/search/index/refresh`, {
+      method: 'POST',
+      headers: {
+        Cookie: adminCookie
+      }
+    })
+    expect(refreshResponse.summary).toBeTruthy()
+
+    const activityLogResponse = await requestJson(
+      `${started.baseUrl}/api/activity-log?limit=20`,
+      {
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    expect(activityLogResponse.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ action: 'auth.login', outcome: 'denied' }),
+        expect.objectContaining({ action: 'auth.login', outcome: 'success' }),
+        expect.objectContaining({ action: 'auth.users.list', outcome: 'success' }),
+        expect.objectContaining({ action: 'mailbox.open', outcome: 'success' }),
+        expect.objectContaining({ action: 'folder.view', outcome: 'success' }),
+        expect.objectContaining({ action: 'message.view', outcome: 'success' }),
+        expect.objectContaining({ action: 'search.execute', outcome: 'success' }),
+        expect.objectContaining({ action: 'message.review.update', outcome: 'success' }),
+        expect.objectContaining({ action: 'search.index.refresh', outcome: 'success' })
+      ])
+    )
+    expect(activityLogResponse.entries[0].action).toBe('search.index.refresh')
+    expect(activityLogResponse.entries.some((entry: any) =>
+      entry.action === 'message.review.update' && entry.metadata?.flagged === true
+    )).toBe(true)
+
+    await new Promise<void>((resolveClose) => {
+      started.server.close(() => resolveClose())
+    })
+    server = null
+    await started.reviewStore.close()
+    reviewStore = null
+    await started.searchIndexStore.close()
+    searchIndexStore = null
+
+    const restarted = await startApp(pstDir, undefined, {
+      username: 'admin',
+      password: 'pst-extractor',
+      sessionTtlMinutes: 180
+    })
+    server = restarted.server
+    reviewStore = restarted.reviewStore
+    searchIndexStore = restarted.searchIndexStore
+
+    const restartedLoginResponse = await fetch(`${restarted.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'admin',
+        password: 'pst-extractor'
+      })
+    })
+    const restartedCookie = getCookiePair(getSetCookieHeader(restartedLoginResponse))
+    expect(restartedLoginResponse.status).toBe(200)
+
+    const restartedActivityLogResponse = await requestJson(
+      `${restarted.baseUrl}/api/activity-log?limit=20`,
+      {
+        headers: {
+          Cookie: restartedCookie
+        }
+      }
+    )
+    expect(restartedActivityLogResponse.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ action: 'mailbox.open', outcome: 'success' }),
+        expect.objectContaining({ action: 'search.index.refresh', outcome: 'success' })
+      ])
+    )
+    expect(readAuditLogEntries(started.auditLogPath).length).toBeGreaterThanOrEqual(
+      restartedActivityLogResponse.entries.length
+    )
   })
 
   it('expires viewer sessions after the configured ttl', async () => {

@@ -27,6 +27,14 @@
     authUsersLoading: false,
     authUsersLoaded: false,
     authCanManageUsers: false,
+    selectedUserActivityUsername: '',
+    userActivityLoading: false,
+    userActivityLoaded: false,
+    userActivityEntries: [],
+    activityLogOpen: false,
+    activityLogLoading: false,
+    activityLogLoaded: false,
+    activityLogEntries: [],
     settingsMenuOpen: false,
     userManagementOpen: false,
     theme: 'light',
@@ -100,6 +108,12 @@
 
   function hasText(value) {
     return Boolean(String(value ?? '').trim())
+  }
+
+  function normalizeAuthUserKey(value) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
   }
 
   function normalizeScopePath(value) {
@@ -1020,19 +1034,35 @@
     void message
   }
 
+  function resetUserManagementState() {
+    state.selectedUserActivityUsername = ''
+    state.userActivityEntries = []
+    state.userActivityLoaded = false
+    setUserActivityBusy(false)
+    setUserActivityMessage('')
+    updateUserActivitySelectionLabel()
+    renderUserActivityEntries([])
+  }
+
   function showAuthScreen() {
     state.authenticated = false
     state.authUser = ''
     state.authCanManageUsers = false
     state.authUsers = []
     state.authUsersLoaded = false
+    resetUserManagementState()
+    state.activityLogEntries = []
+    state.activityLogLoaded = false
     applyTheme('light')
     closeSettingsMenu()
     closeUserManagementModal()
+    closeActivityLogModal()
     updateUserManagementVisibility()
     setAuthBusy(false)
     setUserManagementBusy(false)
     setUserManagementMessage('')
+    setActivityLogBusy(false)
+    setActivityLogMessage('')
     setBodyBusy(false)
     if (ui.appShell) {
       ui.appShell.hidden = true
@@ -1057,6 +1087,9 @@
     state.authenticated = true
     state.authUser = String(username || state.authUser || '').trim()
     state.authCanManageUsers = Boolean(canManageUsers)
+    resetUserManagementState()
+    state.activityLogEntries = []
+    state.activityLogLoaded = false
     if (ui.authScreen) {
       ui.authScreen.hidden = true
     }
@@ -1068,11 +1101,14 @@
     }
     closeSettingsMenu()
     closeUserManagementModal()
+    closeActivityLogModal()
     updateUserManagementVisibility()
     setAuthError('')
     setAuthBusy(false)
     setUserManagementBusy(false)
     setUserManagementMessage('')
+    setActivityLogBusy(false)
+    setActivityLogMessage('')
     setBodyBusy(false)
   }
 
@@ -1089,14 +1125,21 @@
       ui.settingsButton.hidden = !canManageUsers
       ui.settingsButton.setAttribute('aria-expanded', 'false')
     }
+    if (ui.activityLogButton) {
+      ui.activityLogButton.hidden = !canManageUsers
+    }
     if (ui.settingsMenu) {
       ui.settingsMenu.hidden = true
     }
     if (ui.userManagementModal) {
       ui.userManagementModal.hidden = true
     }
+    if (ui.activityLogModal) {
+      ui.activityLogModal.hidden = true
+    }
     state.settingsMenuOpen = false
     state.userManagementOpen = false
+    state.activityLogOpen = false
   }
 
   function closeSettingsMenu() {
@@ -1154,6 +1197,328 @@
     closeSettingsMenu()
   }
 
+  function closeActivityLogModal() {
+    state.activityLogOpen = false
+    if (ui.activityLogModal) {
+      ui.activityLogModal.hidden = true
+    }
+    setActivityLogBusy(false)
+    setActivityLogMessage('')
+    closeSettingsMenu()
+  }
+
+  function isCurrentManagedUser(username) {
+    return Boolean(state.authUser) && normalizeAuthUserKey(username) === normalizeAuthUserKey(state.authUser)
+  }
+
+  function resolveDefaultUserActivityUsername() {
+    if (!Array.isArray(state.authUsers) || !state.authUsers.length) {
+      return ''
+    }
+
+    const currentUser = String(state.authUser || '').trim()
+    if (currentUser) {
+      const match = state.authUsers.find((user) => isCurrentManagedUser(user.username))
+      if (match) {
+        return match.username
+      }
+    }
+
+    return state.authUsers[0]?.username || ''
+  }
+
+  function updateUserActivitySelectionLabel() {
+    if (!ui.userActivitySelected) {
+      return
+    }
+
+    const selectedUsername = String(state.selectedUserActivityUsername || '').trim()
+    if (!selectedUsername) {
+      ui.userActivitySelected.textContent = 'Select a user to view activity.'
+      ui.userActivitySelected.dataset.empty = 'true'
+      if (ui.userActivityRefresh) {
+        ui.userActivityRefresh.disabled = true
+      }
+      return
+    }
+
+    const isVisible = state.authUsers.some(
+      (user) => normalizeAuthUserKey(user.username) === normalizeAuthUserKey(selectedUsername)
+    )
+    ui.userActivitySelected.textContent = isVisible
+      ? `Viewing activity for ${selectedUsername}.`
+      : `${selectedUsername} no longer appears in the user list.`
+    ui.userActivitySelected.dataset.empty = 'false'
+    if (ui.userActivityRefresh) {
+      ui.userActivityRefresh.disabled = state.userActivityLoading
+    }
+  }
+
+  function setUserActivityBusy(isBusy, label = 'Refresh') {
+    state.userActivityLoading = isBusy
+    if (ui.userActivityRefresh) {
+      ui.userActivityRefresh.disabled = isBusy || !String(state.selectedUserActivityUsername || '').trim()
+      ui.userActivityRefresh.textContent = isBusy ? label : 'Refresh'
+    }
+  }
+
+  function setUserActivityMessage(message = '', tone = 'neutral') {
+    if (!ui.userActivityMessage) {
+      return
+    }
+
+    const normalizedMessage = String(message || '')
+    ui.userActivityMessage.textContent = normalizedMessage
+    if (normalizedMessage) {
+      ui.userActivityMessage.dataset.tone = tone
+    } else {
+      delete ui.userActivityMessage.dataset.tone
+    }
+  }
+
+  function renderUserActivityEntries(entries) {
+    const normalizedEntries = Array.isArray(entries)
+      ? entries
+          .map((entry) => ({
+            timestamp: String(entry && entry.timestamp ? entry.timestamp : ''),
+            actor: {
+              username: String(entry && entry.actor && entry.actor.username ? entry.actor.username : 'anonymous'),
+              authenticated: Boolean(entry && entry.actor && entry.actor.authenticated),
+              admin: Boolean(entry && entry.actor && entry.actor.admin)
+            },
+            action: String(entry && entry.action ? entry.action : ''),
+            target: String(entry && entry.target ? entry.target : ''),
+            outcome: String(entry && entry.outcome ? entry.outcome : 'success'),
+            request: {
+              method: String(entry && entry.request && entry.request.method ? entry.request.method : ''),
+              path: String(entry && entry.request && entry.request.path ? entry.request.path : ''),
+              origin: String(entry && entry.request && entry.request.origin ? entry.request.origin : ''),
+              ip: String(entry && entry.request && entry.request.ip ? entry.request.ip : '')
+            },
+            metadata:
+              entry && entry.metadata && typeof entry.metadata === 'object' && !Array.isArray(entry.metadata)
+                ? entry.metadata
+                : {}
+          }))
+          .filter((entry) => Boolean(entry.timestamp) && Boolean(entry.action))
+      : []
+
+    state.userActivityEntries = normalizedEntries
+    state.userActivityLoaded = true
+
+    if (ui.userActivityCountBadge) {
+      ui.userActivityCountBadge.textContent = String(normalizedEntries.length)
+    }
+
+    updateUserActivitySelectionLabel()
+
+    if (!ui.userActivityList) {
+      return
+    }
+
+    const selectedUsername = String(state.selectedUserActivityUsername || '').trim()
+    if (!selectedUsername) {
+      ui.userActivityList.innerHTML =
+        '<div class="activity-log-empty">Select a user to view activity.</div>'
+      return
+    }
+
+    if (!normalizedEntries.length) {
+      ui.userActivityList.innerHTML =
+        `<div class="activity-log-empty">No activity has been recorded for ${escapeHtml(selectedUsername)} yet.</div>`
+      return
+    }
+
+    ui.userActivityList.innerHTML = normalizedEntries
+      .map((entry) => {
+        const outcome = String(entry.outcome || 'success').toLowerCase()
+        const outcomeLabel = outcome === 'denied' ? 'Denied' : outcome === 'failure' ? 'Failure' : 'Success'
+        const requestParts = [
+          entry.request.method,
+          entry.request.path,
+          entry.request.ip ? `IP ${entry.request.ip}` : '',
+          entry.request.origin ? `Origin ${entry.request.origin}` : ''
+        ].filter(Boolean)
+        const metadataText = formatActivityLogMetadata(entry.metadata)
+
+        return `
+          <article class="activity-log-item" data-outcome="${escapeAttr(outcome)}">
+            <div class="activity-log-item-head">
+              <span class="activity-log-item-time">${escapeHtml(formatActivityLogTimestamp(entry.timestamp))}</span>
+              <span class="activity-log-item-outcome">${escapeHtml(outcomeLabel)}</span>
+            </div>
+            <div class="activity-log-item-main">
+              <strong class="activity-log-item-user">${escapeHtml(entry.actor.username || 'anonymous')}</strong>
+              <span class="activity-log-item-action">${escapeHtml(entry.action)}</span>
+              <span class="activity-log-item-target">${escapeHtml(entry.target || 'No target')}</span>
+            </div>
+            <div class="activity-log-item-meta">${escapeHtml(requestParts.join(' · ') || 'No request details')}</div>
+            ${
+              metadataText
+                ? `<div class="activity-log-item-extra">${escapeHtml(metadataText)}</div>`
+                : ''
+            }
+          </article>
+        `
+      })
+      .join('')
+  }
+
+  async function loadUserActivityLog(username, options = {}) {
+    if (!state.authEnabled || !state.authCanManageUsers) {
+      renderUserActivityEntries([])
+      return true
+    }
+
+    const normalizedUsername = String(username || '').trim()
+    if (!normalizedUsername) {
+      state.selectedUserActivityUsername = ''
+      renderUserActivityEntries([])
+      return true
+    }
+
+    const showBusy = options.showBusy !== false
+    const silent = Boolean(options.silent)
+    if (showBusy) {
+      setUserActivityBusy(true, 'Loading...')
+    }
+    if (!silent) {
+      setUserActivityMessage(`Loading activity for ${normalizedUsername}...`)
+    }
+
+    try {
+      const response = await fetchJson(
+        `/api/activity-log?limit=100&username=${encodeURIComponent(normalizedUsername)}`,
+        {
+          cache: 'no-store'
+        }
+      )
+      renderUserActivityEntries((response && response.entries) || [])
+      if (!silent) {
+        setUserActivityMessage('')
+      }
+      return true
+    } catch (error) {
+      if (error && typeof error === 'object' && Number(error.statusCode) === 401) {
+        handleAuthFailure()
+        return false
+      }
+      if (error && typeof error === 'object' && Number(error.statusCode) === 403) {
+        setUserActivityMessage('Admin access required.', 'error')
+        return false
+      }
+      setUserActivityMessage(`Unable to load activity: ${getErrorMessage(error)}`, 'error')
+      return false
+    } finally {
+      if (showBusy) {
+        setUserActivityBusy(false)
+      }
+    }
+  }
+
+  function selectUserActivity(username) {
+    const normalizedUsername = String(username || '').trim()
+    if (!normalizedUsername) {
+      return
+    }
+
+    state.selectedUserActivityUsername = normalizedUsername
+    renderAuthUsers(state.authUsers)
+    void loadUserActivityLog(normalizedUsername, {
+      showBusy: true,
+      silent: false
+    })
+  }
+
+  async function deleteUser(username) {
+    const normalizedUsername = String(username || '').trim()
+    if (!normalizedUsername) {
+      return
+    }
+
+    if (isCurrentManagedUser(normalizedUsername)) {
+      setUserManagementMessage('The admin account cannot be deleted.', 'error')
+      return
+    }
+
+    if (!window.confirm(`Delete ${normalizedUsername}? Active sessions will be revoked.`)) {
+      return
+    }
+
+    setUserManagementMessage('')
+    setUserManagementBusy(true, 'Deleting...')
+    try {
+      const response = await fetchJson(`/api/auth/users/${encodeURIComponent(normalizedUsername)}`, {
+        method: 'DELETE'
+      })
+      if (!response.user || !response.user.username) {
+        throw new Error('Unable to delete user.')
+      }
+
+      setUserManagementMessage(`Deleted ${response.user.username}.`, 'success')
+      await loadAuthUsers({
+        showBusy: false,
+        silent: true
+      })
+    } catch (error) {
+      if (error && typeof error === 'object' && Number(error.statusCode) === 401) {
+        handleAuthFailure()
+        return
+      }
+      if (error && typeof error === 'object' && Number(error.statusCode) === 403) {
+        setUserManagementMessage('Admin access required.', 'error')
+        return
+      }
+      if (error && typeof error === 'object' && Number(error.statusCode) === 404) {
+        setUserManagementMessage('User not found.', 'error')
+        return
+      }
+      if (error && typeof error === 'object' && Number(error.statusCode) === 400) {
+        setUserManagementMessage(getErrorMessage(error), 'error')
+        return
+      }
+      setUserManagementMessage(`Unable to delete user: ${getErrorMessage(error)}`, 'error')
+    } finally {
+      setUserManagementBusy(false)
+    }
+  }
+
+  function openActivityLogModal() {
+    if (!state.authEnabled || !state.authenticated || !state.authCanManageUsers) {
+      setStatus('Admin access required.', 'error')
+      return
+    }
+
+    if (!ui.activityLogModal) {
+      return
+    }
+
+    closeUserManagementModal()
+    closeSettingsMenu()
+    ui.activityLogModal.hidden = false
+    state.activityLogOpen = true
+    setActivityLogMessage('')
+    window.requestAnimationFrame(() => {
+      if (ui.activityLogClose && typeof ui.activityLogClose.focus === 'function') {
+        ui.activityLogClose.focus()
+      }
+    })
+    void (async () => {
+      const loaded = await loadActivityLog({
+        showBusy: true,
+        silent: false
+      })
+
+      if (loaded && state.activityLogOpen) {
+        window.requestAnimationFrame(() => {
+          if (ui.activityLogClose && typeof ui.activityLogClose.focus === 'function') {
+            ui.activityLogClose.focus()
+          }
+        })
+      }
+    })()
+  }
+
   function openUserManagementModal() {
     if (!state.authEnabled || !state.authenticated || !state.authCanManageUsers) {
       setStatus('Admin access required.', 'error')
@@ -1164,6 +1529,7 @@
       return
     }
 
+    closeActivityLogModal()
     closeSettingsMenu()
     ui.userManagementModal.hidden = false
     state.userManagementOpen = true
@@ -1175,6 +1541,17 @@
       })
 
       if (loaded && state.userManagementOpen) {
+        if (!String(state.selectedUserActivityUsername || '').trim()) {
+          state.selectedUserActivityUsername = resolveDefaultUserActivityUsername()
+        }
+        renderAuthUsers(state.authUsers)
+        const selectedUsername = String(state.selectedUserActivityUsername || '').trim()
+        if (selectedUsername) {
+          void loadUserActivityLog(selectedUsername, {
+            showBusy: true,
+            silent: false
+          })
+        }
         focusUserManagementUsername()
       }
     })()
@@ -1191,6 +1568,23 @@
     }
     if (ui.userManagementPassword) {
       ui.userManagementPassword.disabled = isBusy
+    }
+    if (ui.userList) {
+      const actionButtons = ui.userList.querySelectorAll(
+        'button[data-action="select-user-activity"], button[data-action="delete-user"]'
+      )
+      actionButtons.forEach((button) => {
+        const username = String(button.getAttribute('data-username') || '').trim()
+        if (!username) {
+          button.disabled = isBusy
+          return
+        }
+        if (button.getAttribute('data-action') === 'delete-user' && isCurrentManagedUser(username)) {
+          button.disabled = true
+          return
+        }
+        button.disabled = isBusy
+      })
     }
   }
 
@@ -1232,20 +1626,47 @@
     if (!normalizedUsers.length) {
       ui.userList.innerHTML =
         '<div class="user-list-empty">No local users are configured.</div>'
+      updateUserActivitySelectionLabel()
       return
     }
 
+    const selectedUsername = String(state.selectedUserActivityUsername || '').trim()
     ui.userList.innerHTML = normalizedUsers
       .map((user) => {
-        const isCurrent = state.authUser && user.username === state.authUser
+        const isCurrent = isCurrentManagedUser(user.username)
+        const isSelected =
+          Boolean(selectedUsername) &&
+          normalizeAuthUserKey(user.username) === normalizeAuthUserKey(selectedUsername)
         return `
-          <div class="user-item${isCurrent ? ' current' : ''}">
-            <span class="user-item-name">${escapeHtml(user.username)}</span>
-            ${isCurrent ? '<span class="user-item-meta">Current</span>' : ''}
+          <div class="user-item-row${isSelected ? ' selected' : ''}">
+            <button
+              class="user-item user-item-select${isSelected ? ' selected' : ''}"
+              type="button"
+              data-action="select-user-activity"
+              data-username="${escapeAttr(user.username)}"
+              aria-pressed="${isSelected ? 'true' : 'false'}"
+            >
+              <span class="user-item-copy">
+                <span class="user-item-name">${escapeHtml(user.username)}</span>
+                <span class="user-item-meta">${isCurrent ? 'Current admin' : 'View activity'}</span>
+              </span>
+              <span class="user-item-hint">${isSelected ? 'Selected' : 'Open'}</span>
+            </button>
+            <button
+              class="ghost-button small user-delete-button"
+              type="button"
+              data-action="delete-user"
+              data-username="${escapeAttr(user.username)}"
+              ${isCurrent ? 'disabled' : ''}
+            >
+              Delete
+            </button>
           </div>
         `
       })
       .join('')
+
+    updateUserActivitySelectionLabel()
   }
 
   async function loadAuthUsers(options = {}) {
@@ -1287,6 +1708,189 @@
     } finally {
       if (showBusy) {
         setUserManagementBusy(false)
+      }
+    }
+  }
+
+  function formatActivityLogTimestamp(value) {
+    const date = new Date(String(value || ''))
+    if (Number.isNaN(date.getTime())) {
+      return String(value || '')
+    }
+    return date.toLocaleString()
+  }
+
+  function formatActivityLogValue(value) {
+    if (value == null || value === '') {
+      return ''
+    }
+    if (Array.isArray(value)) {
+      return value.map((item) => formatActivityLogValue(item)).filter(Boolean).join(', ')
+    }
+    if (typeof value === 'object') {
+      try {
+        return JSON.stringify(value)
+      } catch {
+        return '[object]'
+      }
+    }
+    return String(value)
+  }
+
+  function formatActivityLogMetadata(metadata) {
+    if (!metadata || typeof metadata !== 'object') {
+      return ''
+    }
+
+    return Object.entries(metadata)
+      .map(([key, value]) => {
+        const text = formatActivityLogValue(value)
+        return text ? `${key}: ${text}` : ''
+      })
+      .filter(Boolean)
+      .join(' · ')
+  }
+
+  function setActivityLogBusy(isBusy, label = 'Refresh') {
+    state.activityLogLoading = isBusy
+    if (ui.activityLogRefresh) {
+      ui.activityLogRefresh.disabled = isBusy
+      ui.activityLogRefresh.textContent = isBusy ? label : 'Refresh'
+    }
+  }
+
+  function setActivityLogMessage(message = '', tone = 'neutral') {
+    if (!ui.activityLogMessage) {
+      return
+    }
+
+    const normalizedMessage = String(message || '')
+    ui.activityLogMessage.textContent = normalizedMessage
+    if (normalizedMessage) {
+      ui.activityLogMessage.dataset.tone = tone
+    } else {
+      delete ui.activityLogMessage.dataset.tone
+    }
+  }
+
+  function renderActivityLogEntries(entries) {
+    const normalizedEntries = Array.isArray(entries)
+      ? entries
+          .map((entry) => ({
+            timestamp: String(entry && entry.timestamp ? entry.timestamp : ''),
+            actor: {
+              username: String(entry && entry.actor && entry.actor.username ? entry.actor.username : 'anonymous'),
+              authenticated: Boolean(entry && entry.actor && entry.actor.authenticated),
+              admin: Boolean(entry && entry.actor && entry.actor.admin)
+            },
+            action: String(entry && entry.action ? entry.action : ''),
+            target: String(entry && entry.target ? entry.target : ''),
+            outcome: String(entry && entry.outcome ? entry.outcome : 'success'),
+            request: {
+              method: String(entry && entry.request && entry.request.method ? entry.request.method : ''),
+              path: String(entry && entry.request && entry.request.path ? entry.request.path : ''),
+              origin: String(entry && entry.request && entry.request.origin ? entry.request.origin : ''),
+              ip: String(entry && entry.request && entry.request.ip ? entry.request.ip : '')
+            },
+            metadata:
+              entry && entry.metadata && typeof entry.metadata === 'object' && !Array.isArray(entry.metadata)
+                ? entry.metadata
+                : {}
+          }))
+          .filter((entry) => Boolean(entry.timestamp) && Boolean(entry.action))
+      : []
+
+    state.activityLogEntries = normalizedEntries
+    state.activityLogLoaded = true
+
+    if (ui.activityLogCountBadge) {
+      ui.activityLogCountBadge.textContent = String(normalizedEntries.length)
+    }
+
+    if (!ui.activityLogList) {
+      return
+    }
+
+    if (!normalizedEntries.length) {
+      ui.activityLogList.innerHTML =
+        '<div class="activity-log-empty">No activity has been recorded yet.</div>'
+      return
+    }
+
+    ui.activityLogList.innerHTML = normalizedEntries
+      .map((entry) => {
+        const outcome = String(entry.outcome || 'success').toLowerCase()
+        const outcomeLabel = outcome === 'denied' ? 'Denied' : outcome === 'failure' ? 'Failure' : 'Success'
+        const requestParts = [
+          entry.request.method,
+          entry.request.path,
+          entry.request.ip ? `IP ${entry.request.ip}` : '',
+          entry.request.origin ? `Origin ${entry.request.origin}` : ''
+        ].filter(Boolean)
+        const metadataText = formatActivityLogMetadata(entry.metadata)
+
+        return `
+          <article class="activity-log-item" data-outcome="${escapeAttr(outcome)}">
+            <div class="activity-log-item-head">
+              <span class="activity-log-item-time">${escapeHtml(formatActivityLogTimestamp(entry.timestamp))}</span>
+              <span class="activity-log-item-outcome">${escapeHtml(outcomeLabel)}</span>
+            </div>
+            <div class="activity-log-item-main">
+              <strong class="activity-log-item-user">${escapeHtml(entry.actor.username || 'anonymous')}</strong>
+              <span class="activity-log-item-action">${escapeHtml(entry.action)}</span>
+              <span class="activity-log-item-target">${escapeHtml(entry.target || 'No target')}</span>
+            </div>
+            <div class="activity-log-item-meta">${escapeHtml(requestParts.join(' · ') || 'No request details')}</div>
+            ${
+              metadataText
+                ? `<div class="activity-log-item-extra">${escapeHtml(metadataText)}</div>`
+                : ''
+            }
+          </article>
+        `
+      })
+      .join('')
+  }
+
+  async function loadActivityLog(options = {}) {
+    if (!state.authEnabled || !state.authCanManageUsers) {
+      renderActivityLogEntries([])
+      updateUserManagementVisibility()
+      return true
+    }
+
+    const showBusy = options.showBusy !== false
+    const silent = Boolean(options.silent)
+    if (showBusy) {
+      setActivityLogBusy(true, 'Loading...')
+    }
+    if (!silent) {
+      setActivityLogMessage('Loading activity log...')
+    }
+
+    try {
+      const response = await fetchJson('/api/activity-log?limit=100', {
+        cache: 'no-store'
+      })
+      renderActivityLogEntries((response && response.entries) || [])
+      if (!silent) {
+        setActivityLogMessage('')
+      }
+      return true
+    } catch (error) {
+      if (error && typeof error === 'object' && Number(error.statusCode) === 401) {
+        handleAuthFailure()
+        return false
+      }
+      if (error && typeof error === 'object' && Number(error.statusCode) === 403) {
+        setActivityLogMessage('Admin access required.', 'error')
+        return false
+      }
+      setActivityLogMessage(`Unable to load activity log: ${getErrorMessage(error)}`, 'error')
+      return false
+    } finally {
+      if (showBusy) {
+        setActivityLogBusy(false)
       }
     }
   }
@@ -3070,6 +3674,13 @@
       })
     }
 
+    if (ui.activityLogButton) {
+      ui.activityLogButton.addEventListener('click', (event) => {
+        event.preventDefault()
+        openActivityLogModal()
+      })
+    }
+
     if (ui.userManagementClose) {
       ui.userManagementClose.addEventListener('click', () => {
         closeUserManagementModal()
@@ -3087,6 +3698,78 @@
           target.getAttribute('data-action') === 'close-user-management'
         ) {
           closeUserManagementModal()
+        }
+      })
+    }
+
+    if (ui.userList) {
+      ui.userList.addEventListener('click', (event) => {
+        const target = event.target
+        if (!(target instanceof Element)) {
+          return
+        }
+
+        const actionButton = target.closest('[data-action="select-user-activity"], [data-action="delete-user"]')
+        if (!actionButton || !ui.userList.contains(actionButton)) {
+          return
+        }
+
+        const action = actionButton.getAttribute('data-action')
+        const username = String(actionButton.getAttribute('data-username') || '').trim()
+        if (!username) {
+          return
+        }
+
+        event.preventDefault()
+        if (action === 'select-user-activity') {
+          selectUserActivity(username)
+          return
+        }
+        if (action === 'delete-user') {
+          void deleteUser(username)
+        }
+      })
+    }
+
+    if (ui.userActivityRefresh) {
+      ui.userActivityRefresh.addEventListener('click', () => {
+        const selectedUsername = String(state.selectedUserActivityUsername || '').trim()
+        if (!selectedUsername) {
+          return
+        }
+        void loadUserActivityLog(selectedUsername, {
+          showBusy: true,
+          silent: false
+        })
+      })
+    }
+
+    if (ui.activityLogClose) {
+      ui.activityLogClose.addEventListener('click', () => {
+        closeActivityLogModal()
+      })
+    }
+
+    if (ui.activityLogRefresh) {
+      ui.activityLogRefresh.addEventListener('click', () => {
+        void loadActivityLog({
+          showBusy: true,
+          silent: false
+        })
+      })
+    }
+
+    if (ui.activityLogModal) {
+      ui.activityLogModal.addEventListener('click', (event) => {
+        const target = event.target
+        if (!(target instanceof Element)) {
+          return
+        }
+        if (
+          target === ui.activityLogModal ||
+          target.getAttribute('data-action') === 'close-activity-log'
+        ) {
+          closeActivityLogModal()
         }
       })
     }
@@ -3119,6 +3802,11 @@
 
       if (ui.userManagementModal && !ui.userManagementModal.hidden) {
         closeUserManagementModal()
+        return
+      }
+
+      if (ui.activityLogModal && !ui.activityLogModal.hidden) {
+        closeActivityLogModal()
         return
       }
 
@@ -3570,6 +4258,7 @@
     ui.settingsButton = getElement('settings-button')
     ui.settingsMenu = getElement('settings-menu')
     ui.manageUsersButton = getElement('manage-users-button')
+    ui.activityLogButton = getElement('activity-log-button')
     ui.userManagementModal = getElement('user-management-modal')
     ui.userManagementClose = getElement('user-management-close')
     ui.userManagementBackdrop = ui.userManagementModal.querySelector('[data-action="close-user-management"]')
@@ -3580,6 +4269,19 @@
     ui.userManagementMessage = getElement('user-management-message')
     ui.userList = getElement('user-list')
     ui.userCountBadge = getElement('user-count-badge')
+    ui.userActivitySelected = getElement('user-activity-selected')
+    ui.userActivityMessage = getElement('user-activity-message')
+    ui.userActivityList = getElement('user-activity-list')
+    ui.userActivityCountBadge = getElement('user-activity-count-badge')
+    ui.userActivityRefresh = getElement('user-activity-refresh')
+    ui.userActivityTitle = getElement('user-activity-title')
+    ui.activityLogModal = getElement('activity-log-modal')
+    ui.activityLogClose = getElement('activity-log-close')
+    ui.activityLogBackdrop = ui.activityLogModal.querySelector('[data-action="close-activity-log"]')
+    ui.activityLogRefresh = getElement('activity-log-refresh')
+    ui.activityLogMessage = getElement('activity-log-message')
+    ui.activityLogList = getElement('activity-log-list')
+    ui.activityLogCountBadge = getElement('activity-log-count-badge')
     ui.sessionSummary = getElement('session-summary')
     ui.pstCountBadge = getElement('pst-count-badge')
     ui.catalogModeToggle = getElement('catalog-mode-toggle')
