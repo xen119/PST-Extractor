@@ -7,8 +7,8 @@
     <title>PST Mail Explorer</title>
     <script>
       ;(function () {
-        document.documentElement.dataset.theme = 'light'
-        document.documentElement.style.colorScheme = 'light'
+        document.documentElement.dataset.theme = 'dark'
+        document.documentElement.style.colorScheme = 'dark'
       })()
     </script>
     <link rel="stylesheet" href="/styles.css" />
@@ -17,8 +17,44 @@
     <section id="auth-screen" class="auth-screen" aria-labelledby="auth-title">
       <div class="auth-shell">
         <div class="auth-card">
-          <h1 id="auth-title">Sign in</h1>
-
+          <header class="auth-card-top">
+            <div class="auth-brand">
+              <div class="auth-mark" aria-hidden="true">
+                <svg class="auth-mark-icon" viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                  <path
+                    d="M12 3.25 18.5 5.7v5.36c0 4.24-2.98 8.17-6.5 9.69-3.52-1.52-6.5-5.45-6.5-9.69V5.7L12 3.25Z"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linejoin="round"
+                  />
+                  <path
+                    d="M12 8.1a3.9 3.9 0 1 0 0 7.8 3.9 3.9 0 0 0 0-7.8Z"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                  />
+                  <path
+                    d="m16.3 16.3 3.2 3.2"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linecap="round"
+                  />
+                </svg>
+              </div>
+              <div class="auth-card-copy">
+                <span class="auth-eyebrow">LOCAL VIEWER</span>
+                <h1 id="auth-title">PST Mail Explorer</h1>
+                <p>Secure access to mailbox review, search, and audit tools.</p>
+              </div>
+            </div>
+          </header>
+          <div class="auth-divider" aria-hidden="true"></div>
+          <section class="auth-section" aria-labelledby="auth-section-title">
+            <h2 id="auth-section-title">Sign in to continue</h2>
+            <p>Use your local username and password to unlock the platform.</p>
+          </section>
           <form id="auth-form" class="auth-form" autocomplete="on">
             <label class="auth-field" for="auth-username">
               <span>Username</span>
@@ -44,6 +80,7 @@
               Sign in
             </button>
           </form>
+          <p class="auth-footer">Local access only. Use a configured account to continue.</p>
         </div>
       </div>
     </section>

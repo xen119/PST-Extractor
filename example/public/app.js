@@ -1053,7 +1053,7 @@
     resetUserManagementState()
     state.activityLogEntries = []
     state.activityLogLoaded = false
-    applyTheme('light')
+    applyTheme('dark')
     closeSettingsMenu()
     closeUserManagementModal()
     closeActivityLogModal()
@@ -4319,7 +4319,7 @@
     ui.statusBar = getElement('status-bar')
     ui.themeToggleButtons = Array.from(document.querySelectorAll('[data-theme-toggle]'))
 
-    applyTheme('light')
+    applyTheme('dark')
 
     state.query = localStorage.getItem(STORAGE_KEYS.query) || ''
     state.searchScope = ['pst', 'search', 'all'].includes(
