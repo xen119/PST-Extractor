@@ -214,6 +214,7 @@ function projectAttachment(attachment: AttachmentDetail): Record<string, unknown
     pathname: attachment.pathname,
     longPathname: attachment.longPathname,
     isEmbeddedMessage: attachment.isEmbeddedMessage,
+    isDownloadable: attachment.isDownloadable,
     downloadUrl: attachment.downloadUrl,
     parseError: attachment.parseError || undefined
   }

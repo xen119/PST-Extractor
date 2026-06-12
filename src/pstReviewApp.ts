@@ -111,6 +111,7 @@ export interface ApiSecurityConfig {
   allowedOrigins?: string[]
   webChecks?: WebChecksLike
   m365Auth?: M365AuthLike
+  hasLocalAuthSession?: (req: express.Request) => boolean
 }
 
 interface AuthSessionRecord {
@@ -588,6 +589,10 @@ function createApiSecurityMiddleware(
       return next()
     }
 
+    if (config.hasLocalAuthSession?.(req)) {
+      return next()
+    }
+
     const auth = config.m365Auth?.CheckTokens
     if (typeof auth !== 'function') {
       return next(createAppError(500, 'Authentication middleware is not configured'))
@@ -1030,7 +1035,10 @@ async function buildMessageDetailResponse(
         ...detail,
         attachments: detail.attachments.map((attachment) => ({
           ...attachment,
-          downloadUrl: attachment.downloadUrl || createAttachmentBaseUrl(session.id, messageId)
+          downloadUrl:
+            attachment.isDownloadable
+              ? attachment.downloadUrl || `${createAttachmentBaseUrl(session.id, messageId)}${attachment.index}`
+              : ''
         }))
       },
       review
@@ -1586,7 +1594,12 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.use(express.json({ limit: '2mb' }))
   app.use(express.static(publicDir))
   app.use(createAuthGateMiddleware())
-  app.use(createApiSecurityMiddleware(options.apiSecurity))
+  app.use(
+    createApiSecurityMiddleware({
+      ...options.apiSecurity,
+      hasLocalAuthSession: (req) => Boolean(authConfig.enabled && getAuthSessionFromRequest(req))
+    })
+  )
 
   app.get(API_ROUTES.openApiJson, (_req, res) => {
     responseJson(res, 200, options.openApiSpec)

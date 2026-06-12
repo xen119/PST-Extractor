@@ -301,6 +301,46 @@ describe('pst review api', () => {
       updatedAt: ''
     })
 
+    const { PSTMessage } = require('../PSTMessage.class')
+    const originalGetAttachment = PSTMessage.prototype.getAttachment
+    const attachmentSpy = jest
+      .spyOn(PSTMessage.prototype, 'getAttachment')
+      .mockImplementation(function (this: PSTMessage, index: number) {
+        if (index === 0) {
+          return {
+            embeddedPSTMessage: null,
+            fileInputStream: null,
+            filename: 'missing.txt',
+            longFilename: '',
+            longPathname: '',
+            pathname: '',
+            mimeTag: 'text/plain',
+            contentId: '',
+            attachMethod: 1,
+            filesize: 0
+          } as any
+        }
+        return originalGetAttachment.call(this, index)
+      })
+
+    const attachmentResponse = await fetch(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
+        'message:2110308'
+      )}/attachments/0`
+    )
+    const attachmentPayload = await readJson(attachmentResponse)
+    expect(attachmentResponse.status).toBe(404)
+    expect(attachmentPayload.error).toContain('Attachment bytes are not stored in this PST')
+    attachmentSpy.mockRestore()
+
+    const attachmentDetail = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
+        'message:2110308'
+      )}`
+    )
+    expect(attachmentDetail.detail.attachments[0].isDownloadable).toBe(true)
+    expect(attachmentDetail.detail.attachments[0].downloadUrl).toContain('/attachments/0')
+
     const recipientMatch = String(
       detail.detail.resolvedDisplayTo || detail.detail.displayTo || ''
     ).match(/<([^>]+)>/)
@@ -1070,6 +1110,66 @@ describe('pst review api', () => {
     expect(response.ok).toBe(true)
     expect(response.headers.get('access-control-allow-origin')).toBe('https://app.example.test')
     expect(authCheck).toHaveBeenCalled()
+  })
+
+  it('skips the external auth middleware for protected routes after local sign-in', async () => {
+    rootDir = makeTempDir('pst-review-api-local-auth-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(pstDir)
+    stageFixture(enronPath, path.join(pstDir, 'sample.pst'))
+
+    const authCheck = jest.fn(async (req, res, next) => {
+      if (!req.headers['x-graph-token']) {
+        return res.status(401).json({
+          success: false,
+          message: 'No proof of possession.'
+        })
+      }
+      return next()
+    })
+    const started = await startApp(pstDir, {
+      bypassIps: [],
+      m365Auth: {
+        CheckTokens: authCheck
+      }
+    }, {
+      username: 'admin',
+      password: 'pst-extractor',
+      sessionTtlMinutes: 180
+    })
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const loginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'admin',
+        password: 'pst-extractor'
+      })
+    })
+    const loginPayload = await readJson(loginResponse)
+    const cookiePair = getCookiePair(getSetCookieHeader(loginResponse))
+    expect(loginResponse.status).toBe(200)
+    expect(loginPayload.authenticated).toBe(true)
+
+    const catalog = await requestJson(`${started.baseUrl}/api/psts`, {
+      headers: {
+        Cookie: cookiePair
+      }
+    })
+    expect(catalog.files).toHaveLength(1)
+
+    const filters = await requestJson(`${started.baseUrl}/api/search/filters`, {
+      headers: {
+        Cookie: cookiePair
+      }
+    })
+    expect(filters.items).toEqual([])
+    expect(authCheck).not.toHaveBeenCalled()
   })
 
   it('authenticates the default viewer account and protects session cookies', async () => {

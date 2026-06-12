@@ -2820,11 +2820,12 @@
       .filter(Boolean)
       .join(' · ')
 
-    const downloadLink = attachment.downloadUrl
+    const isDownloadable = attachment.isDownloadable !== false && Boolean(attachment.downloadUrl)
+    const downloadAction = isDownloadable
       ? `<a class="attachment-link" href="${escapeAttr(attachment.downloadUrl)}" download="${escapeAttr(
           name
         )}">Download</a>`
-      : ''
+      : `<span class="attachment-unavailable" aria-disabled="true" title="Attachment bytes are not stored in this PST.">Unavailable</span>`
 
     return `
       <article class="attachment-item">
@@ -2840,7 +2841,7 @@
             }
           </div>
         </div>
-        ${downloadLink}
+        ${downloadAction}
       </article>
     `
   }

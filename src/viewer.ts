@@ -96,6 +96,7 @@ export interface AttachmentDetail {
   longPathname: string
   isEmbeddedMessage: boolean
   embeddedMessage: MessageDetail | null
+  isDownloadable: boolean
   downloadUrl: string
   parseError?: string
 }
@@ -757,6 +758,25 @@ function readNodeInputStreamToBuffer(stream: PSTNodeInputStream): Buffer {
   return Buffer.concat(chunks)
 }
 
+function createAttachmentUnavailableError(): Error & { statusCode: number } {
+  const error = new Error('Attachment bytes are not stored in this PST.') as Error & {
+    statusCode: number
+  }
+  error.statusCode = 404
+  return error
+}
+
+function isAttachmentDownloadable(attachment: PSTAttachment, hasEmbeddedMessage: boolean): boolean {
+  if (hasEmbeddedMessage) {
+    return true
+  }
+  const stream = safeRead(() => attachment.fileInputStream, null as PSTNodeInputStream | null)
+  if (!stream) {
+    return false
+  }
+  return safeRead(() => stream.length.toNumber(), 0) > 0
+}
+
 export function htmlToText(html: string): string {
   if (!html) {
     return ''
@@ -1315,6 +1335,8 @@ function buildAttachmentSummary(
     parseError = err instanceof Error ? err.message : String(err)
   }
 
+  const isDownloadable = isAttachmentDownloadable(attachment, isEmbeddedMessage)
+
   return {
     attachmentId,
     index,
@@ -1329,6 +1351,7 @@ function buildAttachmentSummary(
     longPathname,
     isEmbeddedMessage,
     embeddedMessage,
+    isDownloadable,
     downloadUrl: '',
     parseError
   }
@@ -1392,7 +1415,7 @@ function buildMessageDetailFromMessage(
         folderId,
         folderPath
       )
-      if (attachmentBaseUrl) {
+      if (attachmentBaseUrl && attachmentDetail.isDownloadable) {
         attachmentDetail.downloadUrl = `${attachmentBaseUrl}${index}`
       }
     } catch (err) {
@@ -1410,7 +1433,8 @@ function buildMessageDetailFromMessage(
         longPathname: '',
         isEmbeddedMessage: false,
         embeddedMessage: null,
-        downloadUrl: attachmentBaseUrl ? `${attachmentBaseUrl}${index}` : '',
+        isDownloadable: false,
+        downloadUrl: '',
         parseError: err instanceof Error ? err.message : String(err)
       }
     }
@@ -1421,11 +1445,11 @@ function buildMessageDetailFromMessage(
 }
 
 export function buildEmptyMessageDetail(summary: MessageSummary): MessageDetail {
-  return {
-    ...summary,
-    sentRepresentingName: '',
-    sentRepresentingAddressType: '',
-    sentRepresentingEmailAddress: '',
+      return {
+      ...summary,
+      sentRepresentingName: '',
+      sentRepresentingAddressType: '',
+      sentRepresentingEmailAddress: '',
     receivedByName: '',
     receivedByAddressType: '',
     receivedByAddress: '',
@@ -2105,7 +2129,7 @@ export function buildMessageDetail(
         folderId,
         folderPath
       )
-      if (attachmentBaseUrl) {
+      if (attachmentBaseUrl && attachmentDetail.isDownloadable) {
         attachmentDetail.downloadUrl = `${attachmentBaseUrl}${index}`
       }
     } catch (err) {
@@ -2123,7 +2147,8 @@ export function buildMessageDetail(
         longPathname: '',
         isEmbeddedMessage: false,
         embeddedMessage: null,
-        downloadUrl: attachmentBaseUrl ? `${attachmentBaseUrl}${index}` : '',
+        isDownloadable: false,
+        downloadUrl: '',
         parseError: err instanceof Error ? err.message : String(err)
       }
     }
@@ -2387,7 +2412,12 @@ export function getAttachmentDownloadBuffer(
         `attachment-${attachmentIndex}`,
       `attachment-${attachmentIndex}`
     )
-    const embedded = attachment.embeddedPSTMessage
+    let embedded: PSTMessage | null = null
+    try {
+      embedded = attachment.embeddedPSTMessage
+    } catch {
+      embedded = null
+    }
     if (embedded) {
       const embeddedSummary = buildSummaryFromMessage(
         embedded,
@@ -2408,17 +2438,17 @@ export function getAttachmentDownloadBuffer(
       }
     }
     const stream = attachment.fileInputStream
-    if (!stream) {
-      return {
-        filename: fileName,
-        contentType: attachment.mimeTag || guessMimeType(fileName),
-        buffer: Buffer.alloc(0)
-      }
+    if (!stream || safeRead(() => stream.length.toNumber(), 0) <= 0) {
+      throw createAttachmentUnavailableError()
+    }
+    const buffer = readNodeInputStreamToBuffer(stream)
+    if (buffer.length === 0) {
+      throw createAttachmentUnavailableError()
     }
     return {
       filename: fileName,
       contentType: attachment.mimeTag || guessMimeType(fileName),
-      buffer: readNodeInputStreamToBuffer(stream)
+      buffer
     }
   })
 }

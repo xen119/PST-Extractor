@@ -326,10 +326,55 @@ describe('viewer integration', () => {
     )
 
     expect(detail.attachments).toHaveLength(1)
+    expect(detail.attachments[0].isDownloadable).toBe(true)
     expect(detail.attachments[0].downloadUrl).toContain('/attachments/0')
 
     const exported = JSON.parse(exportMessageAsJson(detail))
+    expect(exported.attachments[0].isDownloadable).toBe(true)
     expect(exported.attachments[0].downloadUrl).toContain('/attachments/0')
+  })
+
+  it('marks attachments without bytes as unavailable and omits download links', () => {
+    const { PSTMessage } = require('../PSTMessage.class')
+    const originalGetAttachment = PSTMessage.prototype.getAttachment
+    const attachmentSpy = jest
+      .spyOn(PSTMessage.prototype, 'getAttachment')
+      .mockImplementation(function (this: PSTMessage, index: number) {
+        if (index === 0) {
+          return {
+            embeddedPSTMessage: null,
+            fileInputStream: null,
+            filename: 'missing.txt',
+            longFilename: '',
+            longPathname: '',
+            pathname: '',
+            mimeTag: 'text/plain',
+            contentId: '',
+            attachMethod: 1,
+            filesize: 0
+          } as any
+        }
+        return originalGetAttachment.call(this, index)
+      })
+
+    const detail = withSessionMessage(outlookSession, 'message:2110308', (message, summary) =>
+      buildMessageDetail(message, summary, {
+        messageId: summary.id,
+        attachmentBaseUrl: `/api/sessions/demo/messages/${encodeURIComponent(
+          summary.id
+        )}/attachments/`
+      })
+    )
+
+    expect(detail.attachments).toHaveLength(1)
+    expect(detail.attachments[0].isDownloadable).toBe(false)
+    expect(detail.attachments[0].downloadUrl).toBe('')
+
+    expect(() => getAttachmentDownloadBuffer(outlookSession, 'message:2110308', 0)).toThrow(
+      /Attachment bytes are not stored in this PST/
+    )
+
+    attachmentSpy.mockRestore()
   })
 
   it('exports raw attachment bytes and EML for real messages', () => {
@@ -375,6 +420,7 @@ describe('viewer integration', () => {
           longPathname: '',
           isEmbeddedMessage: true,
           embeddedMessage: nested,
+          isDownloadable: true,
           downloadUrl: ''
         }
       ]

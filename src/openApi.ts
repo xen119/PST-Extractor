@@ -136,6 +136,44 @@ function messageSummarySchema(): Record<string, unknown> {
   }
 }
 
+function attachmentDetailSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    properties: {
+      attachmentId: { type: 'string' },
+      index: { type: 'integer' },
+      filename: { type: 'string' },
+      longFilename: { type: 'string' },
+      downloadFilename: { type: 'string' },
+      mimeTag: { type: 'string' },
+      size: { type: 'integer' },
+      attachMethod: { type: 'integer' },
+      contentId: { type: 'string' },
+      pathname: { type: 'string' },
+      longPathname: { type: 'string' },
+      isEmbeddedMessage: { type: 'boolean' },
+      isDownloadable: { type: 'boolean' },
+      downloadUrl: { type: 'string' },
+      parseError: { type: 'string' }
+    }
+  }
+}
+
+function messageDetailSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    properties: {
+      review: reviewStateSchema(),
+      attachments: {
+        type: 'array',
+        items: attachmentDetailSchema()
+      }
+    }
+  }
+}
+
 function reviewStateSchema(): Record<string, unknown> {
   return {
     type: 'object',
@@ -418,7 +456,7 @@ function extractionRecordSchema(): Record<string, unknown> {
           hasAttachments: { type: 'boolean' },
           attachments: {
             type: 'array',
-            items: { type: 'object', additionalProperties: true }
+            items: attachmentDetailSchema()
           }
         }
       },
@@ -1031,13 +1069,7 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
               required: ['sessionId', 'detail'],
               properties: {
                 sessionId: { type: 'string' },
-                detail: {
-                  type: 'object',
-                  additionalProperties: true,
-                  properties: {
-                    review: reviewStateSchema()
-                  }
-                }
+                detail: messageDetailSchema()
               }
             }),
             ...errorResponse(404, 'Message not found')
@@ -1348,7 +1380,7 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
                 }
               }
             },
-            ...errorResponse(404, 'Attachment not found')
+            ...errorResponse(404, 'Attachment not found or unavailable')
           }
         }
       }
@@ -1363,6 +1395,8 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
         ActivityLogEntry: auditLogEntrySchema(),
         ActivityLogResponse: activityLogResponseSchema(),
         MessageSummary: messageSummarySchema(),
+        AttachmentDetail: attachmentDetailSchema(),
+        MessageDetail: messageDetailSchema(),
         ReviewState: reviewStateSchema(),
         ReviewRecord: reviewRecordSchema(),
         ExtractionRecord: extractionRecordSchema()
