@@ -3,6 +3,7 @@
     casePath: 'pst-mail-explorer.casePath',
     scopePath: 'pst-mail-explorer.scopePath',
     mailboxScopeView: 'pst-mail-explorer.mailboxScopeView',
+    mailboxFilter: 'pst-mail-explorer.mailboxFilter',
     catalogMode: 'pst-mail-explorer.catalogMode',
     pstFileName: 'pst-mail-explorer.pstFileName',
     folderId: 'pst-mail-explorer.folderId',
@@ -27,10 +28,40 @@
     authUsersLoading: false,
     authUsersLoaded: false,
     authCanManageUsers: false,
+    authMfaEnabled: false,
+    authView: 'login',
+    authInviteToken: '',
+    authInviteLoading: false,
+    authInviteLoaded: false,
+    authInvite: null,
+    authInviteError: '',
+    authInviteMfaAvailable: false,
+    authInviteStep: 'password',
+    authInviteSetup: null,
+    authInviteRecoveryCodes: [],
+    authInviteUsername: '',
+    authMfaChallengeUsername: '',
+    authMfaChallengeError: '',
+    authMfaReminderOpen: false,
+    authMfaReminderUsername: '',
+    authMfaReminderDeferred: false,
+    authMfaSetupOpen: false,
+    authMfaSetupLoaded: false,
+    authMfaSetupStep: 'idle',
+    authMfaSetupUsername: '',
+    authMfaSetupData: null,
+    authMfaSetupRecoveryCodes: [],
+    authMfaSetupError: '',
     selectedUserActivityUsername: '',
     userActivityLoading: false,
     userActivityLoaded: false,
     userActivityEntries: [],
+    smtpSettingsOpen: false,
+    smtpSettingsLoading: false,
+    smtpSettingsSaving: false,
+    smtpSettingsTesting: false,
+    smtpSettingsLoaded: false,
+    smtpSettingsHasPassword: false,
     activityLogOpen: false,
     activityLogLoading: false,
     activityLogLoaded: false,
@@ -899,6 +930,7 @@
 
   function clearMailboxSessionState(options = {}) {
     const preserveSearchResults = Boolean(options.preserveSearchResults)
+    const suppressSave = Boolean(options.suppressSave)
     state.sessionId = null
     state.summary = null
     state.tree = null
@@ -916,7 +948,9 @@
     renderFolderTree()
     renderMessageList()
     renderMessageDetail()
-    saveState()
+    if (!suppressSave) {
+      saveState()
+    }
   }
 
   async function refreshSearchIndex() {
@@ -1046,50 +1080,621 @@
     if (ui.authPassword) {
       ui.authPassword.disabled = isBusy
     }
+    if (ui.authMfaSubmit) {
+      ui.authMfaSubmit.disabled = isBusy
+      ui.authMfaSubmit.textContent = isBusy ? 'Verifying...' : 'Verify code'
+    }
+    if (ui.authMfaCode) {
+      ui.authMfaCode.disabled = isBusy
+    }
+    if (ui.inviteSubmit) {
+      ui.inviteSubmit.disabled = isBusy
+      ui.inviteSubmit.textContent = isBusy ? 'Saving...' : 'Set password'
+    }
+    if (ui.invitePassword) {
+      ui.invitePassword.disabled = isBusy
+    }
+    if (ui.inviteConfirmPassword) {
+      ui.inviteConfirmPassword.disabled = isBusy
+    }
+    if (ui.inviteMfaStart) {
+      ui.inviteMfaStart.disabled = isBusy
+    }
+    if (ui.inviteMfaSkip) {
+      ui.inviteMfaSkip.disabled = isBusy
+    }
+    if (ui.inviteMfaSubmit) {
+      ui.inviteMfaSubmit.disabled = isBusy
+      ui.inviteMfaSubmit.textContent = isBusy ? 'Verifying...' : 'Verify code'
+    }
+    if (ui.inviteMfaCode) {
+      ui.inviteMfaCode.disabled = isBusy
+    }
+    if (ui.inviteMfaDownload) {
+      ui.inviteMfaDownload.disabled = isBusy
+    }
+    if (ui.inviteFinish) {
+      ui.inviteFinish.disabled = isBusy
+    }
     if (ui.authLogout) {
       ui.authLogout.disabled = isBusy
+    }
+    if (ui.authScreen) {
+      const authControls = ui.authScreen.querySelectorAll('input, button, textarea, select')
+      authControls.forEach((control) => {
+        if (control === ui.authLogout) {
+          return
+        }
+        if (control === ui.authSubmit) {
+          control.disabled = isBusy
+          control.textContent = isBusy ? 'Signing in...' : 'Sign in'
+          return
+        }
+        if (control === ui.authMfaSubmit) {
+          control.disabled = isBusy
+          control.textContent = isBusy ? 'Verifying...' : 'Verify code'
+          return
+        }
+        if (control === ui.inviteSubmit) {
+          control.disabled = isBusy
+          control.textContent = isBusy ? 'Saving...' : 'Set password'
+          return
+        }
+        if (control === ui.inviteMfaSubmit) {
+          control.disabled = isBusy
+          control.textContent = isBusy ? 'Verifying...' : 'Verify code'
+          return
+        }
+        control.disabled = isBusy
+      })
     }
   }
 
   function setAuthError(message = '') {
-    void message
-  }
-
-  function resetUserManagementState() {
-    state.selectedUserActivityUsername = ''
-    state.userActivityEntries = []
-    state.userActivityLoaded = false
-    setUserActivityBusy(false)
-    setUserActivityMessage('')
-    updateUserActivitySelectionLabel()
-    renderUserActivityEntries([])
-  }
-
-  function showAuthScreen() {
-    state.authenticated = false
-    state.authUser = ''
-    state.authCanManageUsers = false
-    state.authUsers = []
-    state.authUsersLoaded = false
-    resetUserManagementState()
-    state.activityLogEntries = []
-    state.activityLogLoaded = false
-    applyTheme('dark')
-    closeSettingsMenu()
-    closeUserManagementModal()
-    closeActivityLogModal()
-    updateUserManagementVisibility()
-    setAuthBusy(false)
-    setUserManagementBusy(false)
-    setUserManagementMessage('')
-    setActivityLogBusy(false)
-    setActivityLogMessage('')
-    setBodyBusy(false)
-    if (ui.appShell) {
-      ui.appShell.hidden = true
+    if (!ui.authMessage) {
+      return
     }
-    if (ui.authScreen) {
-      ui.authScreen.hidden = false
+
+    const normalizedMessage = String(message || '')
+    ui.authMessage.textContent = normalizedMessage
+    if (normalizedMessage) {
+      ui.authMessage.dataset.tone = 'error'
+    } else {
+      delete ui.authMessage.dataset.tone
+    }
+  }
+
+  function setAuthMessage(message = '', tone = 'neutral') {
+    if (!ui.authMessage) {
+      return
+    }
+
+    const normalizedMessage = String(message || '')
+    ui.authMessage.textContent = normalizedMessage
+    if (normalizedMessage) {
+      ui.authMessage.dataset.tone = tone
+    } else {
+      delete ui.authMessage.dataset.tone
+    }
+  }
+
+  function getInviteTokenFromLocation() {
+    const match = String(window.location.pathname || '').match(/^\/invite\/([^/?#]+)/i)
+    return match ? decodeURIComponent(match[1] || '') : ''
+  }
+
+  function setAuthView(view) {
+    state.authView = view
+    if (ui.authLoginView) {
+      ui.authLoginView.hidden = view !== 'login'
+    }
+    if (ui.authMfaView) {
+      ui.authMfaView.hidden = view !== 'mfa'
+    }
+    if (ui.inviteView) {
+      ui.inviteView.hidden = view !== 'invite'
+    }
+  }
+
+  function resetInviteState() {
+    state.authInviteLoading = false
+    state.authInviteLoaded = false
+    state.authInvite = null
+    state.authInviteError = ''
+    state.authInviteMfaAvailable = false
+    state.authInviteStep = 'password'
+    state.authInviteSetup = null
+    state.authInviteRecoveryCodes = []
+    state.authInviteUsername = ''
+    if (ui.inviteDetails) {
+      ui.inviteDetails.innerHTML = ''
+    }
+    if (ui.inviteMfaPrompt) {
+      ui.inviteMfaPrompt.hidden = true
+    }
+    if (ui.inviteMfaSetup) {
+      ui.inviteMfaSetup.hidden = true
+    }
+    if (ui.inviteMfaComplete) {
+      ui.inviteMfaComplete.hidden = true
+    }
+    if (ui.inviteMfaSecret) {
+      ui.inviteMfaSecret.textContent = ''
+    }
+    if (ui.inviteMfaUri) {
+      ui.inviteMfaUri.textContent = ''
+    }
+    if (ui.inviteMfaQr) {
+      ui.inviteMfaQr.removeAttribute('src')
+    }
+    if (ui.inviteMfaRecoveryList) {
+      ui.inviteMfaRecoveryList.innerHTML = ''
+    }
+    if (ui.invitePassword) {
+      ui.invitePassword.value = ''
+    }
+    if (ui.inviteConfirmPassword) {
+      ui.inviteConfirmPassword.value = ''
+    }
+    if (ui.inviteMfaCode) {
+      ui.inviteMfaCode.value = ''
+    }
+  }
+
+  function renderInviteDetails(invite) {
+    if (!ui.inviteDetails) {
+      return
+    }
+
+    if (!invite || !invite.username) {
+      ui.inviteDetails.innerHTML = ''
+      return
+    }
+
+    const status = String(invite.inviteStatus || 'pending')
+    const chips = [
+      `<span class="chip accent">${escapeHtml(status === 'pending' ? 'Pending invite' : status)}</span>`,
+      invite.mfaEnabled ? '<span class="chip green">MFA enabled</span>' : ''
+    ].filter(Boolean)
+
+    ui.inviteDetails.innerHTML = `
+      <div class="invite-details-card">
+        <div class="invite-details-row">
+          <strong>${escapeHtml(invite.username)}</strong>
+          <span class="invite-details-email">${escapeHtml(invite.recipientEmail || '')}</span>
+        </div>
+        <div class="invite-details-meta">
+          ${chips.join('')}
+        </div>
+        <div class="invite-details-expiry">
+          Expires ${escapeHtml(invite.inviteExpiresAt || 'soon')}
+        </div>
+      </div>
+    `
+  }
+
+  function renderInviteRecoveryCodes(codes) {
+    if (!ui.inviteMfaRecoveryList) {
+      return
+    }
+
+    const normalizedCodes = Array.isArray(codes)
+      ? codes.map((code) => String(code || '').trim()).filter(Boolean)
+      : []
+    state.authInviteRecoveryCodes = normalizedCodes
+
+    if (!normalizedCodes.length) {
+      ui.inviteMfaRecoveryList.innerHTML = '<div class="panel-empty">No recovery codes available.</div>'
+      return
+    }
+
+    ui.inviteMfaRecoveryList.innerHTML = `
+      <div class="recovery-code-grid">
+        ${normalizedCodes
+          .map((code) => `<code class="recovery-code">${escapeHtml(code)}</code>`)
+          .join('')}
+      </div>
+    `
+  }
+
+  function downloadTextFile(filename, content) {
+    const blob = new Blob([String(content || '')], { type: 'text/plain;charset=utf-8' })
+    const url = window.URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = filename
+    anchor.rel = 'noopener'
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    window.URL.revokeObjectURL(url)
+  }
+
+  function downloadInviteRecoveryCodes() {
+    if (!Array.isArray(state.authInviteRecoveryCodes) || !state.authInviteRecoveryCodes.length) {
+      return
+    }
+
+    downloadTextFile(
+      'mfa-recovery-codes.txt',
+      state.authInviteRecoveryCodes.map((code) => code.trim()).filter(Boolean).join('\n')
+    )
+  }
+
+  function getMfaReminderDismissalKey(username) {
+    const normalizedUsername = normalizeAuthUserKey(username)
+    if (!normalizedUsername) {
+      return ''
+    }
+
+    return `pst-mail-explorer.mfa-reminder.dismissed::${normalizedUsername}`
+  }
+
+  function hasDismissedMfaReminder(username) {
+    const key = getMfaReminderDismissalKey(username)
+    if (!key) {
+      return false
+    }
+
+    try {
+      return sessionStorage.getItem(key) === '1'
+    } catch (error) {
+      return false
+    }
+  }
+
+  function dismissMfaReminder(username) {
+    const key = getMfaReminderDismissalKey(username)
+    if (!key) {
+      return
+    }
+
+    try {
+      sessionStorage.setItem(key, '1')
+    } catch (error) {
+      // Ignore storage errors in restricted browser contexts.
+    }
+  }
+
+  function clearMfaReminderDismissal(username) {
+    const key = getMfaReminderDismissalKey(username)
+    if (!key) {
+      return
+    }
+
+    try {
+      sessionStorage.removeItem(key)
+    } catch (error) {
+      // Ignore storage errors in restricted browser contexts.
+    }
+  }
+
+  function setMfaSetupMessage(message = '', tone = 'neutral') {
+    if (!ui.mfaSetupMessage) {
+      return
+    }
+
+    const normalizedMessage = String(message || '')
+    ui.mfaSetupMessage.textContent = normalizedMessage
+    if (normalizedMessage) {
+      ui.mfaSetupMessage.dataset.tone = tone
+    } else {
+      delete ui.mfaSetupMessage.dataset.tone
+    }
+  }
+
+  function setMfaSetupBusy(isBusy, label = 'Verify code') {
+    if (ui.mfaSetupSubmit) {
+      ui.mfaSetupSubmit.disabled = Boolean(isBusy)
+      ui.mfaSetupSubmit.textContent =
+        label === 'Loading...'
+          ? 'Loading...'
+          : label === 'Sending...'
+            ? 'Sending...'
+            : 'Verify code'
+    }
+    if (ui.mfaSetupDownload) {
+      ui.mfaSetupDownload.disabled = Boolean(isBusy) || !state.authMfaSetupRecoveryCodes.length
+    }
+    if (ui.mfaSetupFinish) {
+      ui.mfaSetupFinish.disabled = Boolean(isBusy)
+    }
+    if (ui.mfaSetupForm) {
+      const fields = ui.mfaSetupForm.querySelectorAll('input, select, textarea, button')
+      fields.forEach((field) => {
+        if (field === ui.mfaSetupSubmit || field === ui.mfaSetupDownload || field === ui.mfaSetupFinish || field === ui.mfaSetupClose) {
+          return
+        }
+        field.disabled = Boolean(isBusy)
+      })
+    }
+  }
+
+  function resetMfaSetupState() {
+    state.authMfaSetupOpen = false
+    state.authMfaSetupLoaded = false
+    state.authMfaSetupStep = 'idle'
+    state.authMfaSetupUsername = ''
+    state.authMfaSetupData = null
+    state.authMfaSetupRecoveryCodes = []
+    state.authMfaSetupError = ''
+    setMfaSetupMessage('')
+    if (ui.mfaSetupQr) {
+      ui.mfaSetupQr.removeAttribute('src')
+    }
+    if (ui.mfaSetupSecret) {
+      ui.mfaSetupSecret.textContent = ''
+    }
+    if (ui.mfaSetupUri) {
+      ui.mfaSetupUri.textContent = ''
+    }
+    if (ui.mfaSetupRecoveryList) {
+      ui.mfaSetupRecoveryList.innerHTML = ''
+    }
+    if (ui.mfaSetupCode) {
+      ui.mfaSetupCode.value = ''
+    }
+    if (ui.mfaSetupForm) {
+      ui.mfaSetupForm.reset()
+    }
+    if (ui.mfaSetupSubmit) {
+      ui.mfaSetupSubmit.disabled = false
+    }
+    if (ui.mfaSetupDownload) {
+      ui.mfaSetupDownload.disabled = true
+    }
+    if (ui.mfaSetupFinish) {
+      ui.mfaSetupFinish.disabled = true
+    }
+  }
+
+  function renderMfaSetupRecoveryCodes(codes) {
+    if (!ui.mfaSetupRecoveryList) {
+      return
+    }
+
+    const normalizedCodes = Array.isArray(codes)
+      ? codes.map((code) => String(code || '').trim()).filter(Boolean)
+      : []
+    state.authMfaSetupRecoveryCodes = normalizedCodes
+
+    if (!normalizedCodes.length) {
+      ui.mfaSetupRecoveryList.innerHTML = '<div class="panel-empty">No recovery codes available.</div>'
+      return
+    }
+
+    ui.mfaSetupRecoveryList.innerHTML = `
+      <div class="recovery-code-grid">
+        ${normalizedCodes
+          .map((code) => `<code class="recovery-code">${escapeHtml(code)}</code>`)
+          .join('')}
+      </div>
+    `
+  }
+
+  function downloadMfaSetupRecoveryCodes() {
+    if (!Array.isArray(state.authMfaSetupRecoveryCodes) || !state.authMfaSetupRecoveryCodes.length) {
+      return
+    }
+
+    downloadTextFile(
+      'mfa-recovery-codes.txt',
+      state.authMfaSetupRecoveryCodes.map((code) => code.trim()).filter(Boolean).join('\n')
+    )
+  }
+
+  function closeMfaReminderModal(preserveUsername = false) {
+    state.authMfaReminderOpen = false
+    if (!preserveUsername) {
+      state.authMfaReminderUsername = ''
+      state.authMfaReminderDeferred = false
+    }
+    if (ui.mfaReminderModal) {
+      ui.mfaReminderModal.hidden = true
+    }
+  }
+
+  function openMfaReminderModal(username) {
+    const normalizedUsername = String(username || '').trim()
+    if (!normalizedUsername) {
+      return false
+    }
+
+    state.authMfaReminderOpen = true
+    state.authMfaReminderDeferred = false
+    state.authMfaReminderUsername = normalizedUsername
+    if (ui.mfaReminderModal) {
+      ui.mfaReminderModal.hidden = false
+    }
+    if (ui.mfaReminderSetup) {
+      window.requestAnimationFrame(() => {
+        ui.mfaReminderSetup.focus()
+      })
+    }
+    return true
+  }
+
+  function closeMfaSetupModal() {
+    const shouldRestoreReminder =
+      Boolean(state.authMfaReminderDeferred) &&
+      !state.authMfaEnabled &&
+      !state.viewerInitialized &&
+      Boolean(state.authMfaReminderUsername)
+    state.authMfaSetupOpen = false
+    if (ui.mfaSetupModal) {
+      ui.mfaSetupModal.hidden = true
+    }
+    setMfaSetupBusy(false)
+    setMfaSetupMessage('')
+    closeSettingsMenu()
+    if (shouldRestoreReminder) {
+      openMfaReminderModal(state.authMfaReminderUsername)
+    }
+  }
+
+  function showMfaSetupEnrollment(data) {
+    state.authMfaSetupStep = 'setup'
+    state.authMfaSetupData = data || null
+    state.authMfaSetupLoaded = true
+    if (ui.mfaSetupQr && data && data.qrCodeDataUrl) {
+      ui.mfaSetupQr.src = data.qrCodeDataUrl
+    }
+    if (ui.mfaSetupSecret) {
+      ui.mfaSetupSecret.textContent = data && data.secret ? data.secret : ''
+    }
+    if (ui.mfaSetupUri) {
+      ui.mfaSetupUri.textContent = data && data.otpauthUri ? data.otpauthUri : ''
+    }
+    if (ui.mfaSetupCode) {
+      ui.mfaSetupCode.value = ''
+      window.requestAnimationFrame(() => {
+        ui.mfaSetupCode.focus()
+      })
+    }
+    if (ui.mfaSetupComplete) {
+      ui.mfaSetupComplete.hidden = true
+    }
+    if (ui.mfaSetupForm) {
+      ui.mfaSetupForm.hidden = false
+    }
+    if (ui.mfaSetupFinish) {
+      ui.mfaSetupFinish.disabled = true
+    }
+    setMfaSetupMessage('Scan the QR code or enter the manual setup key.', 'success')
+    if (ui.mfaSetupDownload) {
+      ui.mfaSetupDownload.disabled = true
+    }
+  }
+
+  function showMfaSetupComplete(codes) {
+    state.authMfaSetupStep = 'complete'
+    if (ui.mfaSetupForm) {
+      ui.mfaSetupForm.hidden = true
+    }
+    if (ui.mfaSetupComplete) {
+      ui.mfaSetupComplete.hidden = false
+    }
+    renderMfaSetupRecoveryCodes(codes)
+    setMfaSetupMessage('MFA is now enabled.', 'success')
+    if (ui.mfaSetupDownload) {
+      ui.mfaSetupDownload.disabled = !state.authMfaSetupRecoveryCodes.length
+    }
+    if (ui.mfaSetupFinish) {
+      ui.mfaSetupFinish.disabled = false
+    }
+  }
+
+  async function startSelfServiceMfaSetup(options = {}) {
+    const suppressReminder = Boolean(options.suppressReminder)
+    if (!state.authenticated) {
+      setStatus('Sign in first.', 'error')
+      return false
+    }
+
+    if (!state.authMfaEnabled && !suppressReminder && state.authUser) {
+      dismissMfaReminder(state.authUser)
+    }
+
+    if (state.authMfaReminderUsername) {
+      state.authMfaReminderDeferred = true
+      closeMfaReminderModal(true)
+    } else {
+      closeMfaReminderModal()
+    }
+    closeSettingsMenu()
+    if (!ui.mfaSetupModal) {
+      return false
+    }
+
+    resetMfaSetupState()
+    state.authMfaSetupUsername = state.authUser
+    ui.mfaSetupModal.hidden = false
+    state.authMfaSetupOpen = true
+    setMfaSetupMessage('Loading MFA setup...')
+    setMfaSetupBusy(true, 'Loading...')
+    try {
+      const response = await fetchJson('/api/auth/mfa/enrollment/start', {
+        method: 'POST'
+      })
+      showMfaSetupEnrollment(response)
+      return true
+    } catch (error) {
+      if (error && typeof error === 'object' && Number(error.statusCode) === 401) {
+        handleAuthFailure()
+        return false
+      }
+      setMfaSetupMessage(`Unable to start MFA setup: ${getErrorMessage(error)}`, 'error')
+      return false
+    } finally {
+      setMfaSetupBusy(false)
+    }
+  }
+
+  async function completeSelfServiceMfaSetup() {
+    if (!state.authMfaSetupOpen) {
+      return false
+    }
+
+    const code = String(ui.mfaSetupCode?.value || '').trim()
+    if (!code) {
+      setMfaSetupMessage('Enter a verification code.', 'error')
+      return false
+    }
+
+    setMfaSetupBusy(true, 'Sending...')
+    try {
+      const response = await fetchJson('/api/auth/mfa/enrollment/complete', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ code })
+      })
+
+      state.authMfaEnabled = Boolean(response.user && response.user.mfaEnabled)
+      state.authMfaReminderDeferred = false
+      if (response.user && response.user.username) {
+        state.authUser = response.user.username
+      }
+      if (Array.isArray(response.recoveryCodes)) {
+        state.authMfaSetupRecoveryCodes = response.recoveryCodes
+      }
+      showMfaSetupComplete(response.recoveryCodes || [])
+      updateUserManagementVisibility()
+      return true
+    } catch (error) {
+      if (error && typeof error === 'object' && Number(error.statusCode) === 401) {
+        handleAuthFailure()
+        return false
+      }
+      setMfaSetupMessage(`Unable to finish MFA setup: ${getErrorMessage(error)}`, 'error')
+      return false
+    } finally {
+      setMfaSetupBusy(false)
+    }
+  }
+
+  async function continueAfterMfaSetup() {
+    state.authMfaReminderDeferred = false
+    closeMfaSetupModal()
+    if (!state.viewerInitialized) {
+      try {
+        await initializeViewer()
+      } catch (error) {
+        if (!(error && typeof error === 'object' && Number(error.statusCode) === 401)) {
+          setStatus(`Signed in, but unable to load the viewer: ${getErrorMessage(error)}`, 'error')
+        }
+      }
+    }
+  }
+
+  function showLoginScreen() {
+    state.authView = 'login'
+    state.authMfaChallengeUsername = ''
+    setAuthView('login')
+    setAuthMessage('')
+    if (ui.authMfaCode) {
+      ui.authMfaCode.value = ''
     }
     if (ui.authPassword) {
       ui.authPassword.value = ''
@@ -1104,11 +1709,372 @@
     }
   }
 
-  function showViewerShell(username, canManageUsers = false) {
+  function showMfaChallengeScreen(username) {
+    state.authView = 'mfa'
+    state.authMfaChallengeUsername = String(username || '').trim()
+    setAuthView('mfa')
+    setAuthMessage('Verification required. Enter a TOTP or recovery code.')
+    if (ui.authMfaDescription) {
+      ui.authMfaDescription.textContent = state.authMfaChallengeUsername
+        ? `Use an authenticator code or a recovery code to sign in as ${state.authMfaChallengeUsername}.`
+        : 'Use an authenticator code or a recovery code to finish signing in.'
+    }
+    if (ui.authMfaCode) {
+      ui.authMfaCode.value = ''
+      window.requestAnimationFrame(() => {
+        ui.authMfaCode.focus()
+      })
+    }
+  }
+
+  function showInviteScreen(invite) {
+    state.authView = 'invite'
+    state.authMfaChallengeUsername = ''
+    state.authInvite = invite || null
+    state.authInviteLoaded = Boolean(invite)
+    state.authInviteUsername = String(invite && invite.username ? invite.username : '').trim()
+    setAuthView('invite')
+    setAuthMessage('')
+    renderInviteDetails(invite)
+    if (ui.inviteSummary) {
+      ui.inviteSummary.textContent = invite && invite.username
+        ? `You have been invited as ${invite.username}. Choose a password to continue.`
+        : 'Set your password to continue.'
+    }
+    if (ui.inviteMfaPrompt) {
+      ui.inviteMfaPrompt.hidden = true
+    }
+    if (ui.inviteMfaSetup) {
+      ui.inviteMfaSetup.hidden = true
+    }
+    if (ui.inviteMfaComplete) {
+      ui.inviteMfaComplete.hidden = true
+    }
+    if (ui.invitePassword) {
+      ui.invitePassword.value = ''
+    }
+    if (ui.inviteConfirmPassword) {
+      ui.inviteConfirmPassword.value = ''
+    }
+    if (ui.invitePassword) {
+      window.requestAnimationFrame(() => {
+        ui.invitePassword.focus()
+      })
+    }
+  }
+
+  function showInviteMfaPrompt() {
+    state.authInviteStep = 'prompt'
+    if (ui.inviteMfaPrompt) {
+      ui.inviteMfaPrompt.hidden = false
+    }
+    if (ui.inviteMfaSetup) {
+      ui.inviteMfaSetup.hidden = true
+    }
+    if (ui.inviteMfaComplete) {
+      ui.inviteMfaComplete.hidden = true
+    }
+  }
+
+  function showInviteMfaSetup(data) {
+    state.authInviteStep = 'setup'
+    state.authInviteSetup = data || null
+    if (ui.inviteMfaPrompt) {
+      ui.inviteMfaPrompt.hidden = true
+    }
+    if (ui.inviteMfaSetup) {
+      ui.inviteMfaSetup.hidden = false
+    }
+    if (ui.inviteMfaComplete) {
+      ui.inviteMfaComplete.hidden = true
+    }
+    if (ui.inviteMfaQr && data && data.qrCodeDataUrl) {
+      ui.inviteMfaQr.src = data.qrCodeDataUrl
+    }
+    if (ui.inviteMfaSecret) {
+      ui.inviteMfaSecret.textContent = data && data.secret ? data.secret : ''
+    }
+    if (ui.inviteMfaUri) {
+      ui.inviteMfaUri.textContent = data && data.otpauthUri ? data.otpauthUri : ''
+    }
+    if (ui.inviteMfaCode) {
+      ui.inviteMfaCode.value = ''
+      window.requestAnimationFrame(() => {
+        ui.inviteMfaCode.focus()
+      })
+    }
+  }
+
+  function showInviteMfaComplete(codes) {
+    state.authInviteStep = 'complete'
+    if (ui.inviteMfaPrompt) {
+      ui.inviteMfaPrompt.hidden = true
+    }
+    if (ui.inviteMfaSetup) {
+      ui.inviteMfaSetup.hidden = true
+    }
+    if (ui.inviteMfaComplete) {
+      ui.inviteMfaComplete.hidden = false
+    }
+    renderInviteRecoveryCodes(codes)
+  }
+
+  async function submitInvitePassword() {
+    if (!state.authInviteToken) {
+      setAuthError('Invite token is missing.')
+      return false
+    }
+
+    const password = String(ui.invitePassword?.value || '')
+    const confirmPassword = String(ui.inviteConfirmPassword?.value || '')
+    if (!password || !confirmPassword) {
+      setAuthError('Enter and confirm a password.')
+      return false
+    }
+    if (password !== confirmPassword) {
+      setAuthError('Passwords do not match.')
+      return false
+    }
+
+    setAuthBusy(true)
+    try {
+      const response = await fetchJson(`/api/auth/invites/${encodeURIComponent(state.authInviteToken)}/accept`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          password,
+          confirmPassword
+        })
+      })
+
+      const username = (response.user && response.user.username) || state.authInviteUsername || ''
+      if (!username) {
+        throw new Error('Unable to complete invite.')
+      }
+
+      state.authInviteUsername = username
+      state.authInviteMfaAvailable = Boolean(response.mfaAvailable)
+      if (ui.invitePassword) {
+        ui.invitePassword.value = ''
+      }
+      if (ui.inviteConfirmPassword) {
+        ui.inviteConfirmPassword.value = ''
+      }
+      try {
+        window.history.replaceState({}, '', '/')
+      } catch (error) {
+        // Ignore history updates in restrictive browser contexts.
+      }
+      setAuthMessage('Password saved.', 'success')
+
+      if (response.mfaAvailable) {
+        showInviteMfaPrompt()
+      } else {
+        await finalizeInviteOnboarding(username, false, true, {
+          suppressReminder: true
+        })
+      }
+
+      return true
+    } catch (error) {
+      if (error && typeof error === 'object' && Number(error.statusCode) === 400) {
+        setAuthError(getErrorMessage(error))
+        return false
+      }
+      if (error && typeof error === 'object' && Number(error.statusCode) === 404) {
+        setAuthError('Invite not found.')
+        return false
+      }
+      if (error && typeof error === 'object' && Number(error.statusCode) === 410) {
+        setAuthError(getErrorMessage(error))
+        return false
+      }
+      setAuthError(`Unable to accept invite: ${getErrorMessage(error)}`)
+      return false
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  async function startInviteMfaSetup() {
+    if (!state.authInviteUsername) {
+      setAuthError('Set your password first.')
+      return
+    }
+
+    setAuthBusy(true)
+    try {
+      const response = await fetchJson('/api/auth/mfa/enrollment/start', {
+        method: 'POST'
+      })
+      state.authInviteSetup = response
+      showInviteMfaSetup(response)
+      setAuthMessage('Scan the QR code or enter the manual setup key.', 'success')
+    } catch (error) {
+      setAuthError(`Unable to start MFA setup: ${getErrorMessage(error)}`)
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  async function completeInviteMfaSetup() {
+    if (!state.authInviteUsername) {
+      setAuthError('Set your password first.')
+      return
+    }
+
+    const code = String(ui.inviteMfaCode?.value || '').trim()
+    if (!code) {
+      setAuthError('Enter a verification code.')
+      return
+    }
+
+    setAuthBusy(true)
+    try {
+      const response = await fetchJson('/api/auth/mfa/enrollment/complete', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ code })
+      })
+      state.authMfaEnabled = Boolean(response.user && response.user.mfaEnabled)
+      state.authInviteRecoveryCodes = Array.isArray(response.recoveryCodes) ? response.recoveryCodes : []
+      showInviteMfaComplete(state.authInviteRecoveryCodes)
+      setAuthMessage('MFA is now enabled.', 'success')
+    } catch (error) {
+      setAuthError(`Unable to finish MFA setup: ${getErrorMessage(error)}`)
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  async function beginAuthenticatedWorkspace(username, canManageUsers = false, mfaEnabled = false, options = {}) {
+    const normalizedUsername = String(username || '').trim()
+    try {
+      window.history.replaceState({}, '', '/')
+    } catch (error) {
+      // Ignore history updates in restrictive browser contexts.
+    }
+
+    showViewerShell(normalizedUsername, canManageUsers, mfaEnabled)
+    applyTheme(readThemePreference())
+    if (!state.authenticated) {
+      return false
+    }
+
+    const suppressReminder = Boolean(options && options.suppressReminder)
+    const shouldPauseForReminder =
+      Boolean(state.authEnabled) &&
+      Boolean(normalizedUsername) &&
+      !state.authMfaEnabled &&
+      !suppressReminder &&
+      !hasDismissedMfaReminder(normalizedUsername)
+
+    if (shouldPauseForReminder) {
+      openMfaReminderModal(normalizedUsername)
+      return false
+    }
+
+    try {
+      await initializeViewer()
+      return true
+    } catch (error) {
+      if (!(error && typeof error === 'object' && Number(error.statusCode) === 401)) {
+        setStatus(`Signed in, but unable to load the viewer: ${getErrorMessage(error)}`, 'error')
+      }
+      return false
+    }
+  }
+
+  async function finalizeInviteOnboarding(username, canManageUsers = false, mfaEnabled = false, options = {}) {
+    return beginAuthenticatedWorkspace(username, canManageUsers, mfaEnabled, options)
+  }
+
+  function resetUserManagementState() {
+    state.selectedUserActivityUsername = ''
+    state.userActivityEntries = []
+    state.userActivityLoaded = false
+    setUserActivityBusy(false)
+    setUserActivityMessage('')
+    updateUserActivitySelectionLabel()
+    renderUserActivityEntries([])
+  }
+
+  function showAuthScreen() {
+    const previousUser = String(state.authUser || '').trim()
+    if (previousUser) {
+      clearMfaReminderDismissal(previousUser)
+    }
+    state.authenticated = false
+    state.authUser = ''
+    state.authCanManageUsers = false
+    state.authMfaEnabled = false
+    state.authUsers = []
+    state.authUsersLoaded = false
+    state.viewerInitialized = false
+    state.authMfaChallengeUsername = ''
+    state.authMfaChallengeError = ''
+    state.authMfaReminderOpen = false
+    state.authMfaReminderUsername = ''
+    state.authMfaReminderDeferred = false
+    state.authMfaSetupOpen = false
+    state.authMfaSetupLoaded = false
+    state.authMfaSetupStep = 'idle'
+    state.authMfaSetupUsername = ''
+    state.authMfaSetupData = null
+    state.authMfaSetupRecoveryCodes = []
+    state.authMfaSetupError = ''
+    resetUserManagementState()
+    resetInviteState()
+    state.activityLogEntries = []
+    state.activityLogLoaded = false
+    clearMailboxSessionState({ suppressSave: true })
+    applyTheme('dark')
+    closeMfaReminderModal()
+    closeMfaSetupModal()
+    closeSettingsMenu()
+    closeUserManagementModal()
+    closeSmtpSettingsModal()
+    closeActivityLogModal()
+    updateUserManagementVisibility()
+    setAuthBusy(false)
+    setUserManagementBusy(false)
+    setUserManagementMessage('')
+    setActivityLogBusy(false)
+    setActivityLogMessage('')
+    setBodyBusy(false)
+    setAuthView('login')
+    if (ui.appShell) {
+      ui.appShell.hidden = true
+    }
+    if (ui.authScreen) {
+      ui.authScreen.hidden = false
+    }
+    showLoginScreen()
+  }
+
+  function showViewerShell(username, canManageUsers = false, mfaEnabled = false) {
     state.authenticated = true
     state.authUser = String(username || state.authUser || '').trim()
     state.authCanManageUsers = Boolean(canManageUsers)
+    state.authMfaEnabled = Boolean(mfaEnabled)
+    state.authMfaReminderOpen = false
+    state.authMfaReminderUsername = ''
+    state.authMfaReminderDeferred = false
+    state.authMfaSetupOpen = false
+    state.authMfaSetupLoaded = false
+    state.authMfaSetupStep = 'idle'
+    state.authMfaSetupUsername = ''
+    state.authMfaSetupData = null
+    state.authMfaSetupRecoveryCodes = []
+    state.authMfaSetupError = ''
+    state.hiddenFiltersOpen = false
+    clearMailboxSessionState({ suppressSave: true })
     resetUserManagementState()
+    resetInviteState()
     state.activityLogEntries = []
     state.activityLogLoaded = false
     if (ui.authScreen) {
@@ -1117,13 +2083,18 @@
     if (ui.appShell) {
       ui.appShell.hidden = false
     }
+    closeMfaReminderModal()
+    closeMfaSetupModal()
     if (ui.authUser) {
       ui.authUser.textContent = state.authUser || 'Signed in'
     }
     closeSettingsMenu()
     closeUserManagementModal()
+    closeSmtpSettingsModal()
     closeActivityLogModal()
     updateUserManagementVisibility()
+    loadWorkspaceState()
+    setAuthView('login')
     setAuthError('')
     setAuthBusy(false)
     setUserManagementBusy(false)
@@ -1139,28 +2110,23 @@
   }
 
   function updateUserManagementVisibility() {
-    const canManageUsers =
-      Boolean(state.authEnabled) && Boolean(state.authenticated) && Boolean(state.authCanManageUsers)
+    const canUseSettings = Boolean(state.authEnabled) && Boolean(state.authenticated)
+    const canManageUsers = canUseSettings && Boolean(state.authCanManageUsers)
+    const canSetUpMfa = canUseSettings && !state.authMfaEnabled
 
     if (ui.settingsButton) {
-      ui.settingsButton.hidden = !canManageUsers
+      ui.settingsButton.hidden = !canUseSettings
       ui.settingsButton.setAttribute('aria-expanded', 'false')
+    }
+    if (ui.setupMfaButton) {
+      ui.setupMfaButton.hidden = !canSetUpMfa
     }
     if (ui.activityLogButton) {
       ui.activityLogButton.hidden = !canManageUsers
     }
-    if (ui.settingsMenu) {
-      ui.settingsMenu.hidden = true
+    if (ui.smtpSettingsButton) {
+      ui.smtpSettingsButton.hidden = !canManageUsers
     }
-    if (ui.userManagementModal) {
-      ui.userManagementModal.hidden = true
-    }
-    if (ui.activityLogModal) {
-      ui.activityLogModal.hidden = true
-    }
-    state.settingsMenuOpen = false
-    state.userManagementOpen = false
-    state.activityLogOpen = false
   }
 
   function closeSettingsMenu() {
@@ -1174,7 +2140,7 @@
   }
 
   function openSettingsMenu() {
-    if (!state.authEnabled || !state.authenticated || !state.authCanManageUsers) {
+    if (!state.authEnabled || !state.authenticated) {
       return
     }
     if (!ui.settingsMenu || !ui.settingsButton) {
@@ -1216,6 +2182,340 @@
     setUserManagementBusy(false)
     setUserManagementMessage('')
     closeSettingsMenu()
+  }
+
+  function renderPaperPlaneIcon() {
+    return `
+      <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M4.5 11.5 19.5 4.5 14.75 19.5l-3.35-6.1-6.9-1.9Z" />
+        <path d="m14.75 19.5-4.45-4.1" />
+      </svg>
+    `
+  }
+
+  function renderRotateIcon() {
+    return `
+      <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M7.5 7.5H4.75V4.75" />
+        <path d="M4.75 7.5A8.25 8.25 0 1 1 12 20.25a8.25 8.25 0 0 1-7.25-4.25" />
+      </svg>
+    `
+  }
+
+  function renderKeyIcon() {
+    return `
+      <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <circle cx="9" cy="9" r="3.75" />
+        <path d="M12 12l6 6" />
+        <path d="M16.5 15.5H19v2.5h-2.5v2.5H14" />
+      </svg>
+    `
+  }
+
+  function setSmtpSettingsMessage(message = '', tone = 'neutral') {
+    if (!ui.smtpSettingsMessage) {
+      return
+    }
+
+    const normalizedMessage = String(message || '')
+    ui.smtpSettingsMessage.textContent = normalizedMessage
+    if (normalizedMessage) {
+      ui.smtpSettingsMessage.dataset.tone = tone
+    } else {
+      delete ui.smtpSettingsMessage.dataset.tone
+    }
+  }
+
+  function setSmtpSettingsBusy(isBusy, label = 'Save settings') {
+    state.smtpSettingsLoading = Boolean(isBusy) && label === 'Loading...'
+    state.smtpSettingsSaving = Boolean(isBusy) && label === 'Saving...'
+    state.smtpSettingsTesting = Boolean(isBusy) && label === 'Sending...'
+
+    const isBusyState = Boolean(isBusy)
+    if (ui.smtpSettingsSubmit) {
+      ui.smtpSettingsSubmit.disabled = isBusyState
+      ui.smtpSettingsSubmit.textContent = label === 'Saving...' ? 'Saving...' : 'Save settings'
+    }
+    if (ui.smtpTestSend) {
+      ui.smtpTestSend.disabled = isBusyState
+      ui.smtpTestSend.textContent = label === 'Sending...' ? 'Sending...' : 'Send test email'
+    }
+
+    if (ui.smtpSettingsForm) {
+      const fields = ui.smtpSettingsForm.querySelectorAll('input, select, textarea, button')
+      fields.forEach((field) => {
+        if (field === ui.smtpSettingsSubmit || field === ui.smtpTestSend || field === ui.smtpSettingsClose) {
+          return
+        }
+        field.disabled = isBusyState
+      })
+    }
+  }
+
+  function renderSmtpSettings(settings) {
+    const normalized = {
+      enabled: Boolean(settings && settings.enabled),
+      host: String(settings && settings.host ? settings.host : ''),
+      port: Number(settings && settings.port ? settings.port : 587) || 587,
+      secure: Boolean(settings && settings.secure),
+      username: String(settings && settings.username ? settings.username : ''),
+      hasPassword: Boolean(settings && settings.hasPassword),
+      fromName: String(settings && settings.fromName ? settings.fromName : ''),
+      fromAddress: String(settings && settings.fromAddress ? settings.fromAddress : ''),
+      replyTo: String(settings && settings.replyTo ? settings.replyTo : '')
+    }
+
+    state.smtpSettingsLoaded = true
+    state.smtpSettingsHasPassword = normalized.hasPassword
+
+    if (ui.smtpSettingsEnabled) {
+      ui.smtpSettingsEnabled.checked = normalized.enabled
+    }
+    if (ui.smtpSettingsHost) {
+      ui.smtpSettingsHost.value = normalized.host
+    }
+    if (ui.smtpSettingsPort) {
+      ui.smtpSettingsPort.value = String(normalized.port || 587)
+    }
+    if (ui.smtpSettingsSecure) {
+      ui.smtpSettingsSecure.checked = normalized.secure
+    }
+    if (ui.smtpSettingsUsername) {
+      ui.smtpSettingsUsername.value = normalized.username
+    }
+    if (ui.smtpSettingsPassword) {
+      ui.smtpSettingsPassword.value = ''
+      ui.smtpSettingsPassword.placeholder = normalized.hasPassword
+        ? 'Leave blank to keep the current password'
+        : 'Enter the SMTP password'
+    }
+    if (ui.smtpPasswordHint) {
+      ui.smtpPasswordHint.textContent = normalized.hasPassword
+        ? 'Leave blank to keep the current password.'
+        : 'Enter the SMTP password before saving.'
+    }
+    if (ui.smtpSettingsFromName) {
+      ui.smtpSettingsFromName.value = normalized.fromName
+    }
+    if (ui.smtpSettingsFromAddress) {
+      ui.smtpSettingsFromAddress.value = normalized.fromAddress
+    }
+    if (ui.smtpSettingsReplyTo) {
+      ui.smtpSettingsReplyTo.value = normalized.replyTo
+    }
+    if (ui.smtpTestRecipient) {
+      ui.smtpTestRecipient.value = ''
+    }
+    if (ui.smtpSettingsSubmit) {
+      ui.smtpSettingsSubmit.disabled = false
+    }
+    if (ui.smtpTestSend) {
+      ui.smtpTestSend.disabled = false
+    }
+  }
+
+  function collectSmtpSettingsFormValues() {
+    const portValue = String(ui.smtpSettingsPort?.value || '').trim()
+    return {
+      enabled: Boolean(ui.smtpSettingsEnabled && ui.smtpSettingsEnabled.checked),
+      host: String(ui.smtpSettingsHost?.value || '').trim(),
+      port: portValue ? Number.parseInt(portValue, 10) : undefined,
+      secure: Boolean(ui.smtpSettingsSecure && ui.smtpSettingsSecure.checked),
+      username: String(ui.smtpSettingsUsername?.value || '').trim(),
+      password: String(ui.smtpSettingsPassword?.value || ''),
+      fromName: String(ui.smtpSettingsFromName?.value || '').trim(),
+      fromAddress: String(ui.smtpSettingsFromAddress?.value || '').trim(),
+      replyTo: String(ui.smtpSettingsReplyTo?.value || '').trim()
+    }
+  }
+
+  function focusSmtpSettingsHost() {
+    if (!ui.smtpSettingsHost) {
+      return
+    }
+
+    window.requestAnimationFrame(() => {
+      ui.smtpSettingsHost.focus()
+      if (typeof ui.smtpSettingsHost.select === 'function') {
+        ui.smtpSettingsHost.select()
+      }
+    })
+  }
+
+  function closeSmtpSettingsModal() {
+    state.smtpSettingsOpen = false
+    if (ui.smtpSettingsModal) {
+      ui.smtpSettingsModal.hidden = true
+    }
+    setSmtpSettingsBusy(false)
+    setSmtpSettingsMessage('')
+    closeSettingsMenu()
+  }
+
+  async function loadSmtpSettings(options = {}) {
+    if (!state.authEnabled || !state.authCanManageUsers) {
+      renderSmtpSettings({
+        enabled: false,
+        host: '',
+        port: 587,
+        secure: false,
+        username: '',
+        hasPassword: false,
+        fromName: '',
+        fromAddress: '',
+        replyTo: ''
+      })
+      return true
+    }
+
+    const showBusy = options.showBusy !== false
+    const silent = Boolean(options.silent)
+    if (showBusy) {
+      setSmtpSettingsBusy(true, 'Loading...')
+    }
+    if (!silent) {
+      setSmtpSettingsMessage('Loading SMTP settings...')
+    }
+
+    try {
+      const response = await fetchJson('/api/settings/smtp', {
+        cache: 'no-store'
+      })
+      renderSmtpSettings(response && response.settings ? response.settings : {})
+      if (!silent) {
+        setSmtpSettingsMessage('')
+      }
+      return true
+    } catch (error) {
+      if (error && typeof error === 'object' && Number(error.statusCode) === 401) {
+        handleAuthFailure()
+        return false
+      }
+      if (error && typeof error === 'object' && Number(error.statusCode) === 403) {
+        setSmtpSettingsMessage('Admin access required.', 'error')
+        return false
+      }
+      setSmtpSettingsMessage(`Unable to load SMTP settings: ${getErrorMessage(error)}`, 'error')
+      return false
+    } finally {
+      if (showBusy) {
+        setSmtpSettingsBusy(false)
+      }
+    }
+  }
+
+  function openSmtpSettingsModal() {
+    if (!state.authEnabled || !state.authenticated || !state.authCanManageUsers) {
+      setStatus('Admin access required.', 'error')
+      return
+    }
+
+    if (!ui.smtpSettingsModal) {
+      return
+    }
+
+    closeActivityLogModal()
+    closeUserManagementModal()
+    closeSettingsMenu()
+    ui.smtpSettingsModal.hidden = false
+    state.smtpSettingsOpen = true
+    setSmtpSettingsMessage('')
+    void (async () => {
+      const loaded = await loadSmtpSettings({
+        showBusy: true,
+        silent: false
+      })
+
+      if (loaded && state.smtpSettingsOpen) {
+        focusSmtpSettingsHost()
+      }
+    })()
+  }
+
+  async function saveSmtpSettings() {
+    if (!state.authEnabled || !state.authCanManageUsers) {
+      setStatus('Admin access required.', 'error')
+      return
+    }
+
+    const payload = collectSmtpSettingsFormValues()
+    setSmtpSettingsMessage('')
+    setSmtpSettingsBusy(true, 'Saving...')
+    try {
+      const response = await fetchJson('/api/settings/smtp', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      })
+
+      if (!response.settings) {
+        throw new Error('Unable to save SMTP settings.')
+      }
+
+      renderSmtpSettings(response.settings)
+      setSmtpSettingsMessage('SMTP settings saved.', 'success')
+    } catch (error) {
+      if (error && typeof error === 'object' && Number(error.statusCode) === 401) {
+        handleAuthFailure()
+        return
+      }
+      if (error && typeof error === 'object' && Number(error.statusCode) === 403) {
+        setSmtpSettingsMessage('Admin access required.', 'error')
+        return
+      }
+      setSmtpSettingsMessage(`Unable to save SMTP settings: ${getErrorMessage(error)}`, 'error')
+    } finally {
+      setSmtpSettingsBusy(false)
+    }
+  }
+
+  async function sendSmtpTestEmail() {
+    if (!state.authEnabled || !state.authCanManageUsers) {
+      setStatus('Admin access required.', 'error')
+      return
+    }
+
+    const payload = collectSmtpSettingsFormValues()
+    const recipient = String(ui.smtpTestRecipient?.value || '').trim()
+    if (!recipient) {
+      setSmtpSettingsMessage('Enter a test recipient.', 'error')
+      return
+    }
+
+    setSmtpSettingsMessage('')
+    setSmtpSettingsBusy(true, 'Sending...')
+    try {
+      const response = await fetchJson('/api/settings/smtp/test', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          ...payload,
+          recipient
+        })
+      })
+
+      if (!response.success) {
+        throw new Error('Unable to send test email.')
+      }
+
+      setSmtpSettingsMessage(`Test email sent to ${recipient}.`, 'success')
+    } catch (error) {
+      if (error && typeof error === 'object' && Number(error.statusCode) === 401) {
+        handleAuthFailure()
+        return
+      }
+      if (error && typeof error === 'object' && Number(error.statusCode) === 403) {
+        setSmtpSettingsMessage('Admin access required.', 'error')
+        return
+      }
+      setSmtpSettingsMessage(`Unable to send test email: ${getErrorMessage(error)}`, 'error')
+    } finally {
+      setSmtpSettingsBusy(false)
+    }
   }
 
   function closeActivityLogModal() {
@@ -1511,6 +2811,189 @@
     }
   }
 
+  async function inviteUser() {
+    const username = String(ui.userManagementUsername?.value || '').trim()
+    const recipientEmail = String(ui.userManagementEmail?.value || '').trim()
+    if (!username || !recipientEmail) {
+      setUserManagementMessage('Enter both a username and email address.', 'error')
+      return
+    }
+
+    setUserManagementMessage('')
+    setUserManagementBusy(true, 'Inviting...')
+    try {
+      const response = await fetchJson('/api/auth/users', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          username,
+          recipientEmail
+        })
+      })
+
+      if (!response.user || !response.user.username) {
+        throw new Error('Unable to create invite.')
+      }
+
+      const inviteParts = [`Invited ${response.user.username}.`]
+      if (response.emailSent) {
+        inviteParts.push('The invite email was sent.')
+      }
+      if (response.inviteUrl) {
+        inviteParts.push(`Invite link: ${response.inviteUrl}`)
+      }
+      setUserManagementMessage(inviteParts.join(' '), 'success')
+      if (ui.userManagementForm) {
+        ui.userManagementForm.reset()
+      }
+      await loadAuthUsers({
+        showBusy: false,
+        silent: true
+      })
+    } catch (error) {
+      if (error && typeof error === 'object' && Number(error.statusCode) === 401) {
+        handleAuthFailure()
+        return
+      }
+      if (error && typeof error === 'object' && Number(error.statusCode) === 403) {
+        setUserManagementMessage('Admin access required.', 'error')
+        return
+      }
+      if (error && typeof error === 'object' && Number(error.statusCode) === 409) {
+        setUserManagementMessage(getErrorMessage(error), 'error')
+        return
+      }
+      setUserManagementMessage(`Unable to invite user: ${getErrorMessage(error)}`, 'error')
+    } finally {
+      setUserManagementBusy(false)
+    }
+  }
+
+  async function resendInvite(username) {
+    const normalizedUsername = String(username || '').trim()
+    if (!normalizedUsername) {
+      return
+    }
+
+    setUserManagementMessage('')
+    setUserManagementBusy(true, 'Sending...')
+    try {
+      const response = await fetchJson(`/api/auth/users/${encodeURIComponent(normalizedUsername)}/invite/resend`, {
+        method: 'POST'
+      })
+      if (!response.user || !response.user.username) {
+        throw new Error('Unable to resend invite.')
+      }
+
+      const parts = [`Resent invite for ${response.user.username}.`]
+      if (response.emailSent) {
+        parts.push('The invite email was sent.')
+      }
+      if (response.inviteUrl) {
+        parts.push(`Invite link: ${response.inviteUrl}`)
+      }
+      setUserManagementMessage(parts.join(' '), 'success')
+      await loadAuthUsers({
+        showBusy: false,
+        silent: true
+      })
+    } catch (error) {
+      if (error && typeof error === 'object' && Number(error.statusCode) === 401) {
+        handleAuthFailure()
+        return
+      }
+      if (error && typeof error === 'object' && Number(error.statusCode) === 403) {
+        setUserManagementMessage('Admin access required.', 'error')
+        return
+      }
+      setUserManagementMessage(`Unable to resend invite: ${getErrorMessage(error)}`, 'error')
+    } finally {
+      setUserManagementBusy(false)
+    }
+  }
+
+  async function revokeInvite(username) {
+    const normalizedUsername = String(username || '').trim()
+    if (!normalizedUsername) {
+      return
+    }
+
+    if (!window.confirm(`Revoke the invite for ${normalizedUsername}?`)) {
+      return
+    }
+
+    setUserManagementMessage('')
+    setUserManagementBusy(true, 'Revoking...')
+    try {
+      const response = await fetchJson(`/api/auth/users/${encodeURIComponent(normalizedUsername)}/invite`, {
+        method: 'DELETE'
+      })
+      if (!response.user || !response.user.username) {
+        throw new Error('Unable to revoke invite.')
+      }
+
+      setUserManagementMessage(`Revoked invite for ${response.user.username}.`, 'success')
+      await loadAuthUsers({
+        showBusy: false,
+        silent: true
+      })
+    } catch (error) {
+      if (error && typeof error === 'object' && Number(error.statusCode) === 401) {
+        handleAuthFailure()
+        return
+      }
+      if (error && typeof error === 'object' && Number(error.statusCode) === 403) {
+        setUserManagementMessage('Admin access required.', 'error')
+        return
+      }
+      setUserManagementMessage(`Unable to revoke invite: ${getErrorMessage(error)}`, 'error')
+    } finally {
+      setUserManagementBusy(false)
+    }
+  }
+
+  async function resetUserMfa(username) {
+    const normalizedUsername = String(username || '').trim()
+    if (!normalizedUsername) {
+      return
+    }
+
+    if (!window.confirm(`Reset MFA for ${normalizedUsername}? Recovery codes will be invalidated.`)) {
+      return
+    }
+
+    setUserManagementMessage('')
+    setUserManagementBusy(true, 'Resetting...')
+    try {
+      const response = await fetchJson(`/api/auth/users/${encodeURIComponent(normalizedUsername)}/mfa/reset`, {
+        method: 'POST'
+      })
+      if (!response.user || !response.user.username) {
+        throw new Error('Unable to reset MFA.')
+      }
+
+      setUserManagementMessage(`Reset MFA for ${response.user.username}.`, 'success')
+      await loadAuthUsers({
+        showBusy: false,
+        silent: true
+      })
+    } catch (error) {
+      if (error && typeof error === 'object' && Number(error.statusCode) === 401) {
+        handleAuthFailure()
+        return
+      }
+      if (error && typeof error === 'object' && Number(error.statusCode) === 403) {
+        setUserManagementMessage('Admin access required.', 'error')
+        return
+      }
+      setUserManagementMessage(`Unable to reset MFA: ${getErrorMessage(error)}`, 'error')
+    } finally {
+      setUserManagementBusy(false)
+    }
+  }
+
   function openActivityLogModal() {
     if (!state.authEnabled || !state.authenticated || !state.authCanManageUsers) {
       setStatus('Admin access required.', 'error')
@@ -1585,21 +3068,21 @@
     })()
   }
 
-  function setUserManagementBusy(isBusy, label = 'Add user') {
+  function setUserManagementBusy(isBusy, label = 'Invite user') {
     state.authUsersLoading = isBusy
     if (ui.userManagementSubmit) {
       ui.userManagementSubmit.disabled = isBusy
-      ui.userManagementSubmit.textContent = isBusy ? label : 'Add user'
+      ui.userManagementSubmit.textContent = isBusy ? label : 'Invite user'
     }
     if (ui.userManagementUsername) {
       ui.userManagementUsername.disabled = isBusy
     }
-    if (ui.userManagementPassword) {
-      ui.userManagementPassword.disabled = isBusy
+    if (ui.userManagementEmail) {
+      ui.userManagementEmail.disabled = isBusy
     }
     if (ui.userList) {
       const actionButtons = ui.userList.querySelectorAll(
-        'button[data-action="select-user-activity"], button[data-action="delete-user"]'
+        'button[data-action="select-user-activity"], button[data-action="delete-user"], button[data-action="resend-invite"], button[data-action="revoke-invite"], button[data-action="reset-mfa"]'
       )
       actionButtons.forEach((button) => {
         const username = String(button.getAttribute('data-username') || '').trim()
@@ -1608,6 +3091,10 @@
           return
         }
         if (button.getAttribute('data-action') === 'delete-user' && isCurrentManagedUser(username)) {
+          button.disabled = true
+          return
+        }
+        if (button.getAttribute('data-action') === 'revoke-invite' && isCurrentManagedUser(username)) {
           button.disabled = true
           return
         }
@@ -1635,7 +3122,15 @@
       ? users
           .map((user) => ({
             username: String(user && user.username ? user.username : '').trim(),
-            createdAt: String(user && user.createdAt ? user.createdAt : '')
+            createdAt: String(user && user.createdAt ? user.createdAt : ''),
+            recipientEmail: String(user && user.recipientEmail ? user.recipientEmail : ''),
+            inviteStatus: String(user && user.inviteStatus ? user.inviteStatus : 'active'),
+            inviteSentAt: String(user && user.inviteSentAt ? user.inviteSentAt : ''),
+            inviteExpiresAt: String(user && user.inviteExpiresAt ? user.inviteExpiresAt : ''),
+            inviteAcceptedAt: String(user && user.inviteAcceptedAt ? user.inviteAcceptedAt : ''),
+            inviteRevokedAt: String(user && user.inviteRevokedAt ? user.inviteRevokedAt : ''),
+            mfaEnabled: Boolean(user && user.mfaEnabled),
+            mfaEnrolledAt: String(user && user.mfaEnrolledAt ? user.mfaEnrolledAt : '')
           }))
           .filter((user) => Boolean(user.username))
       : []
@@ -1653,7 +3148,7 @@
 
     if (!normalizedUsers.length) {
       ui.userList.innerHTML =
-        '<div class="user-list-empty">No local users are configured.</div>'
+        '<div class="user-list-empty">No invite-based users are configured.</div>'
       updateUserActivitySelectionLabel()
       return
     }
@@ -1665,6 +3160,34 @@
         const isSelected =
           Boolean(selectedUsername) &&
           normalizeAuthUserKey(user.username) === normalizeAuthUserKey(selectedUsername)
+        const inviteStatus = String(user.inviteStatus || 'active').toLowerCase()
+        const statusLabel =
+          inviteStatus === 'pending'
+            ? 'Pending invite'
+            : inviteStatus === 'revoked'
+              ? 'Invite revoked'
+              : inviteStatus === 'expired'
+                ? 'Invite expired'
+                : 'Active'
+        const statusClass =
+          inviteStatus === 'pending'
+            ? 'accent'
+            : inviteStatus === 'revoked' || inviteStatus === 'expired'
+              ? 'danger'
+              : 'green'
+        const statusChips = [
+          `<span class="chip ${statusClass}">${escapeHtml(statusLabel)}</span>`,
+          user.mfaEnabled ? '<span class="chip green">MFA enabled</span>' : '',
+          user.recipientEmail ? `<span class="chip">${escapeHtml(user.recipientEmail)}</span>` : ''
+        ].filter(Boolean)
+        const userMeta = [
+          user.inviteSentAt ? `Invited ${formatActivityLogTimestamp(user.inviteSentAt)}` : '',
+          user.inviteAcceptedAt ? `Accepted ${formatActivityLogTimestamp(user.inviteAcceptedAt)}` : '',
+          user.inviteRevokedAt ? `Revoked ${formatActivityLogTimestamp(user.inviteRevokedAt)}` : '',
+          user.mfaEnrolledAt ? `MFA ${formatActivityLogTimestamp(user.mfaEnrolledAt)}` : ''
+        ]
+          .filter(Boolean)
+          .join(' · ')
         return `
           <div class="user-item-row${isSelected ? ' selected' : ''}">
             <button
@@ -1676,21 +3199,68 @@
             >
               <span class="user-item-copy">
                 <span class="user-item-name">${escapeHtml(user.username)}</span>
-                <span class="user-item-meta">${isCurrent ? 'Current admin' : 'View activity'}</span>
+                <span class="user-item-badges">${statusChips.join('')}</span>
+                <span class="user-item-meta">${
+                  isCurrent ? 'Current admin' : userMeta || 'View activity'
+                }</span>
               </span>
               <span class="user-item-hint">${isSelected ? 'Selected' : 'Open'}</span>
             </button>
-            <button
-              class="ghost-button small icon-button user-delete-button"
-              type="button"
-              data-action="delete-user"
-              data-username="${escapeAttr(user.username)}"
-              aria-label="Delete ${escapeAttr(user.username)}"
-              title="Delete user"
-              ${isCurrent ? 'disabled' : ''}
-            >
-              ${renderTrashIcon()}
-            </button>
+            <div class="user-item-actions">
+              ${
+                inviteStatus === 'pending' || inviteStatus === 'expired'
+                  ? `
+                    <button
+                      class="ghost-button small icon-button user-resend-button"
+                      type="button"
+                      data-action="resend-invite"
+                      data-username="${escapeAttr(user.username)}"
+                      aria-label="Resend invite for ${escapeAttr(user.username)}"
+                      title="Resend invite"
+                    >
+                      ${renderPaperPlaneIcon()}
+                    </button>
+                    <button
+                      class="ghost-button small icon-button user-revoke-button"
+                      type="button"
+                      data-action="revoke-invite"
+                      data-username="${escapeAttr(user.username)}"
+                      aria-label="Revoke invite for ${escapeAttr(user.username)}"
+                      title="Revoke invite"
+                    >
+                      ${renderRotateIcon()}
+                    </button>
+                  `
+                  : ''
+              }
+              ${
+                user.mfaEnabled
+                  ? `
+                    <button
+                      class="ghost-button small icon-button user-mfa-reset-button"
+                      type="button"
+                      data-action="reset-mfa"
+                      data-username="${escapeAttr(user.username)}"
+                      aria-label="Reset MFA for ${escapeAttr(user.username)}"
+                      title="Reset MFA"
+                    >
+                      ${renderKeyIcon()}
+                    </button>
+                  `
+                  : ''
+              }
+              <button
+                class="ghost-button small icon-button user-delete-button"
+                type="button"
+                data-action="delete-user"
+                data-username="${escapeAttr(user.username)}"
+                aria-label="Delete ${escapeAttr(user.username)}"
+                title="Delete user"
+                ${isCurrent ? 'disabled' : ''}
+              >
+                ${renderTrashIcon()}
+              </button>
+            </div>
           </div>
         `
       })
@@ -1974,6 +3544,70 @@
     return !['0', 'false', 'no', 'off'].includes(raw.toLowerCase())
   }
 
+  function normalizeStorageNamespace(value) {
+    const text = String(value || '').trim().toLowerCase()
+    if (!text) {
+      return 'local'
+    }
+
+    return text.replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'local'
+  }
+
+  function getWorkspaceStorageNamespace() {
+    if (!state.authEnabled || !state.authenticated) {
+      return 'local'
+    }
+
+    return normalizeStorageNamespace(state.authUser)
+  }
+
+  function getWorkspaceStorageKey(key) {
+    return `${STORAGE_KEYS[key]}::${getWorkspaceStorageNamespace()}`
+  }
+
+  function readWorkspaceStorageItem(key, fallback = '') {
+    const scopedKey = getWorkspaceStorageKey(key)
+    const stored = localStorage.getItem(scopedKey)
+    if (stored != null) {
+      return stored
+    }
+
+    const legacyKey = STORAGE_KEYS[key]
+    const legacy = localStorage.getItem(legacyKey)
+    if (legacy != null) {
+      try {
+        localStorage.setItem(scopedKey, legacy)
+      } catch (error) {
+        // Ignore storage migration errors in restricted browser contexts.
+      }
+      return legacy
+    }
+
+    return fallback
+  }
+
+  function readWorkspaceStorageBool(key, fallback) {
+    const raw = readWorkspaceStorageItem(key, null)
+    if (raw == null) {
+      return fallback
+    }
+    return !['0', 'false', 'no', 'off'].includes(String(raw).toLowerCase())
+  }
+
+  function writeWorkspaceStorageItem(key, value) {
+    const scopedKey = getWorkspaceStorageKey(key)
+    if (value == null || value === '') {
+      localStorage.removeItem(scopedKey)
+      return
+    }
+
+    localStorage.setItem(scopedKey, String(value))
+  }
+
+  function removeWorkspaceStorageItem(key) {
+    localStorage.removeItem(getWorkspaceStorageKey(key))
+  }
+
   function normalizeTheme(value) {
     return String(value || '').toLowerCase() === 'dark' ? 'dark' : 'light'
   }
@@ -2010,6 +3644,33 @@
     }
   }
 
+  function loadWorkspaceState() {
+    const searchScope = readWorkspaceStorageItem('searchScope', 'pst')
+    const mailboxScopeView = readWorkspaceStorageItem('mailboxScopeView', 'search')
+    const catalogMode = readWorkspaceStorageItem('catalogMode', 'active')
+    const flaggedBundleScope = readWorkspaceStorageItem('flaggedBundleScope', 'all')
+
+    state.selectedCasePath = normalizeScopePath(readWorkspaceStorageItem('casePath', ''))
+    state.selectedScopePath = normalizeScopePath(readWorkspaceStorageItem('scopePath', ''))
+    state.selectedScopeLabel = getScopeLabel(state.selectedScopePath)
+    state.selectedPstFileName = readWorkspaceStorageItem('pstFileName', '') || null
+    state.currentFolderId = readWorkspaceStorageItem('folderId', '') || null
+    state.selectedMessageId = readWorkspaceStorageItem('messageId', '') || null
+    state.query = readWorkspaceStorageItem('query', '')
+    state.searchScope = ['pst', 'search', 'all'].includes(searchScope) ? searchScope : 'pst'
+    state.mailOnly = readWorkspaceStorageBool('mailOnly', true)
+    state.sort = readWorkspaceStorageItem('sort', 'date-desc') || 'date-desc'
+    state.reviewFlaggedOnly = readWorkspaceStorageBool('reviewFlaggedOnly', false)
+    state.reviewTaggedOnly = readWorkspaceStorageBool('reviewTaggedOnly', false)
+    state.mailboxScopeView = mailboxScopeView === 'all' ? 'all' : 'search'
+    state.mailboxFilter = readWorkspaceStorageItem('mailboxFilter', '')
+    state.catalogMode = catalogMode === 'removed' ? 'removed' : 'active'
+    state.bundleScope = ['all', 'search', 'pst'].includes(flaggedBundleScope)
+      ? flaggedBundleScope
+      : 'all'
+    applyStateToControls()
+  }
+
   function updateThemeToggleButtons(theme) {
     const normalized = normalizeTheme(theme)
     const nextTheme = normalized === 'dark' ? 'light' : 'dark'
@@ -2044,50 +3705,51 @@
 
   function saveState() {
     if (state.selectedCasePath) {
-      localStorage.setItem(STORAGE_KEYS.casePath, state.selectedCasePath)
+      writeWorkspaceStorageItem('casePath', state.selectedCasePath)
     } else {
-      localStorage.removeItem(STORAGE_KEYS.casePath)
+      removeWorkspaceStorageItem('casePath')
     }
 
     if (state.selectedScopePath) {
-      localStorage.setItem(STORAGE_KEYS.scopePath, state.selectedScopePath)
+      writeWorkspaceStorageItem('scopePath', state.selectedScopePath)
     } else {
-      localStorage.removeItem(STORAGE_KEYS.scopePath)
+      removeWorkspaceStorageItem('scopePath')
     }
 
     if (state.selectedPstFileName) {
-      localStorage.setItem(STORAGE_KEYS.pstFileName, state.selectedPstFileName)
+      writeWorkspaceStorageItem('pstFileName', state.selectedPstFileName)
     } else {
-      localStorage.removeItem(STORAGE_KEYS.pstFileName)
+      removeWorkspaceStorageItem('pstFileName')
     }
 
     if (state.currentFolderId) {
-      localStorage.setItem(STORAGE_KEYS.folderId, state.currentFolderId)
+      writeWorkspaceStorageItem('folderId', state.currentFolderId)
     } else {
-      localStorage.removeItem(STORAGE_KEYS.folderId)
+      removeWorkspaceStorageItem('folderId')
     }
 
     if (state.selectedMessageId) {
-      localStorage.setItem(STORAGE_KEYS.messageId, state.selectedMessageId)
+      writeWorkspaceStorageItem('messageId', state.selectedMessageId)
     } else {
-      localStorage.removeItem(STORAGE_KEYS.messageId)
+      removeWorkspaceStorageItem('messageId')
     }
 
-    localStorage.setItem(STORAGE_KEYS.query, state.query)
-    localStorage.setItem(STORAGE_KEYS.mailOnly, state.mailOnly ? '1' : '0')
-    localStorage.setItem(STORAGE_KEYS.sort, state.sort)
-    localStorage.setItem(
-      STORAGE_KEYS.reviewFlaggedOnly,
+    writeWorkspaceStorageItem('query', state.query)
+    writeWorkspaceStorageItem('mailOnly', state.mailOnly ? '1' : '0')
+    writeWorkspaceStorageItem('sort', state.sort)
+    writeWorkspaceStorageItem(
+      'reviewFlaggedOnly',
       state.reviewFlaggedOnly ? '1' : '0'
     )
-    localStorage.setItem(
-      STORAGE_KEYS.reviewTaggedOnly,
+    writeWorkspaceStorageItem(
+      'reviewTaggedOnly',
       state.reviewTaggedOnly ? '1' : '0'
     )
-    localStorage.setItem(STORAGE_KEYS.searchScope, state.searchScope)
-    localStorage.setItem(STORAGE_KEYS.mailboxScopeView, state.mailboxScopeView)
-    localStorage.setItem(STORAGE_KEYS.catalogMode, state.catalogMode)
-    localStorage.setItem(STORAGE_KEYS.flaggedBundleScope, state.bundleScope)
+    writeWorkspaceStorageItem('searchScope', state.searchScope)
+    writeWorkspaceStorageItem('mailboxScopeView', state.mailboxScopeView)
+    writeWorkspaceStorageItem('mailboxFilter', state.mailboxFilter)
+    writeWorkspaceStorageItem('catalogMode', state.catalogMode)
+    writeWorkspaceStorageItem('flaggedBundleScope', state.bundleScope)
   }
 
   function applyStateToControls() {
@@ -3062,9 +4724,9 @@
       state.tree = response.tree
       state.folderMap = new Map()
       indexFolders(state.tree)
-      const restoreFolderId = options.restoreFolderId || localStorage.getItem(STORAGE_KEYS.folderId)
+      const restoreFolderId = options.restoreFolderId || readWorkspaceStorageItem('folderId', '')
       const restoreMessageId =
-        options.restoreMessageId || localStorage.getItem(STORAGE_KEYS.messageId)
+        options.restoreMessageId || readWorkspaceStorageItem('messageId', '')
       state.currentFolderId =
         restoreFolderId && state.folderMap.has(restoreFolderId)
           ? restoreFolderId
@@ -3113,13 +4775,13 @@
       const casePath = normalizeScopePath(
         options.casePath ||
           state.selectedCasePath ||
-          localStorage.getItem(STORAGE_KEYS.casePath) ||
+          readWorkspaceStorageItem('casePath', '') ||
           ''
       )
       const scopePath = normalizeScopePath(
         options.scopePath ||
           state.selectedScopePath ||
-          localStorage.getItem(STORAGE_KEYS.scopePath) ||
+          readWorkspaceStorageItem('scopePath', '') ||
           ''
       )
       const response = await fetchJson(
@@ -3137,12 +4799,12 @@
       const preferredFileName =
         options.preferredFileName ||
         state.selectedPstFileName ||
-        localStorage.getItem(STORAGE_KEYS.pstFileName) ||
+        readWorkspaceStorageItem('pstFileName', '') ||
         ''
       const preferredScopePath = normalizeScopePath(
         options.preferredScopePath ||
           state.selectedScopePath ||
-          localStorage.getItem(STORAGE_KEYS.scopePath) ||
+          readWorkspaceStorageItem('scopePath', '') ||
           ''
       )
       const mailboxEntries = getMailboxEntriesForCase(
@@ -3181,8 +4843,8 @@
       await openMailbox(nextMailbox.fileName, {
         showBusy: false,
         scopePath: nextMailbox.scopePath || state.selectedScopePath || scopePath || '',
-        restoreFolderId: localStorage.getItem(STORAGE_KEYS.folderId) || undefined,
-        restoreMessageId: localStorage.getItem(STORAGE_KEYS.messageId) || undefined
+        restoreFolderId: readWorkspaceStorageItem('folderId', '') || undefined,
+        restoreMessageId: readWorkspaceStorageItem('messageId', '') || undefined
       })
     } catch (error) {
       state.catalogLoaded = true
@@ -3244,7 +4906,7 @@
       renderMessageList()
 
       const preferredMessageId =
-        options.preferredMessageId || localStorage.getItem(STORAGE_KEYS.messageId) || null
+        options.preferredMessageId || readWorkspaceStorageItem('messageId', '') || null
       const pageItems = response.page?.items || []
       const preferredVisible = preferredMessageId
         ? pageItems.find((item) => item.id === preferredMessageId)
@@ -3349,7 +5011,7 @@
 
       const pageItems = normalizedPage?.items || []
       const preferredMessageId =
-        options.preferredMessageId || localStorage.getItem(STORAGE_KEYS.messageId) || null
+        options.preferredMessageId || readWorkspaceStorageItem('messageId', '') || null
       const preferredVisible = preferredMessageId
         ? pageItems.find((item) => resolveMessageId(item) === preferredMessageId)
         : null
@@ -3616,30 +5278,84 @@
       state.authChecked = true
       if (!response.enabled) {
         state.authUser = 'Local access'
-        showViewerShell(state.authUser, false)
-        applyTheme(readThemePreference())
+        await beginAuthenticatedWorkspace(state.authUser, false, false, {
+          suppressReminder: true
+        })
         return true
       }
 
       if (response.authenticated) {
         state.authUser = (response.user && response.user.username) || state.authUser || ''
-        showViewerShell(state.authUser, Boolean(response.canManageUsers))
-        applyTheme(readThemePreference())
+        await beginAuthenticatedWorkspace(
+          state.authUser,
+          Boolean(response.canManageUsers),
+          Boolean(response.mfaEnabled)
+        )
         return true
-      } else {
+      }
+
+      if (response.mfaRequired && response.user && response.user.username) {
         state.authUser = ''
-        showAuthScreen()
+        showMfaChallengeScreen(response.user.username)
         return false
       }
+
+      state.authUser = ''
+      if (state.authInviteLoaded && state.authInvite) {
+        showInviteScreen(state.authInvite)
+        return false
+      }
+
+      showLoginScreen()
+      return false
     } catch (error) {
       state.authChecked = true
       state.authEnabled = true
       if (error && typeof error === 'object' && error.statusCode === 401) {
-        showAuthScreen()
+        if (state.authInviteLoaded && state.authInvite) {
+          showInviteScreen(state.authInvite)
+        } else {
+          showLoginScreen()
+        }
         return false
       }
-      showAuthScreen()
+      if (state.authInviteLoaded && state.authInvite) {
+        showInviteScreen(state.authInvite)
+      } else {
+        showLoginScreen()
+      }
       return false
+    }
+  }
+
+  async function loadInviteDetails(inviteToken) {
+    const token = String(inviteToken || '').trim()
+    if (!token) {
+      return false
+    }
+
+    state.authInviteToken = token
+    setAuthBusy(true)
+    setAuthMessage('Loading invite...')
+    setAuthView('invite')
+    try {
+      const response = await fetchJson(`/api/auth/invites/${encodeURIComponent(token)}`, {
+        cache: 'no-store'
+      })
+      const invite = response && response.invite ? response.invite : null
+      if (!invite || !invite.username) {
+        throw new Error('Invite not found.')
+      }
+
+      showInviteScreen(invite)
+      setAuthMessage('Invite validated. Choose a password to continue.', 'success')
+      return true
+    } catch (error) {
+      showLoginScreen()
+      setAuthError(getErrorMessage(error))
+      return false
+    } finally {
+      setAuthBusy(false)
     }
   }
 
@@ -3669,33 +5385,123 @@
               })
             })
 
+            if (response.mfaRequired) {
+              const challengeUsername =
+                (response.user && response.user.username) || username || state.authMfaChallengeUsername
+              if (!challengeUsername) {
+                throw new Error('Verification required.')
+              }
+              showMfaChallengeScreen(challengeUsername)
+              setAuthMessage('Enter your verification code to finish signing in.', 'success')
+              return
+            }
+
             if (!response.authenticated) {
               throw new Error('Unable to sign in.')
             }
 
-            showViewerShell(
+            await beginAuthenticatedWorkspace(
               (response.user && response.user.username) || username,
-              Boolean(response.canManageUsers)
+              Boolean(response.canManageUsers),
+              Boolean(response.mfaEnabled)
             )
-            applyTheme(readThemePreference())
-            if (!state.authenticated) {
-              return
-            }
-            try {
-              await initializeViewer()
-            } catch (error) {
-              if (
-                !(error && typeof error === 'object' && Number(error.statusCode) === 401)
-              ) {
-                setStatus(`Signed in, but unable to load the viewer: ${getErrorMessage(error)}`, 'error')
-              }
-            }
           } catch (error) {
             setAuthError(getErrorMessage(error))
           } finally {
             setAuthBusy(false)
           }
         })()
+      })
+    }
+
+    if (ui.authMfaForm) {
+      ui.authMfaForm.addEventListener('submit', (event) => {
+        void (async () => {
+          event.preventDefault()
+          setAuthError('')
+          const code = String(ui.authMfaCode?.value || '').trim()
+          if (!code) {
+            setAuthError('Enter a verification code.')
+            return
+          }
+
+          setAuthBusy(true)
+          try {
+            const response = await fetchJson('/api/auth/mfa/challenge', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({ code })
+            })
+
+            if (!response.authenticated) {
+              throw new Error('Unable to verify the code.')
+            }
+
+            await beginAuthenticatedWorkspace(
+              (response.user && response.user.username) || state.authMfaChallengeUsername || state.authUser,
+              Boolean(response.canManageUsers),
+              Boolean(response.mfaEnabled)
+            )
+          } catch (error) {
+            setAuthError(getErrorMessage(error))
+          } finally {
+            setAuthBusy(false)
+          }
+        })()
+      })
+    }
+
+    if (ui.inviteForm) {
+      ui.inviteForm.addEventListener('submit', (event) => {
+        void (async () => {
+          event.preventDefault()
+          await submitInvitePassword()
+        })()
+      })
+    }
+
+    if (ui.inviteMfaStart) {
+      ui.inviteMfaStart.addEventListener('click', () => {
+        void startInviteMfaSetup()
+      })
+    }
+
+    if (ui.inviteMfaSkip) {
+      ui.inviteMfaSkip.addEventListener('click', () => {
+        void (async () => {
+          if (!state.authInviteUsername) {
+            return
+          }
+          dismissMfaReminder(state.authInviteUsername)
+          await finalizeInviteOnboarding(state.authInviteUsername, false, false, {
+            suppressReminder: true
+          })
+        })()
+      })
+    }
+
+    if (ui.inviteMfaForm) {
+      ui.inviteMfaForm.addEventListener('submit', (event) => {
+        void (async () => {
+          event.preventDefault()
+          await completeInviteMfaSetup()
+        })()
+      })
+    }
+
+    if (ui.inviteMfaDownload) {
+      ui.inviteMfaDownload.addEventListener('click', () => {
+        downloadInviteRecoveryCodes()
+      })
+    }
+
+    if (ui.inviteFinish) {
+      ui.inviteFinish.addEventListener('click', () => {
+        void finalizeInviteOnboarding(state.authInviteUsername, false, true, {
+          suppressReminder: true
+        })
       })
     }
 
@@ -3707,6 +5513,7 @@
             await fetchJson('/api/auth/logout', {
               method: 'POST'
             })
+            clearMfaReminderDismissal(state.authUser)
             window.location.reload()
           } catch (error) {
             setAuthError(getErrorMessage(error))
@@ -3726,6 +5533,13 @@
       })
     }
 
+    if (ui.setupMfaButton) {
+      ui.setupMfaButton.addEventListener('click', (event) => {
+        event.preventDefault()
+        void startSelfServiceMfaSetup()
+      })
+    }
+
     if (ui.manageUsersButton) {
       ui.manageUsersButton.addEventListener('click', (event) => {
         event.preventDefault()
@@ -3733,10 +5547,84 @@
       })
     }
 
+    if (ui.smtpSettingsButton) {
+      ui.smtpSettingsButton.addEventListener('click', (event) => {
+        event.preventDefault()
+        openSmtpSettingsModal()
+      })
+    }
+
     if (ui.activityLogButton) {
       ui.activityLogButton.addEventListener('click', (event) => {
         event.preventDefault()
         openActivityLogModal()
+      })
+    }
+
+    if (ui.mfaReminderSetup) {
+      ui.mfaReminderSetup.addEventListener('click', () => {
+        void startSelfServiceMfaSetup({
+          suppressReminder: true
+        })
+      })
+    }
+
+    if (ui.mfaReminderSkip) {
+      ui.mfaReminderSkip.addEventListener('click', () => {
+        void (async () => {
+          const username = String(state.authMfaReminderUsername || state.authUser || '').trim()
+          if (username) {
+            dismissMfaReminder(username)
+          }
+          state.authMfaReminderDeferred = false
+          closeMfaReminderModal()
+          if (!state.viewerInitialized) {
+            try {
+              await initializeViewer()
+            } catch (error) {
+              if (!(error && typeof error === 'object' && Number(error.statusCode) === 401)) {
+                setStatus(`Signed in, but unable to load the viewer: ${getErrorMessage(error)}`, 'error')
+              }
+            }
+          }
+        })()
+      })
+    }
+
+    if (ui.mfaSetupClose) {
+      ui.mfaSetupClose.addEventListener('click', () => {
+        closeMfaSetupModal()
+      })
+    }
+
+    if (ui.mfaSetupModal) {
+      ui.mfaSetupModal.addEventListener('click', (event) => {
+        const target = event.target
+        if (!(target instanceof Element)) {
+          return
+        }
+        if (target === ui.mfaSetupModal || target.getAttribute('data-action') === 'close-mfa-setup') {
+          closeMfaSetupModal()
+        }
+      })
+    }
+
+    if (ui.mfaSetupForm) {
+      ui.mfaSetupForm.addEventListener('submit', (event) => {
+        event.preventDefault()
+        void completeSelfServiceMfaSetup()
+      })
+    }
+
+    if (ui.mfaSetupDownload) {
+      ui.mfaSetupDownload.addEventListener('click', () => {
+        downloadMfaSetupRecoveryCodes()
+      })
+    }
+
+    if (ui.mfaSetupFinish) {
+      ui.mfaSetupFinish.addEventListener('click', () => {
+        void continueAfterMfaSetup()
       })
     }
 
@@ -3761,6 +5649,38 @@
       })
     }
 
+    if (ui.smtpSettingsClose) {
+      ui.smtpSettingsClose.addEventListener('click', () => {
+        closeSmtpSettingsModal()
+      })
+    }
+
+    if (ui.smtpSettingsModal) {
+      ui.smtpSettingsModal.addEventListener('click', (event) => {
+        const target = event.target
+        if (!(target instanceof Element)) {
+          return
+        }
+        if (target === ui.smtpSettingsModal || target.getAttribute('data-action') === 'close-smtp-settings') {
+          closeSmtpSettingsModal()
+        }
+      })
+    }
+
+    if (ui.smtpSettingsForm) {
+      ui.smtpSettingsForm.addEventListener('submit', (event) => {
+        event.preventDefault()
+        void saveSmtpSettings()
+      })
+    }
+
+    if (ui.smtpTestSend) {
+      ui.smtpTestSend.addEventListener('click', (event) => {
+        event.preventDefault()
+        void sendSmtpTestEmail()
+      })
+    }
+
     if (ui.userList) {
       ui.userList.addEventListener('click', (event) => {
         const target = event.target
@@ -3768,7 +5688,9 @@
           return
         }
 
-        const actionButton = target.closest('[data-action="select-user-activity"], [data-action="delete-user"]')
+        const actionButton = target.closest(
+          '[data-action="select-user-activity"], [data-action="delete-user"], [data-action="resend-invite"], [data-action="revoke-invite"], [data-action="reset-mfa"]'
+        )
         if (!actionButton || !ui.userList.contains(actionButton)) {
           return
         }
@@ -3786,7 +5708,26 @@
         }
         if (action === 'delete-user') {
           void deleteUser(username)
+          return
         }
+        if (action === 'resend-invite') {
+          void resendInvite(username)
+          return
+        }
+        if (action === 'revoke-invite') {
+          void revokeInvite(username)
+          return
+        }
+        if (action === 'reset-mfa') {
+          void resetUserMfa(username)
+        }
+      })
+    }
+
+    if (ui.userManagementForm) {
+      ui.userManagementForm.addEventListener('submit', (event) => {
+        event.preventDefault()
+        void inviteUser()
       })
     }
 
@@ -3881,8 +5822,18 @@
         return
       }
 
+      if (ui.smtpSettingsModal && !ui.smtpSettingsModal.hidden) {
+        closeSmtpSettingsModal()
+        return
+      }
+
       if (ui.activityLogModal && !ui.activityLogModal.hidden) {
         closeActivityLogModal()
+        return
+      }
+
+      if (ui.mfaSetupModal && !ui.mfaSetupModal.hidden) {
+        closeMfaSetupModal()
         return
       }
 
@@ -3891,71 +5842,6 @@
       }
     })
 
-    if (ui.userManagementForm) {
-      ui.userManagementForm.addEventListener('submit', (event) => {
-        void (async () => {
-          event.preventDefault()
-          setUserManagementMessage('')
-
-          const username = String(ui.userManagementUsername?.value || '').trim()
-          const password = String(ui.userManagementPassword?.value || '')
-          if (!username || !password.trim()) {
-            setUserManagementMessage('Enter both a username and password.', 'error')
-            return
-          }
-
-          setUserManagementBusy(true, 'Adding...')
-          try {
-            const response = await fetchJson('/api/auth/users', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({
-                username,
-                password
-              })
-            })
-
-            if (!response.user || !response.user.username) {
-              throw new Error('Unable to add user.')
-            }
-
-            if (ui.userManagementUsername) {
-              ui.userManagementUsername.value = ''
-            }
-            if (ui.userManagementPassword) {
-              ui.userManagementPassword.value = ''
-            }
-
-            const reloaded = await loadAuthUsers({
-              showBusy: false,
-              silent: true
-            })
-            if (!reloaded || !state.authenticated) {
-              return
-            }
-
-            setUserManagementMessage(`Added ${response.user.username}.`, 'success')
-          } catch (error) {
-            if (error && typeof error === 'object' && Number(error.statusCode) === 401) {
-              handleAuthFailure()
-              return
-            }
-            if (error && typeof error === 'object' && Number(error.statusCode) === 403) {
-              setUserManagementMessage('Admin access required.', 'error')
-              return
-            }
-            setUserManagementMessage(
-              `Unable to add user: ${getErrorMessage(error)}`,
-              'error'
-            )
-          } finally {
-            setUserManagementBusy(false)
-          }
-        })()
-      })
-    }
   }
 
   function wireThemeEvents() {
@@ -4257,6 +6143,7 @@
     ui.pstFilter.addEventListener('input', () => {
       state.mailboxFilter = ui.pstFilter.value
       renderPstCatalog()
+      saveState()
     })
 
     ui.searchButton.addEventListener('click', () => {
@@ -4325,22 +6212,68 @@
   async function bootstrap() {
     ui.authScreen = getElement('auth-screen')
     ui.appShell = getElement('app-shell')
+    ui.authMessage = getElement('auth-message')
+    ui.authLoginView = getElement('auth-login-view')
+    ui.authMfaView = getElement('auth-mfa-view')
     ui.authForm = getElement('auth-form')
     ui.authUsername = getElement('auth-username')
     ui.authPassword = getElement('auth-password')
     ui.authSubmit = getElement('auth-submit')
+    ui.authMfaForm = getElement('auth-mfa-form')
+    ui.authMfaCode = getElement('auth-mfa-code')
+    ui.authMfaSubmit = getElement('auth-mfa-submit')
+    ui.authMfaDescription = getElement('auth-mfa-description')
+    ui.inviteView = getElement('auth-invite-view')
+    ui.inviteDetails = getElement('invite-details')
+    ui.inviteSummary = getElement('invite-summary')
+    ui.inviteForm = getElement('invite-form')
+    ui.invitePassword = getElement('invite-password')
+    ui.inviteConfirmPassword = getElement('invite-confirm-password')
+    ui.inviteSubmit = getElement('invite-submit')
+    ui.inviteMfaPrompt = getElement('invite-mfa-prompt')
+    ui.inviteMfaStart = getElement('invite-mfa-start')
+    ui.inviteMfaSkip = getElement('invite-mfa-skip')
+    ui.inviteMfaSetup = getElement('invite-mfa-setup')
+    ui.inviteMfaQr = getElement('invite-mfa-qr')
+    ui.inviteMfaSecret = getElement('invite-mfa-secret')
+    ui.inviteMfaUri = getElement('invite-mfa-uri')
+    ui.inviteMfaForm = getElement('invite-mfa-form')
+    ui.inviteMfaCode = getElement('invite-mfa-code')
+    ui.inviteMfaSubmit = getElement('invite-mfa-submit')
+    ui.inviteMfaComplete = getElement('invite-mfa-complete')
+    ui.inviteMfaRecoveryList = getElement('invite-mfa-recovery-list')
+    ui.inviteMfaDownload = getElement('invite-mfa-download')
+    ui.inviteFinish = getElement('invite-finish')
     ui.authLogout = getElement('auth-logout')
     ui.authUser = getElement('auth-user')
     ui.settingsButton = getElement('settings-button')
     ui.settingsMenu = getElement('settings-menu')
+    ui.setupMfaButton = getElement('setup-mfa-button')
     ui.manageUsersButton = getElement('manage-users-button')
+    ui.smtpSettingsButton = getElement('smtp-settings-button')
     ui.activityLogButton = getElement('activity-log-button')
+    ui.mfaReminderModal = getElement('mfa-reminder-modal')
+    ui.mfaReminderSetup = getElement('mfa-reminder-setup')
+    ui.mfaReminderSkip = getElement('mfa-reminder-skip')
+    ui.mfaSetupModal = getElement('mfa-setup-modal')
+    ui.mfaSetupClose = getElement('mfa-setup-close')
+    ui.mfaSetupMessage = getElement('mfa-setup-message')
+    ui.mfaSetupQr = getElement('mfa-setup-qr')
+    ui.mfaSetupSecret = getElement('mfa-setup-secret')
+    ui.mfaSetupUri = getElement('mfa-setup-uri')
+    ui.mfaSetupForm = getElement('mfa-setup-form')
+    ui.mfaSetupCode = getElement('mfa-setup-code')
+    ui.mfaSetupSubmit = getElement('mfa-setup-submit')
+    ui.mfaSetupComplete = getElement('mfa-setup-complete')
+    ui.mfaSetupRecoveryList = getElement('mfa-setup-recovery-list')
+    ui.mfaSetupDownload = getElement('mfa-setup-download')
+    ui.mfaSetupFinish = getElement('mfa-setup-finish')
     ui.userManagementModal = getElement('user-management-modal')
     ui.userManagementClose = getElement('user-management-close')
     ui.userManagementBackdrop = ui.userManagementModal.querySelector('[data-action="close-user-management"]')
     ui.userManagementForm = getElement('user-management-form')
     ui.userManagementUsername = getElement('user-management-username')
-    ui.userManagementPassword = getElement('user-management-password')
+    ui.userManagementEmail = getElement('user-management-email')
     ui.userManagementSubmit = getElement('user-management-submit')
     ui.userManagementMessage = getElement('user-management-message')
     ui.userList = getElement('user-list')
@@ -4352,6 +6285,24 @@
     ui.userActivityExport = getElement('user-activity-export')
     ui.userActivityRefresh = getElement('user-activity-refresh')
     ui.userActivityTitle = getElement('user-activity-title')
+    ui.smtpSettingsModal = getElement('smtp-settings-modal')
+    ui.smtpSettingsClose = getElement('smtp-settings-close')
+    ui.smtpSettingsBackdrop = ui.smtpSettingsModal.querySelector('[data-action="close-smtp-settings"]')
+    ui.smtpSettingsForm = getElement('smtp-settings-form')
+    ui.smtpSettingsMessage = getElement('smtp-settings-message')
+    ui.smtpSettingsEnabled = getElement('smtp-settings-enabled')
+    ui.smtpSettingsHost = getElement('smtp-settings-host')
+    ui.smtpSettingsPort = getElement('smtp-settings-port')
+    ui.smtpSettingsSecure = getElement('smtp-settings-secure')
+    ui.smtpSettingsUsername = getElement('smtp-settings-username')
+    ui.smtpSettingsPassword = getElement('smtp-settings-password')
+    ui.smtpPasswordHint = getElement('smtp-password-hint')
+    ui.smtpSettingsFromName = getElement('smtp-settings-from-name')
+    ui.smtpSettingsFromAddress = getElement('smtp-settings-from-address')
+    ui.smtpSettingsReplyTo = getElement('smtp-settings-reply-to')
+    ui.smtpTestRecipient = getElement('smtp-test-recipient')
+    ui.smtpTestSend = getElement('smtp-test-send')
+    ui.smtpSettingsSubmit = getElement('smtp-settings-submit')
     ui.activityLogModal = getElement('activity-log-modal')
     ui.activityLogClose = getElement('activity-log-close')
     ui.activityLogBackdrop = ui.activityLogModal.querySelector('[data-action="close-activity-log"]')
@@ -4398,40 +6349,21 @@
     ui.themeToggleButtons = Array.from(document.querySelectorAll('[data-theme-toggle]'))
 
     applyTheme('dark')
-
-    state.query = localStorage.getItem(STORAGE_KEYS.query) || ''
-    state.searchScope = ['pst', 'search', 'all'].includes(
-      localStorage.getItem(STORAGE_KEYS.searchScope) || ''
-    )
-      ? localStorage.getItem(STORAGE_KEYS.searchScope) || 'pst'
-      : 'pst'
-    state.mailboxScopeView =
-      localStorage.getItem(STORAGE_KEYS.mailboxScopeView) === 'all' ? 'all' : 'search'
-    state.catalogMode = localStorage.getItem(STORAGE_KEYS.catalogMode) === 'removed' ? 'removed' : 'active'
-    state.selectedCasePath = normalizeScopePath(localStorage.getItem(STORAGE_KEYS.casePath) || '')
-    state.selectedScopePath = normalizeScopePath(localStorage.getItem(STORAGE_KEYS.scopePath) || '')
-    state.selectedScopeLabel = getScopeLabel(state.selectedScopePath)
-    state.mailOnly = readStorageBool(STORAGE_KEYS.mailOnly, true)
-    state.sort = localStorage.getItem(STORAGE_KEYS.sort) || 'date-desc'
-    state.reviewFlaggedOnly = readStorageBool(STORAGE_KEYS.reviewFlaggedOnly, false)
-    state.reviewTaggedOnly = readStorageBool(STORAGE_KEYS.reviewTaggedOnly, false)
-    state.bundleScope = ['all', 'search', 'pst'].includes(
-      localStorage.getItem(STORAGE_KEYS.flaggedBundleScope) || ''
-    )
-      ? localStorage.getItem(STORAGE_KEYS.flaggedBundleScope) || 'all'
-      : 'all'
     state.hiddenFiltersOpen = false
-    state.selectedPstFileName = localStorage.getItem(STORAGE_KEYS.pstFileName) || null
     state.mailboxFilter = ''
     wireThemeEvents()
     wireAuthEvents()
     wireUserManagementEvents()
+    const inviteToken = getInviteTokenFromLocation()
+    if (inviteToken) {
+      await loadInviteDetails(inviteToken)
+      return
+    }
+
     const authenticated = await loadAuthState()
     if (!authenticated) {
       return
     }
-
-    await initializeViewer()
   }
 
   bootstrap().catch((error) => {

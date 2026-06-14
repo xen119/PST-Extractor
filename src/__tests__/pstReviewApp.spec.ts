@@ -3,7 +3,9 @@ import * as http from 'http'
 import * as os from 'os'
 import * as path from 'path'
 import { AddressInfo } from 'net'
+import { generateTotpCode } from '../authSecurity'
 import { createMemoryAuthUserStore, type AuthUserStore } from '../authUsers'
+import { createMemoryAppSettingsStore, type AppSettingsStore } from '../appSettings'
 import { buildOpenApiDocument } from '../openApi'
 import { createPstReviewApp, type ApiSecurityConfig, type AppAuthConfig } from '../pstReviewApp'
 import { MemoryReviewStore } from '../reviewStore'
@@ -161,7 +163,9 @@ async function startApp(
   pstRootDir: string,
   apiSecurity?: ApiSecurityConfig,
   auth?: AppAuthConfig,
-  authUserStore?: AuthUserStore
+  authUserStore?: AuthUserStore,
+  appSettingsStore?: AppSettingsStore,
+  smtpTransportFactory?: (settings: any) => any
 ) {
   const auditLogDir = path.join(path.dirname(pstRootDir), 'logs')
   const reviewStore = new MemoryReviewStore()
@@ -178,7 +182,9 @@ async function startApp(
     }),
     auth,
     authUserStore,
+    appSettingsStore,
     auditLogDir,
+    smtpTransportFactory,
     apiSecurity
   })
 
@@ -192,6 +198,7 @@ async function startApp(
     baseUrl: `http://127.0.0.1:${address.port}`,
     reviewStore,
     searchIndexStore,
+    appSettingsStore,
     auditLogDir,
     auditLogPath: path.join(auditLogDir, 'activity.log'),
     server
@@ -1219,6 +1226,7 @@ describe('pst review api', () => {
     expect(loginPayload.authenticated).toBe(true)
     expect(loginPayload.enabled).toBe(true)
     expect(loginPayload.canManageUsers).toBe(true)
+    expect(loginPayload.mfaEnabled).toBe(false)
     expect(loginPayload.user.username).toBe('admin')
     expect(setCookie).toContain('HttpOnly')
     expect(cookiePair).toContain('pst-review-session=')
@@ -1232,6 +1240,7 @@ describe('pst review api', () => {
     expect(meResponse.status).toBe(200)
     expect(mePayload.authenticated).toBe(true)
     expect(mePayload.canManageUsers).toBe(true)
+    expect(mePayload.mfaEnabled).toBe(false)
     expect(mePayload.user.username).toBe('admin')
 
     const catalog = await requestJson(`${started.baseUrl}/api/psts`, {
@@ -1273,7 +1282,8 @@ describe('pst review api', () => {
     const started = await startApp(pstDir, undefined, {
       username: 'admin',
       password: 'pst-extractor',
-      sessionTtlMinutes: 180
+      sessionTtlMinutes: 180,
+      publicBaseUrl: 'https://portal.example.test'
     }, authUserStore)
     server = started.server
     reviewStore = started.reviewStore
@@ -1299,6 +1309,7 @@ describe('pst review api', () => {
     expect(loginResponse.status).toBe(200)
     expect(loginPayload.authenticated).toBe(true)
     expect(loginPayload.canManageUsers).toBe(true)
+    expect(loginPayload.mfaEnabled).toBe(false)
 
     const createResponse = await fetch(`${started.baseUrl}/api/auth/users`, {
       method: 'POST',
@@ -1308,12 +1319,98 @@ describe('pst review api', () => {
       },
       body: JSON.stringify({
         username: 'alice',
-        password: 'secret123'
+        recipientEmail: 'alice@example.com'
       })
     })
     const createPayload = await readJson(createResponse)
     expect(createResponse.status).toBe(200)
     expect(createPayload.user.username).toBe('alice')
+    expect(createPayload.user.inviteStatus).toBe('pending')
+    expect(createPayload.emailSent).toBe(false)
+    expect(createPayload.inviteUrl).toContain('/invite/')
+    expect(new URL(createPayload.inviteUrl).origin).toBe('https://portal.example.test')
+
+    const inviteToken = String(new URL(createPayload.inviteUrl).pathname.split('/').pop() || '')
+    const inviteLookupResponse = await fetch(
+      `${started.baseUrl}/api/auth/invites/${encodeURIComponent(inviteToken)}`
+    )
+    const inviteLookupPayload = await readJson(inviteLookupResponse)
+    expect(inviteLookupResponse.status).toBe(200)
+    expect(inviteLookupPayload.invite.username).toBe('alice')
+    expect(inviteLookupPayload.invite.inviteStatus).toBe('pending')
+
+    const acceptResponse = await fetch(
+      `${started.baseUrl}/api/auth/invites/${encodeURIComponent(inviteToken)}/accept`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          password: 'secret123',
+          confirmPassword: 'secret123'
+        })
+      }
+    )
+    const acceptPayload = await readJson(acceptResponse)
+    const aliceCookiePair = getCookiePair(getSetCookieHeader(acceptResponse))
+    expect(acceptResponse.status).toBe(200)
+    expect(acceptPayload.user.username).toBe('alice')
+    expect(acceptPayload.mfaAvailable).toBe(true)
+
+    const inviteLookupAfterAcceptResponse = await fetch(
+      `${started.baseUrl}/api/auth/invites/${encodeURIComponent(inviteToken)}`
+    )
+    const inviteLookupAfterAcceptPayload = await readJson(inviteLookupAfterAcceptResponse)
+    expect(inviteLookupAfterAcceptResponse.status).toBe(404)
+    expect(inviteLookupAfterAcceptPayload.error).toBe('Invite not found')
+
+    const inviteAcceptAgainResponse = await fetch(
+      `${started.baseUrl}/api/auth/invites/${encodeURIComponent(inviteToken)}/accept`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          password: 'secret123',
+          confirmPassword: 'secret123'
+        })
+      }
+    )
+    const inviteAcceptAgainPayload = await readJson(inviteAcceptAgainResponse)
+    expect(inviteAcceptAgainResponse.status).toBe(409)
+    expect(inviteAcceptAgainPayload.error).toBe('Invite already accepted')
+
+    const mfaStartResponse = await fetch(`${started.baseUrl}/api/auth/mfa/enrollment/start`, {
+      method: 'POST',
+      headers: {
+        Cookie: aliceCookiePair
+      }
+    })
+    const mfaStartPayload = await readJson(mfaStartResponse)
+    expect(mfaStartResponse.status).toBe(200)
+    expect(mfaStartPayload.secret).toBeTruthy()
+    expect(mfaStartPayload.qrCodeDataUrl).toContain('data:image/png;base64,')
+
+    const totpCode = generateTotpCode(mfaStartPayload.secret)
+    const mfaCompleteResponse = await fetch(
+      `${started.baseUrl}/api/auth/mfa/enrollment/complete`,
+      {
+        method: 'POST',
+        headers: {
+          Cookie: aliceCookiePair,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          code: totpCode
+        })
+      }
+    )
+    const mfaCompletePayload = await readJson(mfaCompleteResponse)
+    expect(mfaCompleteResponse.status).toBe(200)
+    expect(mfaCompletePayload.user.username).toBe('alice')
+    expect(mfaCompletePayload.recoveryCodes.length).toBeGreaterThan(0)
 
     const usersResponse = await fetch(`${started.baseUrl}/api/auth/users`, {
       headers: {
@@ -1324,6 +1421,14 @@ describe('pst review api', () => {
     expect(usersResponse.status).toBe(200)
     expect(usersPayload.users.map((user: { username: string }) => user.username)).toEqual(
       expect.arrayContaining(['admin', 'alice'])
+    )
+    expect(
+      usersPayload.users.find((user: { username: string }) => user.username === 'alice')
+    ).toEqual(
+      expect.objectContaining({
+        inviteStatus: 'active',
+        mfaEnabled: true
+      })
     )
 
     const aliceLoginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
@@ -1337,15 +1442,80 @@ describe('pst review api', () => {
       })
     })
     const aliceLoginPayload = await readJson(aliceLoginResponse)
-    const aliceCookiePair = getCookiePair(getSetCookieHeader(aliceLoginResponse))
+    const aliceChallengeCookiePair = getCookiePair(getSetCookieHeader(aliceLoginResponse))
     expect(aliceLoginResponse.status).toBe(200)
-    expect(aliceLoginPayload.authenticated).toBe(true)
-    expect(aliceLoginPayload.canManageUsers).toBe(false)
+    expect(aliceLoginPayload.authenticated).toBe(false)
+    expect(aliceLoginPayload.mfaRequired).toBe(true)
+    expect(aliceLoginPayload.mfaEnabled).toBe(false)
+    expect(aliceLoginPayload.user.username).toBe('alice')
+
+    const aliceChallengeResponse = await fetch(`${started.baseUrl}/api/auth/mfa/challenge`, {
+      method: 'POST',
+      headers: {
+        Cookie: aliceChallengeCookiePair,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        code: generateTotpCode(mfaStartPayload.secret)
+      })
+    })
+    const aliceChallengePayload = await readJson(aliceChallengeResponse)
+    const aliceSessionCookiePair = getCookiePair(getSetCookieHeader(aliceChallengeResponse))
+    expect(aliceChallengeResponse.status).toBe(200)
+    expect(aliceChallengePayload.authenticated).toBe(true)
+    expect(aliceChallengePayload.mfaEnabled).toBe(true)
+    expect(aliceChallengePayload.user.username).toBe('alice')
+
+    const aliceMeResponse = await fetch(`${started.baseUrl}/api/auth/me`, {
+      headers: {
+        Cookie: aliceSessionCookiePair
+      }
+    })
+    const aliceMePayload = await readJson(aliceMeResponse)
+    expect(aliceMeResponse.status).toBe(200)
+    expect(aliceMePayload.authenticated).toBe(true)
+    expect(aliceMePayload.mfaEnabled).toBe(true)
+    expect(aliceMePayload.user.username).toBe('alice')
+
+    const aliceRecoveryLoginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'alice',
+        password: 'secret123'
+      })
+    })
+    const aliceRecoveryLoginPayload = await readJson(aliceRecoveryLoginResponse)
+    const aliceRecoveryChallengeCookiePair = getCookiePair(getSetCookieHeader(aliceRecoveryLoginResponse))
+    expect(aliceRecoveryLoginResponse.status).toBe(200)
+    expect(aliceRecoveryLoginPayload.mfaRequired).toBe(true)
+
+    const recoveryCode = String(mfaCompletePayload.recoveryCodes[0] || '')
+    const aliceRecoveryChallengeResponse = await fetch(
+      `${started.baseUrl}/api/auth/mfa/challenge`,
+      {
+        method: 'POST',
+        headers: {
+          Cookie: aliceRecoveryChallengeCookiePair,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          code: recoveryCode
+        })
+      }
+    )
+    const aliceRecoveryChallengePayload = await readJson(aliceRecoveryChallengeResponse)
+    const aliceRecoveryCookiePair = getCookiePair(getSetCookieHeader(aliceRecoveryChallengeResponse))
+    expect(aliceRecoveryChallengeResponse.status).toBe(200)
+    expect(aliceRecoveryChallengePayload.authenticated).toBe(true)
+    expect(aliceRecoveryChallengePayload.user.username).toBe('alice')
 
     const aliceOpenResponse = await requestJson(`${started.baseUrl}/api/psts/open`, {
       method: 'POST',
       headers: {
-        Cookie: aliceCookiePair,
+        Cookie: aliceRecoveryCookiePair,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -1401,7 +1571,7 @@ describe('pst review api', () => {
       },
       body: JSON.stringify({
         username: 'charlie',
-        password: 'secret456'
+        recipientEmail: 'charlie@example.com'
       })
     })
     const aliceCreatePayload = await readJson(aliceCreateResponse)
@@ -1437,11 +1607,31 @@ describe('pst review api', () => {
       })
     })
     const aliceRestartLoginPayload = await readJson(aliceRestartLoginResponse)
-    const aliceRestartCookiePair = getCookiePair(getSetCookieHeader(aliceRestartLoginResponse))
     expect(aliceRestartLoginResponse.status).toBe(200)
-    expect(aliceRestartLoginPayload.authenticated).toBe(true)
-    expect(aliceRestartLoginPayload.canManageUsers).toBe(false)
+    expect(aliceRestartLoginPayload.authenticated).toBe(false)
+    expect(aliceRestartLoginPayload.mfaRequired).toBe(true)
+    expect(aliceRestartLoginPayload.mfaEnabled).toBe(false)
     expect(aliceRestartLoginPayload.user.username).toBe('alice')
+
+    const aliceRestartChallengeResponse = await fetch(
+      `${restarted.baseUrl}/api/auth/mfa/challenge`,
+      {
+        method: 'POST',
+        headers: {
+          Cookie: getCookiePair(getSetCookieHeader(aliceRestartLoginResponse)),
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          code: generateTotpCode(mfaStartPayload.secret)
+        })
+      }
+    )
+    const aliceRestartChallengePayload = await readJson(aliceRestartChallengeResponse)
+    const aliceRestartSessionCookiePair = getCookiePair(getSetCookieHeader(aliceRestartChallengeResponse))
+    expect(aliceRestartChallengeResponse.status).toBe(200)
+    expect(aliceRestartChallengePayload.authenticated).toBe(true)
+    expect(aliceRestartChallengePayload.mfaEnabled).toBe(true)
+    expect(aliceRestartChallengePayload.user.username).toBe('alice')
 
     const adminRestartLoginResponse = await fetch(`${restarted.baseUrl}/api/auth/login`, {
       method: 'POST',
@@ -1458,6 +1648,7 @@ describe('pst review api', () => {
     expect(adminRestartLoginResponse.status).toBe(200)
     expect(adminRestartLoginPayload.authenticated).toBe(true)
     expect(adminRestartLoginPayload.canManageUsers).toBe(true)
+    expect(adminRestartLoginPayload.mfaEnabled).toBe(false)
 
     const deleteAliceResponse = await fetch(`${restarted.baseUrl}/api/auth/users/alice`, {
       method: 'DELETE',
@@ -1471,7 +1662,7 @@ describe('pst review api', () => {
 
     const aliceMeAfterDeleteResponse = await fetch(`${restarted.baseUrl}/api/auth/me`, {
       headers: {
-        Cookie: aliceRestartCookiePair
+        Cookie: aliceRestartSessionCookiePair
       }
     })
     const aliceMeAfterDeletePayload = await readJson(aliceMeAfterDeleteResponse)
@@ -1502,6 +1693,418 @@ describe('pst review api', () => {
     expect(usersAfterDeletePayload.users.map((user: { username: string }) => user.username)).toEqual(
       expect.not.arrayContaining(['alice'])
     )
+  })
+
+  it('supports self-service mfa enrollment after a non-admin login', async () => {
+    rootDir = makeTempDir('pst-review-api-self-service-mfa-')
+    const pstDir = path.join(rootDir, 'PST')
+    const authUserStore = createMemoryAuthUserStore([
+      { username: 'admin', password: 'pst-extractor' }
+    ])
+    await authUserStore.addUser('bob', 'secret123')
+    fs.mkdirSync(pstDir)
+    stageFixture(enronPath, path.join(pstDir, 'sample.pst'))
+
+    const started = await startApp(pstDir, undefined, {
+      username: 'admin',
+      password: 'pst-extractor',
+      sessionTtlMinutes: 180
+    }, authUserStore)
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const bobLoginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'bob',
+        password: 'secret123'
+      })
+    })
+    const bobLoginPayload = await readJson(bobLoginResponse)
+    const bobCookiePair = getCookiePair(getSetCookieHeader(bobLoginResponse))
+    expect(bobLoginResponse.status).toBe(200)
+    expect(bobLoginPayload.authenticated).toBe(true)
+    expect(bobLoginPayload.mfaEnabled).toBe(false)
+
+    const bobMfaStartResponse = await fetch(`${started.baseUrl}/api/auth/mfa/enrollment/start`, {
+      method: 'POST',
+      headers: {
+        Cookie: bobCookiePair
+      }
+    })
+    const bobMfaStartPayload = await readJson(bobMfaStartResponse)
+    expect(bobMfaStartResponse.status).toBe(200)
+    expect(bobMfaStartPayload.secret).toBeTruthy()
+
+    const bobMfaCompleteResponse = await fetch(
+      `${started.baseUrl}/api/auth/mfa/enrollment/complete`,
+      {
+        method: 'POST',
+        headers: {
+          Cookie: bobCookiePair,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          code: generateTotpCode(bobMfaStartPayload.secret)
+        })
+      }
+    )
+    const bobMfaCompletePayload = await readJson(bobMfaCompleteResponse)
+    expect(bobMfaCompleteResponse.status).toBe(200)
+    expect(bobMfaCompletePayload.user.username).toBe('bob')
+    expect(bobMfaCompletePayload.user.mfaEnabled).toBe(true)
+
+    const bobMeResponse = await fetch(`${started.baseUrl}/api/auth/me`, {
+      headers: {
+        Cookie: bobCookiePair
+      }
+    })
+    const bobMePayload = await readJson(bobMeResponse)
+    expect(bobMeResponse.status).toBe(200)
+    expect(bobMePayload.authenticated).toBe(true)
+    expect(bobMePayload.mfaEnabled).toBe(true)
+
+    const bobLoginAfterMfaResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'bob',
+        password: 'secret123'
+      })
+    })
+    const bobLoginAfterMfaPayload = await readJson(bobLoginAfterMfaResponse)
+    expect(bobLoginAfterMfaResponse.status).toBe(200)
+    expect(bobLoginAfterMfaPayload.authenticated).toBe(false)
+    expect(bobLoginAfterMfaPayload.mfaRequired).toBe(true)
+    expect(bobLoginAfterMfaPayload.mfaEnabled).toBe(false)
+
+    const bobChallengeResponse = await fetch(`${started.baseUrl}/api/auth/mfa/challenge`, {
+      method: 'POST',
+      headers: {
+        Cookie: getCookiePair(getSetCookieHeader(bobLoginAfterMfaResponse)),
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        code: generateTotpCode(bobMfaStartPayload.secret)
+      })
+    })
+    const bobChallengePayload = await readJson(bobChallengeResponse)
+    expect(bobChallengeResponse.status).toBe(200)
+    expect(bobChallengePayload.authenticated).toBe(true)
+    expect(bobChallengePayload.mfaEnabled).toBe(true)
+  })
+
+  it('builds invite links from the request origin when no public base url is configured', async () => {
+    rootDir = makeTempDir('pst-review-api-auth-invite-origin-')
+    const pstDir = path.join(rootDir, 'PST')
+    const authUserStore = createMemoryAuthUserStore([
+      { username: 'admin', password: 'pst-extractor' }
+    ])
+    fs.mkdirSync(pstDir)
+    stageFixture(enronPath, path.join(pstDir, 'sample.pst'))
+
+    const started = await startApp(pstDir, undefined, {
+      username: 'admin',
+      password: 'pst-extractor',
+      sessionTtlMinutes: 180
+    }, authUserStore)
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const loginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'admin',
+        password: 'pst-extractor'
+      })
+    })
+    const loginPayload = await readJson(loginResponse)
+    const cookiePair = getCookiePair(getSetCookieHeader(loginResponse))
+    expect(loginResponse.status).toBe(200)
+    expect(loginPayload.authenticated).toBe(true)
+
+    const inviteResponse = await fetch(`${started.baseUrl}/api/auth/users`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookiePair,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'bob',
+        recipientEmail: 'bob@example.com'
+      })
+    })
+    const invitePayload = await readJson(inviteResponse)
+    expect(inviteResponse.status).toBe(200)
+    expect(new URL(invitePayload.inviteUrl).origin).toBe(started.baseUrl)
+  })
+
+  it('serves SMTP settings, preserves passwords, and sends test emails', async () => {
+    rootDir = makeTempDir('pst-review-api-smtp-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(pstDir)
+    stageFixture(enronPath, path.join(pstDir, 'sample.pst'))
+
+    const authUserStore = createMemoryAuthUserStore([
+      { username: 'admin', password: 'pst-extractor' },
+      { username: 'bob', password: 'password123' }
+    ])
+    const settingsStore = createMemoryAppSettingsStore({
+      enabled: true,
+      host: 'smtp.initial.local',
+      port: 2525,
+      secure: false,
+      username: 'smtp-user',
+      password: 'smtp-secret',
+      fromName: 'Initial Sender',
+      fromAddress: 'notify@example.com',
+      replyTo: 'reply@example.com'
+    })
+    const sentMessages: Array<{
+      settings: Record<string, unknown>
+      message: Record<string, unknown>
+    }> = []
+    const smtpTransportFactory = (settings: Record<string, unknown>) => ({
+      async sendMail(message: Record<string, unknown>) {
+        sentMessages.push({
+          settings,
+          message
+        })
+
+        if (String(message.to || '').includes('fail@example.com')) {
+          throw new Error('simulated transport failure')
+        }
+
+        return {
+          messageId: 'smtp-test-message-id',
+          accepted: [String(message.to || '')],
+          rejected: []
+        }
+      },
+      async close() {}
+    })
+
+    const started = await startApp(
+      pstDir,
+      undefined,
+      {
+        username: 'admin',
+        password: 'pst-extractor',
+        sessionTtlMinutes: 180
+      },
+      authUserStore,
+      settingsStore,
+      smtpTransportFactory
+    )
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const loginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'admin',
+        password: 'pst-extractor'
+      })
+    })
+    const loginPayload = await readJson(loginResponse)
+    const cookiePair = getCookiePair(getSetCookieHeader(loginResponse))
+    expect(loginResponse.status).toBe(200)
+    expect(loginPayload.authenticated).toBe(true)
+
+    const smtpSettingsResponse = await fetch(`${started.baseUrl}/api/settings/smtp`, {
+      headers: {
+        Cookie: cookiePair
+      }
+    })
+    const smtpSettingsPayload = await readJson(smtpSettingsResponse)
+    expect(smtpSettingsResponse.status).toBe(200)
+    expect(smtpSettingsPayload.settings.enabled).toBe(true)
+    expect(smtpSettingsPayload.settings.host).toBe('smtp.initial.local')
+    expect(smtpSettingsPayload.settings.hasPassword).toBe(true)
+    expect(smtpSettingsPayload.settings.password).toBeUndefined()
+
+    const updateResponse = await fetch(`${started.baseUrl}/api/settings/smtp`, {
+      method: 'PUT',
+      headers: {
+        Cookie: cookiePair,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        enabled: true,
+        host: 'smtp.updated.local',
+        port: 587,
+        secure: true,
+        username: 'smtp-user-updated',
+        password: '',
+        fromName: 'Updated Sender',
+        fromAddress: 'updated@example.com',
+        replyTo: 'reply-updated@example.com'
+      })
+    })
+    const updatePayload = await readJson(updateResponse)
+    expect(updateResponse.status).toBe(200)
+    expect(updatePayload.settings.host).toBe('smtp.updated.local')
+    expect(updatePayload.settings.hasPassword).toBe(true)
+    expect(updatePayload.settings.password).toBeUndefined()
+
+    const storedSettings = await settingsStore.getSmtpSettings()
+    expect(storedSettings.password).toBe('smtp-secret')
+    expect(storedSettings.host).toBe('smtp.updated.local')
+
+    const testSendResponse = await fetch(`${started.baseUrl}/api/settings/smtp/test`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookiePair,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        enabled: true,
+        host: 'smtp.updated.local',
+        port: 587,
+        secure: true,
+        username: 'smtp-user-updated',
+        password: '',
+        fromName: 'Updated Sender',
+        fromAddress: 'updated@example.com',
+        replyTo: 'reply-updated@example.com',
+        recipient: 'recipient@example.com'
+      })
+    })
+    const testSendPayload = await readJson(testSendResponse)
+    expect(testSendResponse.status).toBe(200)
+    expect(testSendPayload.success).toBe(true)
+    expect(testSendPayload.recipient).toBe('recipient@example.com')
+    expect(sentMessages).toHaveLength(1)
+    expect(sentMessages[0].settings.host).toBe('smtp.updated.local')
+    expect(sentMessages[0].settings.password).toBe('smtp-secret')
+    expect(String(sentMessages[0].message.from || '')).toContain('Updated Sender')
+    expect(String(sentMessages[0].message.to || '')).toBe('recipient@example.com')
+
+    const failedTestSendResponse = await fetch(`${started.baseUrl}/api/settings/smtp/test`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookiePair,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        recipient: 'fail@example.com'
+      })
+    })
+    const failedTestSendPayload = await readJson(failedTestSendResponse)
+    expect(failedTestSendResponse.status).toBe(502)
+    expect(failedTestSendPayload.error).toContain('Unable to send test email')
+
+    const bobLoginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'bob',
+        password: 'password123'
+      })
+    })
+    const bobCookiePair = getCookiePair(getSetCookieHeader(bobLoginResponse))
+    expect(bobLoginResponse.status).toBe(200)
+
+    const bobSettingsResponse = await fetch(`${started.baseUrl}/api/settings/smtp`, {
+      headers: {
+        Cookie: bobCookiePair
+      }
+    })
+    const bobSettingsPayload = await readJson(bobSettingsResponse)
+    expect(bobSettingsResponse.status).toBe(403)
+    expect(bobSettingsPayload.error).toBe('Admin access required')
+
+    const bobSettingsUpdateResponse = await fetch(`${started.baseUrl}/api/settings/smtp`, {
+      method: 'PUT',
+      headers: {
+        Cookie: bobCookiePair,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        host: 'smtp.blocked.local'
+      })
+    })
+    const bobSettingsUpdatePayload = await readJson(bobSettingsUpdateResponse)
+    expect(bobSettingsUpdateResponse.status).toBe(403)
+    expect(bobSettingsUpdatePayload.error).toBe('Admin access required')
+
+    const bobTestSendResponse = await fetch(`${started.baseUrl}/api/settings/smtp/test`, {
+      method: 'POST',
+      headers: {
+        Cookie: bobCookiePair,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        recipient: 'recipient@example.com'
+      })
+    })
+    const bobTestSendPayload = await readJson(bobTestSendResponse)
+    expect(bobTestSendResponse.status).toBe(403)
+    expect(bobTestSendPayload.error).toBe('Admin access required')
+
+    await new Promise<void>((resolveClose) => {
+      started.server.close(() => resolveClose())
+    })
+    server = null
+    await started.reviewStore.close()
+    reviewStore = null
+    await started.searchIndexStore.close()
+    searchIndexStore = null
+
+    const restarted = await startApp(
+      pstDir,
+      undefined,
+      {
+        username: 'admin',
+        password: 'pst-extractor',
+        sessionTtlMinutes: 180
+      },
+      authUserStore,
+      settingsStore,
+      smtpTransportFactory
+    )
+    server = restarted.server
+    reviewStore = restarted.reviewStore
+    searchIndexStore = restarted.searchIndexStore
+
+    const restartedLoginResponse = await fetch(`${restarted.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'admin',
+        password: 'pst-extractor'
+      })
+    })
+    const restartedCookiePair = getCookiePair(getSetCookieHeader(restartedLoginResponse))
+    expect(restartedLoginResponse.status).toBe(200)
+
+    const restartedSettingsResponse = await fetch(`${restarted.baseUrl}/api/settings/smtp`, {
+      headers: {
+        Cookie: restartedCookiePair
+      }
+    })
+    const restartedSettingsPayload = await readJson(restartedSettingsResponse)
+    expect(restartedSettingsResponse.status).toBe(200)
+    expect(restartedSettingsPayload.settings.host).toBe('smtp.updated.local')
+    expect(restartedSettingsPayload.settings.hasPassword).toBe(true)
   })
 
   it('writes activity log entries to disk and replays them after restart', async () => {

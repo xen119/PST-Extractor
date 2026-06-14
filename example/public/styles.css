@@ -266,6 +266,11 @@ body::before {
   gap: 14px;
 }
 
+.auth-view {
+  display: grid;
+  gap: 14px;
+}
+
 .auth-field {
   display: flex;
   flex-direction: column;
@@ -289,6 +294,191 @@ body::before {
 
 .auth-field input::placeholder {
   color: #7f92a9;
+}
+
+.field-hint {
+  color: var(--soft);
+  font-size: 0.76rem;
+  line-height: 1.4;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.auth-message {
+  min-height: 1.2rem;
+  margin: 0;
+  color: #b8c6d8;
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.auth-message[data-tone='success'] {
+  color: #79e0b0;
+}
+
+.auth-message[data-tone='error'] {
+  color: #ff8f8f;
+}
+
+.auth-inline-note {
+  margin: 0;
+  color: #8ea1b7;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.invite-details {
+  display: grid;
+  gap: 10px;
+}
+
+.invite-details-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid rgba(122, 147, 176, 0.2);
+  border-radius: 14px;
+  background: rgba(8, 15, 26, 0.58);
+}
+
+.invite-details-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  color: #eff5fb;
+}
+
+.invite-details-email {
+  color: #aebdd0;
+  font-size: 0.84rem;
+}
+
+.invite-details-meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.invite-details-expiry {
+  color: #91a4ba;
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.invite-step {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid rgba(122, 147, 176, 0.2);
+  border-radius: 18px;
+  background: rgba(8, 15, 26, 0.46);
+}
+
+.invite-step-head {
+  display: grid;
+  gap: 6px;
+}
+
+.invite-step-head h3 {
+  margin: 0;
+  color: #f5f8fc;
+  font-size: 1.02rem;
+  line-height: 1.2;
+}
+
+.invite-step-head p {
+  margin: 0;
+  color: #aebdd0;
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
+.invite-step-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.invite-step-actions .primary-button,
+.invite-step-actions .ghost-button {
+  flex: 0 0 auto;
+}
+
+.invite-mfa-setup {
+  padding: 18px;
+}
+
+.invite-mfa-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 220px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.invite-mfa-qr-wrap {
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  border: 1px solid rgba(122, 147, 176, 0.2);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.invite-mfa-qr {
+  width: 100%;
+  max-width: 220px;
+  border-radius: 14px;
+  background: #ffffff;
+}
+
+.invite-mfa-manual {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.invite-mfa-secret {
+  display: block;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(122, 147, 176, 0.2);
+  background: rgba(8, 15, 26, 0.62);
+  color: #f5f8fc;
+  font-size: 0.86rem;
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+.invite-mfa-uri-hint {
+  word-break: break-all;
+}
+
+.invite-mfa-form {
+  gap: 12px;
+}
+
+.invite-mfa-complete .recovery-code-list {
+  display: grid;
+  gap: 10px;
+}
+
+.recovery-code-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.recovery-code {
+  display: block;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(122, 147, 176, 0.2);
+  background: rgba(8, 15, 26, 0.58);
+  color: #f5f8fc;
+  font-size: 0.84rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .auth-submit {
@@ -333,6 +523,11 @@ body::before {
 
 .user-management-form {
   gap: 10px;
+}
+
+.user-management-form .auth-field input {
+  background: var(--surface);
+  color: var(--text);
 }
 
 .user-management-submit {
@@ -414,10 +609,24 @@ body::before {
   min-width: 0;
 }
 
+.user-item-badges {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 .user-item-hint {
   flex: 0 0 auto;
   color: var(--muted);
   font-size: 0.82rem;
+}
+
+.user-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  flex: 0 0 auto;
 }
 
 .user-delete-button {
@@ -432,6 +641,18 @@ body::before {
 .user-delete-button:hover:not(:disabled) {
   border-color: rgba(197, 48, 48, 0.38);
   background: rgba(197, 48, 48, 0.12);
+}
+
+.user-resend-button {
+  color: var(--accent-strong);
+}
+
+.user-revoke-button {
+  color: #7f8d9f;
+}
+
+.user-mfa-reset-button {
+  color: var(--success);
 }
 
 .user-management-summary,
@@ -545,7 +766,7 @@ body::before {
   top: calc(100% + 8px);
   right: 0;
   z-index: 25;
-  min-width: 11.5rem;
+  min-width: 12.5rem;
   padding: 0.4rem;
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -572,6 +793,11 @@ body::before {
 .settings-menu-item:focus-visible {
   background: var(--accent-tint);
   color: var(--accent-strong);
+}
+
+.mfa-reminder-backdrop {
+  pointer-events: none;
+  cursor: default;
 }
 
 .modal-overlay {
@@ -679,8 +905,129 @@ body::before {
   width: min(100%, 860px);
 }
 
+.smtp-settings-modal-panel {
+  width: min(100%, 980px);
+}
+
+.mfa-reminder-modal-panel {
+  width: min(100%, 560px);
+}
+
+.mfa-setup-modal-panel {
+  width: min(100%, 1040px);
+}
+
 .activity-log-body {
   grid-template-columns: minmax(0, 1fr);
+}
+
+.smtp-settings-body {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.smtp-settings-form {
+  display: grid;
+  gap: 16px;
+}
+
+.smtp-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 14px;
+  align-items: start;
+}
+
+.smtp-field-full {
+  grid-column: 1 / -1;
+}
+
+.smtp-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0.82rem 0.92rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-soft);
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.4;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.smtp-toggle-row input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+}
+
+.smtp-settings-message {
+  min-height: 1.1rem;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.smtp-settings-message[data-tone='success'] {
+  color: var(--success);
+}
+
+.smtp-settings-message[data-tone='error'] {
+  color: var(--danger);
+}
+
+.smtp-settings-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mfa-reminder-body {
+  gap: 16px;
+}
+
+.mfa-reminder-message {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.96rem;
+  line-height: 1.55;
+}
+
+.mfa-reminder-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mfa-setup-body {
+  gap: 16px;
+}
+
+.mfa-setup-message {
+  min-height: 1.1rem;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.mfa-setup-message[data-tone='success'] {
+  color: var(--success);
+}
+
+.mfa-setup-message[data-tone='error'] {
+  color: var(--danger);
+}
+
+.mfa-setup-complete .recovery-code-list {
+  max-height: min(32vh, 280px);
 }
 
 .activity-log-summary .panel-head {
@@ -2361,6 +2708,10 @@ textarea:focus-visible {
     gap: 12px;
   }
 
+  .invite-mfa-grid {
+    grid-template-columns: 1fr;
+  }
+
   .app-shell {
     height: auto;
     min-height: 100vh;
@@ -2405,6 +2756,14 @@ textarea:focus-visible {
     grid-column: auto;
     grid-row: auto;
   }
+
+  .smtp-settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .smtp-field-full {
+    grid-column: auto;
+  }
 }
 
 @media (max-width: 640px) {
@@ -2442,9 +2801,14 @@ textarea:focus-visible {
     flex-direction: column;
   }
 
-  .user-delete-button {
+  .user-item-actions {
     width: 100%;
-    min-width: 0;
+    justify-content: flex-end;
+  }
+
+  .user-delete-button {
+    width: auto;
+    min-width: 2.8rem;
   }
 
   .navigator-header,

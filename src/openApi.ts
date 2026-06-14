@@ -254,10 +254,29 @@ function authManagedUserSchema(): Record<string, unknown> {
   return {
     type: 'object',
     additionalProperties: false,
-    required: ['username', 'createdAt'],
+    required: [
+      'username',
+      'createdAt',
+      'recipientEmail',
+      'inviteStatus',
+      'inviteSentAt',
+      'inviteExpiresAt',
+      'inviteAcceptedAt',
+      'inviteRevokedAt',
+      'mfaEnabled',
+      'mfaEnrolledAt'
+    ],
     properties: {
       username: { type: 'string' },
-      createdAt: { type: 'string' }
+      createdAt: { type: 'string' },
+      recipientEmail: { type: 'string' },
+      inviteStatus: { type: 'string', enum: ['pending', 'active', 'revoked', 'expired'] },
+      inviteSentAt: { type: 'string' },
+      inviteExpiresAt: { type: 'string' },
+      inviteAcceptedAt: { type: 'string' },
+      inviteRevokedAt: { type: 'string' },
+      mfaEnabled: { type: 'boolean' },
+      mfaEnrolledAt: { type: 'string' }
     }
   }
 }
@@ -280,10 +299,12 @@ function authUserCreateRequestSchema(): Record<string, unknown> {
   return {
     type: 'object',
     additionalProperties: false,
-    required: ['username', 'password'],
+    required: ['username'],
     properties: {
       username: { type: 'string' },
-      password: { type: 'string' }
+      password: { type: 'string' },
+      recipientEmail: { type: 'string' },
+      email: { type: 'string' }
     }
   }
 }
@@ -295,6 +316,190 @@ function authUserDeleteResponseSchema(): Record<string, unknown> {
     required: ['user'],
     properties: {
       user: authManagedUserSchema()
+    }
+  }
+}
+
+function authUserInviteResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['user', 'inviteUrl', 'emailSent', 'inviteExpiresAt'],
+    properties: {
+      user: authManagedUserSchema(),
+      inviteUrl: { type: 'string' },
+      emailSent: { type: 'boolean' },
+      inviteExpiresAt: { type: 'string' }
+    }
+  }
+}
+
+function authInviteLookupResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['invite'],
+    properties: {
+      invite: authManagedUserSchema()
+    }
+  }
+}
+
+function authInviteAcceptRequestSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['password'],
+    properties: {
+      password: { type: 'string' },
+      confirmPassword: { type: 'string' }
+    }
+  }
+}
+
+function authInviteAcceptResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['user', 'mfaAvailable'],
+    properties: {
+      user: authManagedUserSchema(),
+      mfaAvailable: { type: 'boolean' }
+    }
+  }
+}
+
+function authMfaChallengeRequestSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['code'],
+    properties: {
+      code: { type: 'string' }
+    }
+  }
+}
+
+function authMfaStartResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['user', 'secret', 'otpauthUri', 'qrCodeDataUrl'],
+    properties: {
+      user: authManagedUserSchema(),
+      secret: { type: 'string' },
+      otpauthUri: { type: 'string' },
+      qrCodeDataUrl: { type: 'string' }
+    }
+  }
+}
+
+function authMfaCompleteResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['user', 'recoveryCodes'],
+    properties: {
+      user: authManagedUserSchema(),
+      recoveryCodes: {
+        type: 'array',
+        items: { type: 'string' }
+      }
+    }
+  }
+}
+
+function smtpSettingsSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: [
+      'enabled',
+      'host',
+      'port',
+      'secure',
+      'username',
+      'hasPassword',
+      'fromName',
+      'fromAddress',
+      'replyTo'
+    ],
+    properties: {
+      enabled: { type: 'boolean' },
+      host: { type: 'string' },
+      port: { type: 'integer' },
+      secure: { type: 'boolean' },
+      username: { type: 'string' },
+      hasPassword: { type: 'boolean' },
+      fromName: { type: 'string' },
+      fromAddress: { type: 'string' },
+      replyTo: { type: 'string' }
+    }
+  }
+}
+
+function smtpSettingsResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['settings'],
+    properties: {
+      settings: smtpSettingsSchema()
+    }
+  }
+}
+
+function smtpSettingsUpdateRequestSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      enabled: { type: 'boolean' },
+      host: { type: 'string' },
+      port: { type: ['integer', 'string'] },
+      secure: { type: 'boolean' },
+      username: { type: 'string' },
+      password: { type: 'string' },
+      fromName: { type: 'string' },
+      fromAddress: { type: 'string' },
+      replyTo: { type: 'string' }
+    }
+  }
+}
+
+function smtpTestRequestSchema(): Record<string, unknown> {
+  return {
+    allOf: [
+      smtpSettingsUpdateRequestSchema(),
+      {
+        type: 'object',
+        additionalProperties: false,
+        required: ['recipient'],
+        properties: {
+          recipient: { type: 'string' }
+        }
+      }
+    ]
+  }
+}
+
+function smtpTestResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['success', 'recipient', 'messageId', 'accepted', 'rejected'],
+    properties: {
+      success: { type: 'boolean' },
+      recipient: { type: 'string' },
+      messageId: { type: 'string' },
+      accepted: {
+        type: 'array',
+        items: { type: 'string' }
+      },
+      rejected: {
+        type: 'array',
+        items: { type: 'string' }
+      }
     }
   }
 }
@@ -361,11 +566,12 @@ function authStatusSchema(): Record<string, unknown> {
   return {
     type: 'object',
     additionalProperties: true,
-    required: ['authenticated', 'enabled', 'canManageUsers', 'user', 'expiresAt'],
+    required: ['authenticated', 'enabled', 'canManageUsers', 'mfaEnabled', 'user', 'expiresAt'],
     properties: {
       authenticated: { type: 'boolean' },
       enabled: { type: 'boolean' },
       canManageUsers: { type: 'boolean' },
+      mfaEnabled: { type: 'boolean' },
       user: {
         nullable: true,
         ...authUserSchema()
@@ -487,6 +693,7 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
     servers: [{ url: '/' }],
     tags: [
       { name: 'Auth' },
+      { name: 'Settings' },
       { name: 'Activity log' },
       { name: 'PST catalog' },
       { name: 'PST archive' },
@@ -544,7 +751,7 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
         },
         post: {
           tags: ['Auth'],
-          summary: 'Add a new local viewer user',
+          summary: 'Create a new local viewer invite or legacy local user',
           requestBody: {
             required: true,
             content: {
@@ -554,7 +761,7 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
             }
           },
           responses: {
-            200: jsonResponse({ type: 'object', additionalProperties: true, required: ['user'], properties: { user: authManagedUserSchema() } }),
+            200: jsonResponse(authUserInviteResponseSchema()),
             ...errorResponse(400, 'Username is required'),
             ...errorResponse(401, 'Authentication required'),
             ...errorResponse(403, 'Admin access required'),
@@ -581,6 +788,183 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
             ...errorResponse(401, 'Authentication required'),
             ...errorResponse(403, 'Admin access required'),
             ...errorResponse(404, 'User not found')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authInviteLookup)]: {
+        get: {
+          tags: ['Auth'],
+          summary: 'Look up a pending invite by token',
+          responses: {
+            200: jsonResponse(authInviteLookupResponseSchema()),
+            ...errorResponse(400, 'Authentication is disabled'),
+            ...errorResponse(404, 'Invite not found')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authInviteAccept)]: {
+        post: {
+          tags: ['Auth'],
+          summary: 'Accept an invite, set the password, and create a session',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: authInviteAcceptRequestSchema()
+              }
+            }
+          },
+          responses: {
+            200: jsonResponse(authInviteAcceptResponseSchema()),
+            ...errorResponse(400, 'Password is required or confirmation does not match'),
+            ...errorResponse(401, 'Authentication is disabled'),
+            ...errorResponse(404, 'Invite not found'),
+            ...errorResponse(409, 'Invite already accepted'),
+            ...errorResponse(410, 'Invite has been revoked')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authMfaChallenge)]: {
+        post: {
+          tags: ['Auth'],
+          summary: 'Complete an MFA challenge and create a session',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: authMfaChallengeRequestSchema()
+              }
+            }
+          },
+          responses: {
+            200: jsonResponse(authStatusSchema()),
+            ...errorResponse(401, 'MFA challenge required or verification code is invalid')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authMfaEnrollmentStart)]: {
+        post: {
+          tags: ['Auth'],
+          summary: 'Start MFA enrollment for the current user',
+          responses: {
+            200: jsonResponse(authMfaStartResponseSchema()),
+            ...errorResponse(400, 'Authentication is disabled'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(404, 'User not found'),
+            ...errorResponse(409, 'MFA is already enabled or user is not active')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authMfaEnrollmentComplete)]: {
+        post: {
+          tags: ['Auth'],
+          summary: 'Complete MFA enrollment with a verification code',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: authMfaChallengeRequestSchema()
+              }
+            }
+          },
+          responses: {
+            200: jsonResponse(authMfaCompleteResponseSchema()),
+            ...errorResponse(400, 'Invalid verification code or authentication is disabled'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(404, 'User not found'),
+            ...errorResponse(409, 'MFA is already enabled, MFA enrollment has not started, or user is not active')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authUserInviteResend)]: {
+        post: {
+          tags: ['Auth'],
+          summary: 'Resend a local viewer invite',
+          responses: {
+            200: jsonResponse(authUserInviteResponseSchema()),
+            ...errorResponse(400, 'Authentication is disabled or recipient email is required'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Admin access required'),
+            ...errorResponse(404, 'User not found'),
+            ...errorResponse(409, 'User already exists')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authUserInvite)]: {
+        delete: {
+          tags: ['Auth'],
+          summary: 'Revoke a pending local viewer invite',
+          responses: {
+            200: jsonResponse(authUserDeleteResponseSchema()),
+            ...errorResponse(400, 'Authentication is disabled'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Admin access required'),
+            ...errorResponse(404, 'User not found'),
+            ...errorResponse(409, 'Invite already accepted')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authUserMfaReset)]: {
+        post: {
+          tags: ['Auth'],
+          summary: 'Disable MFA for a local viewer user',
+          responses: {
+            200: jsonResponse(authUserDeleteResponseSchema()),
+            ...errorResponse(400, 'Authentication is disabled'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Admin access required'),
+            ...errorResponse(404, 'User not found')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.smtpSettings)]: {
+        get: {
+          tags: ['Settings'],
+          summary: 'Read the current SMTP sender settings',
+          responses: {
+            200: jsonResponse(smtpSettingsResponseSchema()),
+            ...errorResponse(400, 'Authentication is disabled'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Admin access required')
+          }
+        },
+        put: {
+          tags: ['Settings'],
+          summary: 'Update the SMTP sender settings',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: smtpSettingsUpdateRequestSchema()
+              }
+            }
+          },
+          responses: {
+            200: jsonResponse(smtpSettingsResponseSchema()),
+            ...errorResponse(400, 'Authentication is disabled'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Admin access required')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.smtpSettingsTest)]: {
+        post: {
+          tags: ['Settings'],
+          summary: 'Send a manual SMTP test email',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: smtpTestRequestSchema()
+              }
+            }
+          },
+          responses: {
+            200: jsonResponse(smtpTestResponseSchema()),
+            ...errorResponse(400, 'Authentication is disabled'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Admin access required'),
+            ...errorResponse(502, 'Unable to send test email')
           }
         }
       },
@@ -1392,6 +1776,11 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
         AuthManagedUser: authManagedUserSchema(),
         AuthUsersResponse: authUsersResponseSchema(),
         AuthUserDeleteResponse: authUserDeleteResponseSchema(),
+        SmtpSettings: smtpSettingsSchema(),
+        SmtpSettingsResponse: smtpSettingsResponseSchema(),
+        SmtpSettingsUpdateRequest: smtpSettingsUpdateRequestSchema(),
+        SmtpTestRequest: smtpTestRequestSchema(),
+        SmtpTestResponse: smtpTestResponseSchema(),
         ActivityLogEntry: auditLogEntrySchema(),
         ActivityLogResponse: activityLogResponseSchema(),
         MessageSummary: messageSummarySchema(),

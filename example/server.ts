@@ -4,6 +4,7 @@ import * as http from 'http'
 import * as path from 'path'
 import { buildOpenApiDocument } from '../src/openApi'
 import { MongoAuthUserStore } from '../src/authUsers'
+import { createAppSettingsStoreFromEnv, type AppSettingsStore } from '../src/appSettings'
 import { createPstReviewApp, type ApiSecurityConfig, type AppAuthConfig } from '../src/pstReviewApp'
 import { createReviewStoreFromEnv } from '../src/reviewStore'
 import {
@@ -103,13 +104,17 @@ const apiSecurity: ApiSecurityConfig = {
 const auth: AppAuthConfig = {
   username: (process.env.AUTH_USERNAME || 'admin').trim() || 'admin',
   password: (process.env.AUTH_PASSWORD || 'pst-extractor').trim() || 'pst-extractor',
-  sessionTtlMinutes: parsePositiveInt(process.env.AUTH_SESSION_TTL_MINUTES, 180)
+  sessionTtlMinutes: parsePositiveInt(process.env.AUTH_SESSION_TTL_MINUTES, 180),
+  inviteTtlMinutes: parsePositiveInt(process.env.AUTH_INVITE_TTL_MINUTES, 24 * 60),
+  mfaIssuer: (process.env.AUTH_MFA_ISSUER || 'PST Mail Explorer').trim() || 'PST Mail Explorer',
+  publicBaseUrl: (process.env.PUBLIC_BASE_URL || '').trim()
 }
 
 let server: http.Server | null = null
 let reviewStore = null as Awaited<ReturnType<typeof createReviewStoreFromEnv>> | null
 let searchIndexStore = null as Awaited<ReturnType<typeof createSearchIndexStoreFromEnv>> | null
 let authUserStore = null as Awaited<ReturnType<typeof MongoAuthUserStore.connect>> | null
+let appSettingsStore: AppSettingsStore | null = null
 let shuttingDown = false
 
 async function shutdown(exitCode = 0): Promise<void> {
@@ -158,6 +163,14 @@ async function shutdown(exitCode = 0): Promise<void> {
     console.error(error)
   }
 
+  try {
+    if (appSettingsStore) {
+      await appSettingsStore.close()
+    }
+  } catch (error) {
+    console.error(error)
+  }
+
   if (exitCode !== 0) {
     process.exitCode = exitCode
   }
@@ -166,6 +179,7 @@ async function shutdown(exitCode = 0): Promise<void> {
 async function main(): Promise<void> {
   reviewStore = await createReviewStoreFromEnv(process.env)
   searchIndexStore = await createSearchIndexStoreFromEnv(process.env)
+  appSettingsStore = await createAppSettingsStoreFromEnv(process.env)
   const mongoUri = String(process.env.MONGODB_URI || '').trim()
   if (mongoUri) {
     authUserStore = await MongoAuthUserStore.connect(
@@ -192,6 +206,7 @@ async function main(): Promise<void> {
     openApiSpec,
     auth,
     auditLogDir,
+    appSettingsStore,
     authUserStore: authUserStore || undefined,
     apiSecurity
   })

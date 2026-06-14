@@ -50,35 +50,152 @@
             </div>
           </header>
           <div class="auth-divider" aria-hidden="true"></div>
-          <section class="auth-section" aria-labelledby="auth-section-title">
-            <h2 id="auth-section-title">Sign in to continue</h2>
-            <p>Use your local username and password to unlock the platform.</p>
+          <p id="auth-message" class="auth-message" aria-live="polite"></p>
+          <section id="auth-login-view" class="auth-view">
+            <section class="auth-section" aria-labelledby="auth-section-title">
+              <h2 id="auth-section-title">Sign in to continue</h2>
+              <p>Use your local username and password to unlock the platform.</p>
+            </section>
+            <form id="auth-form" class="auth-form" autocomplete="on">
+              <label class="auth-field" for="auth-username">
+                <span>Username</span>
+                <input
+                  id="auth-username"
+                  type="text"
+                  name="username"
+                  autocomplete="username"
+                  spellcheck="false"
+                  value="admin"
+                />
+              </label>
+              <label class="auth-field" for="auth-password">
+                <span>Password</span>
+                <input
+                  id="auth-password"
+                  type="password"
+                  name="password"
+                  autocomplete="current-password"
+                />
+              </label>
+              <button id="auth-submit" class="primary-button auth-submit" type="submit">
+                Sign in
+              </button>
+            </form>
           </section>
-          <form id="auth-form" class="auth-form" autocomplete="on">
-            <label class="auth-field" for="auth-username">
-              <span>Username</span>
-              <input
-                id="auth-username"
-                type="text"
-                name="username"
-                autocomplete="username"
-                spellcheck="false"
-                value="admin"
-              />
-            </label>
-            <label class="auth-field" for="auth-password">
-              <span>Password</span>
-              <input
-                id="auth-password"
-                type="password"
-                name="password"
-                autocomplete="current-password"
-              />
-            </label>
-            <button id="auth-submit" class="primary-button auth-submit" type="submit">
-              Sign in
-            </button>
-          </form>
+          <section id="auth-mfa-view" class="auth-view" hidden>
+            <section class="auth-section" aria-labelledby="auth-mfa-title">
+              <h2 id="auth-mfa-title">Verify your sign in</h2>
+              <p id="auth-mfa-description">Use your authenticator app or a recovery code to finish signing in.</p>
+            </section>
+            <form id="auth-mfa-form" class="auth-form" autocomplete="off">
+              <label class="auth-field" for="auth-mfa-code">
+                <span>Verification code</span>
+                <input
+                  id="auth-mfa-code"
+                  type="text"
+                  name="code"
+                  autocomplete="one-time-code"
+                  inputmode="numeric"
+                  spellcheck="false"
+                />
+              </label>
+              <button id="auth-mfa-submit" class="primary-button auth-submit" type="submit">
+                Verify code
+              </button>
+            </form>
+            <p class="auth-inline-note">You can enter a TOTP code or one of your recovery codes.</p>
+          </section>
+          <section id="auth-invite-view" class="auth-view" hidden>
+            <section class="auth-section" aria-labelledby="invite-title">
+              <h2 id="invite-title">Set your password</h2>
+              <p id="invite-summary">Your invite has been validated. Choose a password to continue.</p>
+            </section>
+            <div id="invite-details" class="invite-details" aria-live="polite"></div>
+            <form id="invite-form" class="auth-form" autocomplete="off">
+              <label class="auth-field" for="invite-password">
+                <span>Password</span>
+                <input
+                  id="invite-password"
+                  type="password"
+                  name="password"
+                  autocomplete="new-password"
+                />
+              </label>
+              <label class="auth-field" for="invite-confirm-password">
+                <span>Confirm password</span>
+                <input
+                  id="invite-confirm-password"
+                  type="password"
+                  name="confirmPassword"
+                  autocomplete="new-password"
+                />
+              </label>
+              <button id="invite-submit" class="primary-button auth-submit" type="submit">
+                Set password
+              </button>
+            </form>
+            <section id="invite-mfa-prompt" class="invite-step" hidden>
+              <div class="invite-step-head">
+                <h3>Set up MFA</h3>
+                <p>Optional, but recommended. You can scan a QR code or enter the setup key manually.</p>
+              </div>
+              <div class="invite-step-actions">
+                <button id="invite-mfa-start" class="primary-button" type="button">
+                  Set up MFA
+                </button>
+                <button id="invite-mfa-skip" class="ghost-button" type="button">
+                  Skip for now
+                </button>
+              </div>
+            </section>
+            <section id="invite-mfa-setup" class="invite-step invite-mfa-setup" hidden>
+              <div class="invite-step-head">
+                <h3>Scan the QR code</h3>
+                <p>Open your authenticator app and scan the code below, or enter the manual setup key.</p>
+              </div>
+              <div class="invite-mfa-grid">
+                <div class="invite-mfa-qr-wrap">
+                  <img id="invite-mfa-qr" class="invite-mfa-qr" alt="MFA setup QR code" />
+                </div>
+                <div class="invite-mfa-manual">
+                  <span class="field-label">Manual setup key</span>
+                  <code id="invite-mfa-secret" class="invite-mfa-secret"></code>
+                  <span class="field-hint invite-mfa-uri-hint" id="invite-mfa-uri"></span>
+                  <form id="invite-mfa-form" class="auth-form invite-mfa-form" autocomplete="off">
+                    <label class="auth-field" for="invite-mfa-code">
+                      <span>Verification code</span>
+                      <input
+                        id="invite-mfa-code"
+                        type="text"
+                        name="code"
+                        autocomplete="one-time-code"
+                        inputmode="numeric"
+                        spellcheck="false"
+                      />
+                    </label>
+                    <button id="invite-mfa-submit" class="primary-button auth-submit" type="submit">
+                      Verify code
+                    </button>
+                  </form>
+                </div>
+              </div>
+            </section>
+            <section id="invite-mfa-complete" class="invite-step invite-mfa-complete" hidden>
+              <div class="invite-step-head">
+                <h3>Save your recovery codes</h3>
+                <p>Keep these codes somewhere safe. They can be used if you lose access to your authenticator app.</p>
+              </div>
+              <div id="invite-mfa-recovery-list" class="recovery-code-list" aria-live="polite"></div>
+              <div class="invite-step-actions">
+                <button id="invite-mfa-download" class="ghost-button" type="button">
+                  Download recovery codes
+                </button>
+                <button id="invite-finish" class="primary-button" type="button">
+                  Continue to platform
+                </button>
+              </div>
+            </section>
+          </section>
           <p class="auth-footer">
             Developed by DigiVectra DevOps
             <br /><br />
@@ -87,6 +204,112 @@
         </div>
       </div>
     </section>
+
+    <div id="mfa-reminder-modal" class="modal-overlay" hidden>
+      <div class="modal-backdrop mfa-reminder-backdrop" aria-hidden="true"></div>
+      <section
+        class="modal-panel mfa-reminder-modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="mfa-reminder-title"
+      >
+        <header class="modal-header">
+          <div class="modal-header-copy">
+            <span class="modal-eyebrow">Security</span>
+            <h2 id="mfa-reminder-title">Set up MFA</h2>
+          </div>
+        </header>
+        <div class="modal-body mfa-reminder-body">
+          <p class="mfa-reminder-message">
+            This account does not have multi-factor authentication enabled. Add MFA to reduce the risk
+            of unauthorized access.
+          </p>
+          <div class="mfa-reminder-actions">
+            <button id="mfa-reminder-setup" class="primary-button" type="button">
+              Set up MFA
+            </button>
+            <button id="mfa-reminder-skip" class="ghost-button" type="button">
+              Skip for now
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div id="mfa-setup-modal" class="modal-overlay" hidden>
+      <button
+        class="modal-backdrop"
+        type="button"
+        data-action="close-mfa-setup"
+        aria-label="Close MFA setup"
+      ></button>
+      <section
+        class="modal-panel mfa-setup-modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="mfa-setup-title"
+      >
+        <header class="modal-header">
+          <div class="modal-header-copy">
+            <span class="modal-eyebrow">Security</span>
+            <h2 id="mfa-setup-title">Set up MFA</h2>
+          </div>
+          <button id="mfa-setup-close" class="ghost-button small modal-close" type="button">
+            Close
+          </button>
+        </header>
+        <div class="modal-body mfa-setup-body">
+          <div id="mfa-setup-message" class="mfa-setup-message" aria-live="polite"></div>
+          <section class="invite-step mfa-setup-step" aria-labelledby="mfa-setup-step-title">
+            <div class="invite-step-head">
+              <h3 id="mfa-setup-step-title">Scan the QR code</h3>
+              <p>Open your authenticator app and scan the code below, or enter the manual setup key.</p>
+            </div>
+            <div class="invite-mfa-grid">
+              <div class="invite-mfa-qr-wrap">
+                <img id="mfa-setup-qr" class="invite-mfa-qr" alt="MFA setup QR code" />
+              </div>
+              <div class="invite-mfa-manual">
+                <span class="field-label">Manual setup key</span>
+                <code id="mfa-setup-secret" class="invite-mfa-secret"></code>
+                <span class="field-hint invite-mfa-uri-hint" id="mfa-setup-uri"></span>
+                <form id="mfa-setup-form" class="auth-form invite-mfa-form" autocomplete="off">
+                  <label class="auth-field" for="mfa-setup-code">
+                    <span>Verification code</span>
+                    <input
+                      id="mfa-setup-code"
+                      type="text"
+                      name="code"
+                      autocomplete="one-time-code"
+                      inputmode="numeric"
+                      spellcheck="false"
+                    />
+                  </label>
+                  <button id="mfa-setup-submit" class="primary-button auth-submit" type="submit">
+                    Verify code
+                  </button>
+                </form>
+              </div>
+            </div>
+          </section>
+          <section id="mfa-setup-complete" class="invite-step invite-mfa-complete" hidden>
+            <div class="invite-step-head">
+              <h3>Save your recovery codes</h3>
+              <p>Keep these codes somewhere safe. They can be used if you lose access to your authenticator app.</p>
+            </div>
+            <div id="mfa-setup-recovery-list" class="recovery-code-list" aria-live="polite"></div>
+            <div class="invite-step-actions">
+              <button id="mfa-setup-download" class="ghost-button" type="button">
+                Download recovery codes
+              </button>
+              <button id="mfa-setup-finish" class="primary-button" type="button">
+                Continue to platform
+              </button>
+            </div>
+          </section>
+        </div>
+      </section>
+    </div>
 
     <div id="app-shell" class="app-shell" hidden>
       <header class="session-bar" aria-label="Authentication status">
@@ -114,12 +337,28 @@
             </button>
             <div id="settings-menu" class="settings-menu" hidden role="menu" aria-label="Settings menu">
               <button
+                id="setup-mfa-button"
+                class="settings-menu-item"
+                type="button"
+                role="menuitem"
+              >
+                Set up MFA
+              </button>
+              <button
                 id="manage-users-button"
                 class="settings-menu-item"
                 type="button"
                 role="menuitem"
               >
                 Manage users
+              </button>
+              <button
+                id="smtp-settings-button"
+                class="settings-menu-item"
+                type="button"
+                role="menuitem"
+              >
+                SMTP settings
               </button>
               <button
                 id="activity-log-button"
@@ -370,36 +609,37 @@
             Close
           </button>
         </header>
-        <div class="modal-body user-management-body">
-          <div class="user-management-sidebar">
-            <form id="user-management-form" class="auth-form user-management-form" autocomplete="off">
-              <label class="auth-field" for="user-management-username">
-                <span>Username</span>
-                <input
-                  id="user-management-username"
-                  type="text"
-                  name="username"
-                  autocomplete="off"
-                  spellcheck="false"
-                />
-              </label>
-              <label class="auth-field" for="user-management-password">
-                <span>Password</span>
-                <input
-                  id="user-management-password"
-                  type="password"
-                  name="password"
-                  autocomplete="new-password"
-                />
-              </label>
-              <button
-                id="user-management-submit"
-                class="primary-button user-management-submit"
-                type="submit"
-              >
-                Add user
-              </button>
-            </form>
+          <div class="modal-body user-management-body">
+            <div class="user-management-sidebar">
+              <form id="user-management-form" class="auth-form user-management-form" autocomplete="off">
+                <label class="auth-field" for="user-management-username">
+                  <span>Username</span>
+                  <input
+                    id="user-management-username"
+                    type="text"
+                    name="username"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                </label>
+                <label class="auth-field" for="user-management-email">
+                  <span>Email</span>
+                  <input
+                    id="user-management-email"
+                    type="email"
+                    name="email"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                </label>
+                <button
+                  id="user-management-submit"
+                  class="primary-button user-management-submit"
+                  type="submit"
+                >
+                  Invite user
+                </button>
+              </form>
             <div class="modal-section user-management-summary">
               <div class="panel-head slim">
                 <h3>User list</h3>
@@ -443,6 +683,124 @@
             <div id="user-activity-message" class="user-activity-message" aria-live="polite"></div>
             <div id="user-activity-list" class="activity-log-list user-activity-list" aria-live="polite"></div>
           </div>
+        </div>
+      </section>
+    </div>
+
+    <div id="smtp-settings-modal" class="modal-overlay" hidden>
+      <button
+        class="modal-backdrop"
+        type="button"
+        data-action="close-smtp-settings"
+        aria-label="Close SMTP settings"
+      ></button>
+      <section
+        class="modal-panel smtp-settings-modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="smtp-settings-title"
+      >
+        <header class="modal-header">
+          <div class="modal-header-copy">
+            <span class="modal-eyebrow">Settings</span>
+            <h2 id="smtp-settings-title">SMTP settings</h2>
+          </div>
+          <button id="smtp-settings-close" class="ghost-button small modal-close" type="button">
+            Close
+          </button>
+        </header>
+        <div class="modal-body smtp-settings-body">
+          <div id="smtp-settings-message" class="smtp-settings-message" aria-live="polite"></div>
+          <form id="smtp-settings-form" class="smtp-settings-form" autocomplete="off">
+            <div class="smtp-settings-grid">
+              <label class="smtp-toggle-row smtp-field-full">
+                <input id="smtp-settings-enabled" type="checkbox" name="enabled" />
+                <span>Enable SMTP notifications</span>
+              </label>
+              <label class="auth-field" for="smtp-settings-host">
+                <span>Host</span>
+                <input id="smtp-settings-host" type="text" name="host" autocomplete="off" spellcheck="false" />
+              </label>
+              <label class="auth-field" for="smtp-settings-port">
+                <span>Port</span>
+                <input id="smtp-settings-port" type="number" name="port" min="1" max="65535" />
+              </label>
+              <label class="smtp-toggle-row">
+                <input id="smtp-settings-secure" type="checkbox" name="secure" />
+                <span>Use secure connection</span>
+              </label>
+              <label class="auth-field" for="smtp-settings-username">
+                <span>Username</span>
+                <input
+                  id="smtp-settings-username"
+                  type="text"
+                  name="username"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+              <label class="auth-field" for="smtp-settings-password">
+                <span>Password</span>
+                <input
+                  id="smtp-settings-password"
+                  type="password"
+                  name="password"
+                  autocomplete="new-password"
+                />
+                <span id="smtp-password-hint" class="field-hint">
+                  Leave blank to keep the current password.
+                </span>
+              </label>
+              <label class="auth-field" for="smtp-settings-from-name">
+                <span>From name</span>
+                <input
+                  id="smtp-settings-from-name"
+                  type="text"
+                  name="fromName"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+              <label class="auth-field" for="smtp-settings-from-address">
+                <span>From address</span>
+                <input
+                  id="smtp-settings-from-address"
+                  type="email"
+                  name="fromAddress"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+              <label class="auth-field smtp-field-full" for="smtp-settings-reply-to">
+                <span>Reply-to</span>
+                <input
+                  id="smtp-settings-reply-to"
+                  type="email"
+                  name="replyTo"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+              <label class="auth-field smtp-field-full" for="smtp-test-recipient">
+                <span>Test recipient</span>
+                <input
+                  id="smtp-test-recipient"
+                  type="email"
+                  name="recipient"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+            </div>
+            <div class="smtp-settings-actions">
+              <button id="smtp-test-send" class="ghost-button small" type="button">
+                Send test email
+              </button>
+              <button id="smtp-settings-submit" class="primary-button" type="submit">
+                Save settings
+              </button>
+            </div>
+          </form>
         </div>
       </section>
     </div>

@@ -2,6 +2,8 @@ import express from 'express'
 import * as fs from 'fs'
 import * as path from 'path'
 import { randomBytes } from 'crypto'
+import nodemailer from 'nodemailer'
+import QRCode from 'qrcode'
 import { API_ROUTES } from './apiRoutes'
 import {
   type AuditActor,
@@ -10,6 +12,18 @@ import {
   createFileAuditLogStore
 } from './auditLog'
 import {
+  buildSmtpSettingsView,
+  type AppSettingsStore,
+  type SmtpSettingsInput,
+  type SmtpSettingsRecord,
+  createMemoryAppSettingsStore,
+  mergeSmtpSettings,
+  normalizeSmtpSettingsInput
+} from './appSettings'
+import {
+  type AuthInviteResult,
+  type AuthMfaCompletionResult,
+  type AuthMfaSetupResult,
   type AuthUserListItem,
   type AuthUserStore,
   createMemoryAuthUserStore
@@ -77,8 +91,10 @@ export interface CreatePstReviewAppOptions {
   pstRootDir?: string
   auth?: AppAuthConfig
   authUserStore?: AuthUserStore
+  appSettingsStore?: AppSettingsStore
   auditLogDir?: string
   apiSecurity?: ApiSecurityConfig
+  smtpTransportFactory?: SmtpTransportFactory
 }
 
 export interface AppAuthConfig {
@@ -86,6 +102,9 @@ export interface AppAuthConfig {
   password: string
   sessionTtlMinutes?: number
   cookieName?: string
+  inviteTtlMinutes?: number
+  mfaIssuer?: string
+  publicBaseUrl?: string
 }
 
 interface RequestInfoLike {
@@ -118,12 +137,22 @@ interface AuthSessionRecord {
   token: string
   username: string
   expiresAt: number
+  mfaEnabled: boolean
+}
+
+interface AuthMfaChallengeRecord {
+  token: string
+  username: string
+  expiresAt: number
 }
 
 interface AuthStatusResponse {
   authenticated: boolean
   enabled: boolean
   canManageUsers: boolean
+  mfaEnabled: boolean
+  mfaRequired: boolean
+  mfaChallengeExpiresAt: string | null
   user: {
     username: string
   } | null
@@ -136,15 +165,77 @@ interface AuthUsersResponse {
 
 interface AuthUserCreateResponse {
   user: AuthUserListItem
+  inviteUrl?: string
+  emailSent?: boolean
+  inviteExpiresAt?: string
 }
 
 interface AuthUserDeleteResponse {
   user: AuthUserListItem
 }
 
+interface AuthInviteLookupResponse {
+  invite: AuthUserListItem
+}
+
+interface AuthInviteAcceptResponse {
+  user: AuthUserListItem
+  mfaAvailable: boolean
+}
+
+interface AuthMfaStartResponse {
+  user: AuthUserListItem
+  secret: string
+  otpauthUri: string
+  qrCodeDataUrl: string
+}
+
+interface AuthMfaCompleteResponse {
+  user: AuthUserListItem
+  recoveryCodes: string[]
+}
+
 interface ActivityLogResponse {
   entries: AuditLogEntry[]
 }
+
+interface SmtpSettingsResponse {
+  settings: ReturnType<typeof buildSmtpSettingsView>
+}
+
+interface SmtpTestRequestBody {
+  recipient?: string
+  enabled?: boolean
+  host?: string
+  port?: number | string
+  secure?: boolean
+  username?: string
+  password?: string
+  fromName?: string
+  fromAddress?: string
+  replyTo?: string
+}
+
+interface SmtpTestResponse {
+  success: boolean
+  recipient: string
+  messageId: string
+  accepted: string[]
+  rejected: string[]
+}
+
+interface SmtpTransportSendResult {
+  messageId?: string
+  accepted?: string[]
+  rejected?: string[]
+}
+
+interface SmtpTransportLike {
+  sendMail(message: Record<string, unknown>): Promise<SmtpTransportSendResult>
+  close?: () => void | Promise<void>
+}
+
+type SmtpTransportFactory = (settings: SmtpSettingsRecord) => SmtpTransportLike
 
 interface SessionRecord {
   id: string
@@ -291,7 +382,10 @@ const DEFAULT_SWAGGER_ASSET_PATH = path.dirname(
   require.resolve('swagger-ui-dist/swagger-ui.css')
 )
 const DEFAULT_AUTH_SESSION_COOKIE = 'pst-review-session'
+const DEFAULT_AUTH_MFA_CHALLENGE_COOKIE_SUFFIX = '-mfa-challenge'
 const DEFAULT_AUTH_SESSION_TTL_MINUTES = 180
+const DEFAULT_AUTH_INVITE_TTL_MINUTES = 24 * 60
+const DEFAULT_AUTH_MFA_ISSUER = 'PST Mail Explorer'
 const DEFAULT_AUTH_BYPASS_IPS = ['127.0.0.1', '::1', '::ffff:127.0.0.1', 'localhost']
 const DEFAULT_CORS_ALLOW_HEADERS = [
   'Accept',
@@ -398,6 +492,9 @@ function normalizeAuthConfig(auth?: AppAuthConfig): {
   username: string
   sessionTtlMinutes: number
   cookieName: string
+  inviteTtlMinutes: number
+  mfaIssuer: string
+  publicBaseUrl: string
   seedUsers: Array<{ username: string; password: string }>
 } {
   if (!auth) {
@@ -406,6 +503,9 @@ function normalizeAuthConfig(auth?: AppAuthConfig): {
       username: '',
       sessionTtlMinutes: DEFAULT_AUTH_SESSION_TTL_MINUTES,
       cookieName: DEFAULT_AUTH_SESSION_COOKIE,
+      inviteTtlMinutes: DEFAULT_AUTH_INVITE_TTL_MINUTES,
+      mfaIssuer: DEFAULT_AUTH_MFA_ISSUER,
+      publicBaseUrl: '',
       seedUsers: []
     }
   }
@@ -426,6 +526,12 @@ function normalizeAuthConfig(auth?: AppAuthConfig): {
     username,
     sessionTtlMinutes,
     cookieName: normalizeText(auth.cookieName) || DEFAULT_AUTH_SESSION_COOKIE,
+    inviteTtlMinutes:
+      Number.isFinite(auth.inviteTtlMinutes) && Number(auth.inviteTtlMinutes) > 0
+        ? Number(auth.inviteTtlMinutes)
+        : DEFAULT_AUTH_INVITE_TTL_MINUTES,
+    mfaIssuer: normalizeText(auth.mfaIssuer) || DEFAULT_AUTH_MFA_ISSUER,
+    publicBaseUrl: normalizeOrigin(auth.publicBaseUrl),
     seedUsers: [{ username, password }]
   }
 }
@@ -513,7 +619,10 @@ function isPublicApiPath(pathname: string): boolean {
     pathname.startsWith(`${API_ROUTES.docs}/`) ||
     pathname === API_ROUTES.authLogin ||
     pathname === API_ROUTES.authMe ||
-    pathname === API_ROUTES.authLogout
+    pathname === API_ROUTES.authLogout ||
+    pathname.startsWith(`${API_ROUTES.authInviteLookup.split('/:token')[0]}`) ||
+    pathname.startsWith(`${API_ROUTES.authInviteAccept.split('/:token')[0]}`) ||
+    pathname === API_ROUTES.authMfaChallenge
   )
 }
 
@@ -521,7 +630,8 @@ function isAuthApiPath(pathname: string): boolean {
   return (
     pathname === API_ROUTES.authLogin ||
     pathname === API_ROUTES.authMe ||
-    pathname === API_ROUTES.authLogout
+    pathname === API_ROUTES.authLogout ||
+    pathname === API_ROUTES.authMfaChallenge
   )
 }
 
@@ -1216,6 +1326,31 @@ function safeDownloadName(name: string, fallback: string): string {
   return sanitizeFileNameForDownload(name || fallback, fallback)
 }
 
+function buildSmtpFromAddress(settings: SmtpSettingsRecord): string {
+  const fromAddress = normalizeText(settings.fromAddress)
+  const fromName = normalizeText(settings.fromName).replace(/"/g, '\\"')
+  if (!fromName) {
+    return fromAddress
+  }
+
+  return `${fromName} <${fromAddress}>`
+}
+
+function createDefaultSmtpTransport(settings: SmtpSettingsRecord): SmtpTransportLike {
+  return nodemailer.createTransport({
+    host: normalizeText(settings.host),
+    port: Number(settings.port) || 587,
+    secure: Boolean(settings.secure),
+    auth:
+      normalizeText(settings.username) || normalizeText(settings.password)
+        ? {
+            user: normalizeText(settings.username),
+            pass: normalizeText(settings.password)
+          }
+        : undefined
+  }) as unknown as SmtpTransportLike
+}
+
 export function createPstReviewApp(options: CreatePstReviewAppOptions): express.Express {
   const app = express()
   const sessions = new Map<string, SessionRecord>()
@@ -1225,8 +1360,12 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   const searchIndexStore = options.searchIndexStore
   const authConfig = normalizeAuthConfig(options.auth)
   const authUserStore = options.authUserStore || createMemoryAuthUserStore(authConfig.seedUsers)
+  const appSettingsStore = options.appSettingsStore || createMemoryAppSettingsStore()
   const auditLogStore = options.auditLogDir ? createFileAuditLogStore(options.auditLogDir) : null
+  const smtpTransportFactory: SmtpTransportFactory =
+    options.smtpTransportFactory || createDefaultSmtpTransport
   const authSessions = new Map<string, AuthSessionRecord>()
+  const authMfaChallenges = new Map<string, AuthMfaChallengeRecord>()
 
   function getRequestPathname(req: express.Request): string {
     return (req.originalUrl || req.url || '').split('?')[0] || ''
@@ -1355,6 +1494,10 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     return `activity-log-${safeSegment || 'user'}.csv`
   }
 
+  function getAuthMfaChallengeCookieName(): string {
+    return `${authConfig.cookieName}${DEFAULT_AUTH_MFA_CHALLENGE_COOKIE_SUFFIX}`
+  }
+
   function cleanupExpiredAuthSessions(): void {
     if (!authConfig.enabled) {
       return
@@ -1364,6 +1507,11 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     for (const [token, session] of authSessions.entries()) {
       if (session.expiresAt <= now) {
         authSessions.delete(token)
+      }
+    }
+    for (const [token, challenge] of authMfaChallenges.entries()) {
+      if (challenge.expiresAt <= now) {
+        authMfaChallenges.delete(token)
       }
     }
   }
@@ -1392,23 +1540,72 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     return session
   }
 
-  function buildAuthStatus(session: AuthSessionRecord | null): AuthStatusResponse {
+  function getAuthMfaChallengeFromRequest(req: express.Request): AuthMfaChallengeRecord | null {
+    if (!authConfig.enabled) {
+      return null
+    }
+
+    cleanupExpiredAuthSessions()
+    const token = getCookieValue(req, getAuthMfaChallengeCookieName())
+    if (!token) {
+      return null
+    }
+
+    const challenge = authMfaChallenges.get(token) || null
+    if (!challenge) {
+      return null
+    }
+
+    if (challenge.expiresAt <= Date.now()) {
+      authMfaChallenges.delete(token)
+      return null
+    }
+
+    return challenge
+  }
+
+  function buildAuthStatus(
+    session: AuthSessionRecord | null,
+    challenge: AuthMfaChallengeRecord | null = null,
+    mfaEnabled = false
+  ): AuthStatusResponse {
     const canManageUsers = isAdminAuthSession(session, authConfig)
     if (!authConfig.enabled) {
       return {
         authenticated: true,
         enabled: false,
         canManageUsers: false,
+        mfaEnabled: false,
+        mfaRequired: false,
+        mfaChallengeExpiresAt: null,
         user: null,
         expiresAt: null
       }
     }
 
     if (!session) {
+      if (challenge) {
+        return {
+          authenticated: false,
+          enabled: true,
+          canManageUsers: false,
+          mfaEnabled: false,
+          mfaRequired: true,
+          mfaChallengeExpiresAt: new Date(challenge.expiresAt).toISOString(),
+          user: {
+            username: challenge.username
+          },
+          expiresAt: null
+        }
+      }
+
       return {
         authenticated: false,
         enabled: true,
         canManageUsers,
+        mfaEnabled: false,
+        mfaRequired: false,
+        mfaChallengeExpiresAt: null,
         user: null,
         expiresAt: null
       }
@@ -1418,6 +1615,9 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       authenticated: true,
       enabled: true,
       canManageUsers,
+      mfaEnabled: Boolean(mfaEnabled),
+      mfaRequired: false,
+      mfaChallengeExpiresAt: null,
       user: {
         username: session.username
       },
@@ -1425,14 +1625,47 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     }
   }
 
-  function createAuthSession(username: string): AuthSessionRecord {
+  function createAuthSession(username: string, mfaEnabled = false): AuthSessionRecord {
     const session: AuthSessionRecord = {
       token: randomBytes(24).toString('hex'),
       username,
-      expiresAt: Date.now() + authConfig.sessionTtlMinutes * 60 * 1000
+      expiresAt: Date.now() + authConfig.sessionTtlMinutes * 60 * 1000,
+      mfaEnabled: Boolean(mfaEnabled)
     }
     authSessions.set(session.token, session)
     return session
+  }
+
+  function updateAuthSessionsMfaEnabled(username: string, mfaEnabled: boolean): number {
+    if (!authConfig.enabled) {
+      return 0
+    }
+
+    const normalizedUsername = normalizeAuthUsernameKey(username)
+    if (!normalizedUsername) {
+      return 0
+    }
+
+    let updatedCount = 0
+    for (const session of authSessions.values()) {
+      if (normalizeAuthUsernameKey(session.username) !== normalizedUsername) {
+        continue
+      }
+      session.mfaEnabled = Boolean(mfaEnabled)
+      updatedCount += 1
+    }
+
+    return updatedCount
+  }
+
+  function createAuthMfaChallenge(username: string): AuthMfaChallengeRecord {
+    const challenge: AuthMfaChallengeRecord = {
+      token: randomBytes(24).toString('hex'),
+      username,
+      expiresAt: Date.now() + 10 * 60 * 1000
+    }
+    authMfaChallenges.set(challenge.token, challenge)
+    return challenge
   }
 
   function clearAuthSession(req: express.Request): void {
@@ -1443,6 +1676,17 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     const token = getCookieValue(req, authConfig.cookieName)
     if (token) {
       authSessions.delete(token)
+    }
+  }
+
+  function clearAuthMfaChallenge(req: express.Request): void {
+    if (!authConfig.enabled) {
+      return
+    }
+
+    const token = getCookieValue(req, getAuthMfaChallengeCookieName())
+    if (token) {
+      authMfaChallenges.delete(token)
     }
   }
 
@@ -1462,6 +1706,28 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         continue
       }
       authSessions.delete(token)
+      revokedCount += 1
+    }
+
+    return revokedCount
+  }
+
+  function revokeAuthMfaChallengesForUsername(username: string): number {
+    if (!authConfig.enabled) {
+      return 0
+    }
+
+    const normalizedUsername = normalizeAuthUsernameKey(username)
+    if (!normalizedUsername) {
+      return 0
+    }
+
+    let revokedCount = 0
+    for (const [token, challenge] of authMfaChallenges.entries()) {
+      if (normalizeAuthUsernameKey(challenge.username) !== normalizedUsername) {
+        continue
+      }
+      authMfaChallenges.delete(token)
       revokedCount += 1
     }
 
@@ -1491,6 +1757,127 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       path: '/',
       sameSite: 'lax'
     })
+  }
+
+  function setAuthMfaChallengeCookie(
+    res: express.Response,
+    req: express.Request,
+    challenge: AuthMfaChallengeRecord
+  ): void {
+    if (!authConfig.enabled) {
+      return
+    }
+
+    res.cookie(getAuthMfaChallengeCookieName(), challenge.token, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: Boolean(req.secure || String(req.headers['x-forwarded-proto'] || '').split(',')[0] === 'https'),
+      path: '/',
+      maxAge: 10 * 60 * 1000
+    })
+  }
+
+  function clearAuthMfaChallengeCookie(res: express.Response): void {
+    if (!authConfig.enabled) {
+      return
+    }
+
+    res.clearCookie(getAuthMfaChallengeCookieName(), {
+      path: '/',
+      sameSite: 'lax'
+    })
+  }
+
+  function getRequestBaseOrigin(req: express.Request): string {
+    const info = getRequestInfo(req, options.apiSecurity?.webChecks)
+    const requestOrigin = normalizeOrigin(info.origin || req.headers.origin || '')
+    if (requestOrigin) {
+      return requestOrigin
+    }
+
+    const forwardedProto = normalizeText(req.headers['x-forwarded-proto'] || '')
+      .split(',')[0]
+      .trim()
+    const protocol = forwardedProto || req.protocol || 'http'
+    const forwardedHost = normalizeText(req.headers['x-forwarded-host'] || '')
+    const host = forwardedHost || normalizeText(req.headers.host || '')
+    if (!host) {
+      return ''
+    }
+
+    return normalizeOrigin(`${protocol}://${host}`)
+  }
+
+  function buildInvitePath(token: string): string {
+    return `/invite/${encodeURIComponent(token)}`
+  }
+
+  function buildInviteUrl(req: express.Request, token: string): string {
+    const origin =
+      normalizeOrigin(authConfig.publicBaseUrl) || getRequestBaseOrigin(req) || canonicalRequestOrigin(req)
+    const path = buildInvitePath(token)
+    return origin ? `${origin}${path}` : path
+  }
+
+  function buildInviteEmailText(input: {
+    username: string
+    inviteUrl: string
+    inviteExpiresAt: string
+  }): string {
+    return [
+      `You have been invited to PST Mail Explorer as ${input.username}.`,
+      '',
+      `Set your password here: ${input.inviteUrl}`,
+      '',
+      `This invite expires at ${input.inviteExpiresAt}.`,
+      '',
+      'If you were not expecting this invite, you can ignore this email.'
+    ].join('\n')
+  }
+
+  async function sendInviteEmail(input: {
+    recipientEmail: string
+    username: string
+    inviteUrl: string
+    inviteExpiresAt: string
+    req: express.Request
+  }): Promise<{ emailSent: boolean; error?: string }> {
+    try {
+      const settings = await appSettingsStore.getSmtpSettings()
+      if (
+        !settings.enabled ||
+        !normalizeText(settings.host) ||
+        !normalizeText(settings.fromAddress)
+      ) {
+        return { emailSent: false, error: 'SMTP is not configured' }
+      }
+
+      const transporter = smtpTransportFactory(settings)
+      try {
+        await transporter.sendMail({
+          from: buildSmtpFromAddress(settings),
+          to: input.recipientEmail,
+          subject: 'PST Mail Explorer invitation',
+          text: buildInviteEmailText({
+            username: input.username,
+            inviteUrl: input.inviteUrl,
+            inviteExpiresAt: input.inviteExpiresAt
+          })
+        })
+        return { emailSent: true }
+      } finally {
+        try {
+          await transporter.close?.()
+        } catch {
+          // Ignore transport close failures.
+        }
+      }
+    } catch (error) {
+      return {
+        emailSent: false,
+        error: error instanceof Error ? error.message : String(error)
+      }
+    }
   }
 
   function createAuthGateMiddleware(): express.RequestHandler {
@@ -1615,16 +2002,21 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     res.status(200).type('html').send(buildDocsHtml())
   })
 
+  app.get('/invite/:token', (_req, res) => {
+    res.status(200).sendFile(path.join(publicDir, 'index.html'))
+  })
+
   app.get(API_ROUTES.authMe, (req, res) => {
     try {
       res.set('Cache-Control', 'no-store')
       const session = getAuthSessionFromRequest(req)
-      if (!authConfig.enabled && !session) {
+      const challenge = session ? null : getAuthMfaChallengeFromRequest(req)
+      if (!authConfig.enabled && !session && !challenge) {
         responseJson(res, 200, buildAuthStatus(null))
         return
       }
 
-      if (!session) {
+      if (!session && !challenge) {
         responseJson(res, 401, {
           ...buildAuthStatus(null),
           error: 'Authentication required'
@@ -1632,7 +2024,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         return
       }
 
-      responseJson(res, 200, buildAuthStatus(session))
+      responseJson(res, 200, buildAuthStatus(session, challenge, session?.mfaEnabled ?? false))
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
@@ -1672,7 +2064,24 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         return
       }
 
-      const session = createAuthSession(user.username)
+      if (user.mfaEnabled) {
+        const challenge = createAuthMfaChallenge(user.username)
+        setAuthMfaChallengeCookie(res, req, challenge)
+        recordAuditEvent({
+          req,
+          actor: buildAuditActor(null, user.username),
+          action: 'auth.login',
+          target: user.username,
+          outcome: 'success',
+          metadata: {
+            mfaRequired: true
+          }
+        })
+        responseJson(res, 200, buildAuthStatus(null, challenge))
+        return
+      }
+
+      const session = createAuthSession(user.username, Boolean(user.mfaEnabled))
       setAuthCookie(res, req, session)
       recordAuditEvent({
         req,
@@ -1681,7 +2090,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         target: user.username,
         outcome: 'success'
       })
-      responseJson(res, 200, buildAuthStatus(session))
+      responseJson(res, 200, buildAuthStatus(session, null, Boolean(user.mfaEnabled)))
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
@@ -1692,6 +2101,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       res.set('Cache-Control', 'no-store')
       if (authConfig.enabled) {
         const session = getAuthSessionFromRequest(req)
+        const challenge = getAuthMfaChallengeFromRequest(req)
         if (session) {
           recordAuditEvent({
             req,
@@ -1702,7 +2112,9 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           })
         }
         clearAuthSession(req)
+        clearAuthMfaChallenge(req)
         clearAuthCookie(res)
+        clearAuthMfaChallengeCookie(res)
       }
       responseJson(res, 200, buildAuthStatus(null))
     } catch (error) {
@@ -1794,11 +2206,50 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         return
       }
 
-      const body = (req.body || {}) as { username?: string; password?: string }
-      const user = await authUserStore.addUser(
-        normalizeAuthUsername(body.username),
-        String(body.password ?? '')
-      )
+      const body = (req.body || {}) as {
+        username?: string
+        password?: string
+        email?: string
+        recipientEmail?: string
+      }
+      const username = normalizeAuthUsername(body.username)
+      const recipientEmail = normalizeText(body.recipientEmail || body.email)
+      if (recipientEmail) {
+        const result = await authUserStore.createInvite(
+          username,
+          recipientEmail,
+          authConfig.inviteTtlMinutes
+        )
+        const inviteUrl = buildInviteUrl(req, result.inviteToken)
+        const emailResult = await sendInviteEmail({
+          recipientEmail,
+          username: result.user.username,
+          inviteUrl,
+          inviteExpiresAt: result.inviteExpiresAt,
+          req
+        })
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.invite.create',
+          target: result.user.username,
+          outcome: 'success',
+          metadata: {
+            recipientEmail,
+            inviteExpiresAt: result.inviteExpiresAt,
+            emailSent: emailResult.emailSent
+          }
+        })
+        responseJson(res, 200, {
+          user: result.user,
+          inviteUrl,
+          emailSent: emailResult.emailSent,
+          inviteExpiresAt: result.inviteExpiresAt
+        } satisfies AuthUserCreateResponse)
+        return
+      }
+
+      const user = await authUserStore.addUser(username, String(body.password ?? ''))
       recordAuditEvent({
         req,
         session,
@@ -1890,6 +2341,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       }
 
       const revokedSessions = revokeAuthSessionsForUsername(user.username)
+      const revokedChallenges = revokeAuthMfaChallengesForUsername(user.username)
       recordAuditEvent({
         req,
         session,
@@ -1897,13 +2349,718 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         target: user.username,
         outcome: 'success',
         metadata: {
-          revokedSessions
+          revokedSessions,
+          revokedChallenges
         }
       })
       responseJson(res, 200, {
         user
       } satisfies AuthUserDeleteResponse)
     } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.post(API_ROUTES.authUserInviteResend, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        throw createAppError(400, 'Authentication is disabled')
+      }
+
+      const session = getAuthSessionFromRequest(req)
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      if (!isAdminAuthSession(session, authConfig)) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.invite.resend',
+          target: normalizeAuthUsername(req.params.username) || 'local users',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Admin access required'
+        })
+        return
+      }
+
+      const targetUsername = normalizeAuthUsername(req.params.username)
+      if (!targetUsername) {
+        responseJson(res, 400, {
+          error: 'Username is required'
+        })
+        return
+      }
+
+      const result = await authUserStore.resendInvite(targetUsername, authConfig.inviteTtlMinutes)
+      if (!result) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.invite.resend',
+          target: targetUsername,
+          outcome: 'denied',
+          metadata: {
+            reason: 'User not found'
+          }
+        })
+        responseJson(res, 404, {
+          error: 'User not found'
+        })
+        return
+      }
+
+      const inviteUrl = buildInviteUrl(req, result.inviteToken)
+      const emailResult = await sendInviteEmail({
+        recipientEmail: result.user.recipientEmail,
+        username: result.user.username,
+        inviteUrl,
+        inviteExpiresAt: result.inviteExpiresAt,
+        req
+      })
+      recordAuditEvent({
+        req,
+        session,
+        action: 'auth.users.invite.resend',
+        target: result.user.username,
+        outcome: 'success',
+        metadata: {
+          recipientEmail: result.user.recipientEmail,
+          inviteExpiresAt: result.inviteExpiresAt,
+          emailSent: emailResult.emailSent
+        }
+      })
+      responseJson(res, 200, {
+        user: result.user,
+        inviteUrl,
+        emailSent: emailResult.emailSent,
+        inviteExpiresAt: result.inviteExpiresAt
+      } satisfies AuthUserCreateResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.delete(API_ROUTES.authUserInvite, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        throw createAppError(400, 'Authentication is disabled')
+      }
+
+      const session = getAuthSessionFromRequest(req)
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      if (!isAdminAuthSession(session, authConfig)) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.invite.revoke',
+          target: normalizeAuthUsername(req.params.username) || 'local users',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Admin access required'
+        })
+        return
+      }
+
+      const targetUsername = normalizeAuthUsername(req.params.username)
+      if (!targetUsername) {
+        responseJson(res, 400, {
+          error: 'Username is required'
+        })
+        return
+      }
+
+      const user = await authUserStore.revokeInvite(targetUsername)
+      if (!user) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.invite.revoke',
+          target: targetUsername,
+          outcome: 'denied',
+          metadata: {
+            reason: 'User not found'
+          }
+        })
+        responseJson(res, 404, {
+          error: 'User not found'
+        })
+        return
+      }
+
+      recordAuditEvent({
+        req,
+        session,
+        action: 'auth.users.invite.revoke',
+        target: user.username,
+        outcome: 'success'
+      })
+      responseJson(res, 200, {
+        user
+      } satisfies AuthUserDeleteResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.post(API_ROUTES.authUserMfaReset, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        throw createAppError(400, 'Authentication is disabled')
+      }
+
+      const session = getAuthSessionFromRequest(req)
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      if (!isAdminAuthSession(session, authConfig)) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.mfa.reset',
+          target: normalizeAuthUsername(req.params.username) || 'local users',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Admin access required'
+        })
+        return
+      }
+
+      const targetUsername = normalizeAuthUsername(req.params.username)
+      if (!targetUsername) {
+        responseJson(res, 400, {
+          error: 'Username is required'
+        })
+        return
+      }
+
+      const user = await authUserStore.resetMfa(targetUsername)
+      if (!user) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.mfa.reset',
+          target: targetUsername,
+          outcome: 'denied',
+          metadata: {
+            reason: 'User not found'
+          }
+        })
+        responseJson(res, 404, {
+          error: 'User not found'
+        })
+        return
+      }
+
+      const revokedSessions = revokeAuthSessionsForUsername(user.username)
+      const revokedChallenges = revokeAuthMfaChallengesForUsername(user.username)
+      recordAuditEvent({
+        req,
+        session,
+        action: 'auth.users.mfa.reset',
+        target: user.username,
+        outcome: 'success',
+        metadata: {
+          revokedSessions,
+          revokedChallenges
+        }
+      })
+      responseJson(res, 200, {
+        user
+      } satisfies AuthUserDeleteResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.authInviteLookup, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        responseJson(res, 400, {
+          error: 'Authentication is disabled'
+        })
+        return
+      }
+
+      const token = normalizeText(req.params.token)
+      if (!token) {
+        responseJson(res, 400, {
+          error: 'Invite token is required'
+        })
+        return
+      }
+
+      const invite = await authUserStore.getInviteByToken(token)
+      if (!invite) {
+        responseJson(res, 404, {
+          error: 'Invite not found'
+        })
+        return
+      }
+
+      responseJson(res, 200, {
+        invite
+      } satisfies AuthInviteLookupResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.post(API_ROUTES.authInviteAccept, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        throw createAppError(400, 'Authentication is disabled')
+      }
+
+      const token = normalizeText(req.params.token)
+      if (!token) {
+        responseJson(res, 400, {
+          error: 'Invite token is required'
+        })
+        return
+      }
+
+      const body = (req.body || {}) as { password?: string; confirmPassword?: string }
+      const password = String(body.password ?? '')
+      const confirmPassword = String(body.confirmPassword ?? '')
+      if (confirmPassword && password !== confirmPassword) {
+        responseJson(res, 400, {
+          error: 'Passwords do not match'
+        })
+        return
+      }
+
+      const user = await authUserStore.acceptInvite(token, password)
+      const session = createAuthSession(user.username, Boolean(user.mfaEnabled))
+      setAuthCookie(res, req, session)
+      recordAuditEvent({
+        req,
+        actor: buildAuditActor(session, user.username),
+        action: 'auth.invite.accept',
+        target: user.username,
+        outcome: 'success',
+        metadata: {
+          mfaEnabled: Boolean(user.mfaEnabled)
+        }
+      })
+      responseJson(res, 200, {
+        user,
+        mfaAvailable: !Boolean(user.mfaEnabled)
+      } satisfies AuthInviteAcceptResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.post(API_ROUTES.authMfaChallenge, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        responseJson(res, 200, buildAuthStatus(null))
+        return
+      }
+
+      const challenge = getAuthMfaChallengeFromRequest(req)
+      if (!challenge) {
+        responseJson(res, 401, {
+          error: 'MFA challenge required'
+        })
+        return
+      }
+
+      const body = (req.body || {}) as { code?: string }
+      const code = String(body.code ?? '')
+      const user = await authUserStore.verifyMfaChallenge(challenge.username, code)
+      if (!user) {
+        recordAuditEvent({
+          req,
+          actor: {
+            username: challenge.username,
+            authenticated: false,
+            admin: false
+          },
+          action: 'auth.mfa.challenge',
+          target: challenge.username,
+          outcome: 'denied',
+          metadata: {
+            reason: 'Invalid verification code'
+          }
+        })
+        responseJson(res, 401, {
+          error: 'Invalid verification code'
+        })
+        return
+      }
+
+      const session = createAuthSession(user.username, Boolean(user.mfaEnabled))
+      setAuthCookie(res, req, session)
+      clearAuthMfaChallenge(req)
+      clearAuthMfaChallengeCookie(res)
+      recordAuditEvent({
+        req,
+        actor: buildAuditActor(session, user.username),
+        action: 'auth.mfa.challenge',
+        target: user.username,
+        outcome: 'success'
+      })
+      responseJson(res, 200, buildAuthStatus(session, null, Boolean(user.mfaEnabled)))
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.post(API_ROUTES.authMfaEnrollmentStart, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      const session = getAuthSessionFromRequest(req)
+      if (!authConfig.enabled) {
+        throw createAppError(400, 'Authentication is disabled')
+      }
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      const result = await authUserStore.startMfaEnrollment(session.username, authConfig.mfaIssuer)
+      const qrCodeDataUrl = await QRCode.toDataURL(result.otpauthUri, {
+        margin: 1,
+        width: 240
+      })
+      recordAuditEvent({
+        req,
+        session,
+        action: 'auth.mfa.enroll.start',
+        target: session.username,
+        outcome: 'success'
+      })
+      responseJson(res, 200, {
+        user: result.user,
+        secret: result.secret,
+        otpauthUri: result.otpauthUri,
+        qrCodeDataUrl
+      } satisfies AuthMfaStartResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.post(API_ROUTES.authMfaEnrollmentComplete, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      const session = getAuthSessionFromRequest(req)
+      if (!authConfig.enabled) {
+        throw createAppError(400, 'Authentication is disabled')
+      }
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      const body = (req.body || {}) as { code?: string }
+      const code = String(body.code ?? '')
+      const result = await authUserStore.completeMfaEnrollment(session.username, code)
+      updateAuthSessionsMfaEnabled(session.username, true)
+      recordAuditEvent({
+        req,
+        session,
+        action: 'auth.mfa.enroll.complete',
+        target: session.username,
+        outcome: 'success',
+        metadata: {
+          recoveryCodeCount: result.recoveryCodes.length
+        }
+      })
+      responseJson(res, 200, {
+        user: result.user,
+        recoveryCodes: result.recoveryCodes
+      } satisfies AuthMfaCompleteResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.smtpSettings, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        responseJson(res, 400, {
+          error: 'Authentication is disabled'
+        })
+        return
+      }
+
+      const session = getAuthSessionFromRequest(req)
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      if (!isAdminAuthSession(session, authConfig)) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'settings.smtp.read',
+          target: 'smtp settings',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Admin access required'
+        })
+        return
+      }
+
+      responseJson(res, 200, {
+        settings: buildSmtpSettingsView(await appSettingsStore.getSmtpSettings())
+      } satisfies SmtpSettingsResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.put(API_ROUTES.smtpSettings, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        responseJson(res, 400, {
+          error: 'Authentication is disabled'
+        })
+        return
+      }
+
+      const session = getAuthSessionFromRequest(req)
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      if (!isAdminAuthSession(session, authConfig)) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'settings.smtp.update',
+          target: 'smtp settings',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Admin access required'
+        })
+        return
+      }
+
+      const body = normalizeSmtpSettingsInput((req.body || {}) as SmtpSettingsInput)
+      const updated = await appSettingsStore.updateSmtpSettings(body)
+      recordAuditEvent({
+        req,
+        session,
+        action: 'settings.smtp.update',
+        target: updated.fromAddress || updated.host || 'smtp settings',
+        outcome: 'success',
+        metadata: {
+          enabled: updated.enabled,
+          host: updated.host,
+          port: updated.port,
+          secure: updated.secure,
+          username: updated.username,
+          fromName: updated.fromName,
+          fromAddress: updated.fromAddress,
+          replyTo: updated.replyTo,
+          hasPassword: Boolean(updated.password)
+        }
+      })
+      responseJson(res, 200, {
+        settings: buildSmtpSettingsView(updated)
+      } satisfies SmtpSettingsResponse)
+    } catch (error) {
+      const session = getAuthSessionFromRequest(req)
+      if (session) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'settings.smtp.update',
+          target: 'smtp settings',
+          outcome: 'failure',
+          metadata: {
+            reason: error instanceof Error ? error.message : String(error)
+          }
+        })
+      }
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.post(API_ROUTES.smtpSettingsTest, async (req, res) => {
+    let session: AuthSessionRecord | null = null
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        responseJson(res, 400, {
+          error: 'Authentication is disabled'
+        })
+        return
+      }
+
+      session = getAuthSessionFromRequest(req)
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      if (!isAdminAuthSession(session, authConfig)) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'settings.smtp.test',
+          target: 'smtp settings',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Admin access required'
+        })
+        return
+      }
+
+      const rawBody = (req.body || {}) as SmtpTestRequestBody
+      const body = normalizeSmtpSettingsInput(rawBody)
+      const recipient = normalizeText(rawBody.recipient)
+      if (!recipient) {
+        throw createAppError(400, 'Test recipient is required')
+      }
+
+      const baseSettings = await appSettingsStore.getSmtpSettings()
+      const settings = mergeSmtpSettings(baseSettings, body)
+      if (!normalizeText(settings.host)) {
+        throw createAppError(400, 'SMTP host is required')
+      }
+      if (!normalizeText(settings.fromAddress)) {
+        throw createAppError(400, 'SMTP from address is required')
+      }
+
+      const transporter = smtpTransportFactory(settings)
+      try {
+        let result: SmtpTransportSendResult | null = null
+        try {
+          result = await transporter.sendMail({
+            from: buildSmtpFromAddress(settings),
+            to: recipient,
+            subject: 'PST Mail Explorer SMTP test',
+            text:
+              `This is a test email from PST Mail Explorer.\n\n` +
+              `SMTP host: ${settings.host}\n` +
+              `SMTP port: ${settings.port}\n` +
+              `SMTP secure: ${settings.secure ? 'true' : 'false'}\n` +
+              `Sender: ${settings.fromAddress}\n` +
+              `Recipient: ${recipient}\n` +
+              `Sent at: ${new Date().toISOString()}\n`,
+            replyTo: normalizeText(settings.replyTo) || undefined
+          })
+        } catch (error) {
+          throw createAppError(
+            502,
+            `Unable to send test email: ${error instanceof Error ? error.message : String(error)}`
+          )
+        }
+
+        if (!result) {
+          throw createAppError(502, 'Unable to send test email: no transport response')
+        }
+
+        recordAuditEvent({
+          req,
+          session,
+          action: 'settings.smtp.test',
+          target: recipient,
+          outcome: 'success',
+          metadata: {
+            host: settings.host,
+            port: settings.port,
+            secure: settings.secure,
+            username: settings.username,
+            fromAddress: settings.fromAddress,
+            replyTo: settings.replyTo,
+            messageId: normalizeText(result.messageId),
+            accepted: result.accepted || [],
+            rejected: result.rejected || []
+          }
+        })
+        responseJson(res, 200, {
+          success: true,
+          recipient,
+          messageId: normalizeText(result.messageId),
+          accepted: result.accepted || [],
+          rejected: result.rejected || []
+        } satisfies SmtpTestResponse)
+      } finally {
+        if (transporter && typeof transporter.close === 'function') {
+          try {
+            await Promise.resolve(transporter.close())
+          } catch {
+            // Ignore transport shutdown failures after the email attempt completes.
+          }
+        }
+      }
+    } catch (error) {
+      if (session) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'settings.smtp.test',
+          target: normalizeText(((req.body || {}) as SmtpTestRequestBody).recipient) || 'smtp settings',
+          outcome: 'failure',
+          metadata: {
+            reason: error instanceof Error ? error.message : String(error)
+          }
+        })
+      }
       createRouteErrorHandler(res, error)
     }
   })
