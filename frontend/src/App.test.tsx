@@ -115,6 +115,39 @@ describe('auth shell', () => {
     expect(screen.getByLabelText('Confirm password')).toBeInTheDocument()
   })
 
+  it('shows a minimal mfa verification screen', () => {
+    render(
+      <AuthScreen
+        view="mfa"
+        busy={false}
+        message="Enter the verification code for admin."
+        error=""
+        invite={null}
+        inviteStep="password"
+        inviteMfaAvailable={false}
+        inviteSetup={null}
+        inviteRecoveryCodes={[]}
+        onLogin={vi.fn()}
+        onMfaChallenge={vi.fn()}
+        onInviteAccept={vi.fn()}
+        onInviteMfaStart={vi.fn()}
+        onInviteMfaSkip={vi.fn()}
+        onInviteMfaSubmit={vi.fn()}
+        onInviteFinish={vi.fn()}
+        onOpenLogin={vi.fn()}
+        inviteMfaEnforced={false}
+      />
+    )
+
+    expect(screen.getByRole('heading', { name: 'Verify your sign in' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Verification code')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Verify code' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Back to sign in' })).toBeInTheDocument()
+    expect(screen.queryByText('Enter the verification code for admin.')).not.toBeInTheDocument()
+    expect(screen.queryByText('Use your authenticator app or a recovery code.')).not.toBeInTheDocument()
+    expect(screen.queryByText('PST Mail Explorer')).not.toBeInTheDocument()
+  })
+
   it('clears invite loading after the invite lookup succeeds', async () => {
     const inviteLookupResponse: InviteLookupResponse = {
       invite: {

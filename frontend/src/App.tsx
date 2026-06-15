@@ -435,7 +435,7 @@ export function App() {
           } else if (status.mfaRequired && status.user?.username) {
             setAuthView('mfa')
             setMfaChallengeUsername(status.user.username)
-            setAuthMessage(`Enter the verification code for ${status.user.username}.`)
+            setAuthMessage('')
           } else {
             setAuthStatus(null)
             setAuthReady(true)
@@ -447,7 +447,7 @@ export function App() {
             if (payload?.mfaRequired && payload?.user?.username) {
               setAuthView('mfa')
               setMfaChallengeUsername(payload.user.username)
-              setAuthMessage(`Enter the verification code for ${payload.user.username}.`)
+              setAuthMessage('')
             } else {
               setAuthStatus(null)
               setAuthReady(true)
@@ -847,7 +847,7 @@ export function App() {
       if (response.mfaRequired && response.user?.username) {
         setAuthView('mfa')
         setMfaChallengeUsername(response.user.username)
-        setAuthMessage(`Enter the verification code for ${response.user.username}.`)
+        setAuthMessage('')
         setAuthStatus(null)
         return
       }
