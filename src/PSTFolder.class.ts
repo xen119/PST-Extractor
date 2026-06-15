@@ -11,6 +11,18 @@ import { PSTTableItem } from './PSTTableItem.class'
 import { PSTObject } from './PSTObject.class'
 import { PSTUtil } from './PSTUtil.class'
 
+const recoverableFolderWarnings = new Set<string>()
+
+function logRecoverableFolderWarning(context: string, folderName: string, error: unknown): void {
+  const detail = error instanceof Error ? error.message : String(error)
+  const key = `${context}|${folderName}|${detail}`
+  if (recoverableFolderWarnings.has(key)) {
+    return
+  }
+  recoverableFolderWarnings.add(key)
+  console.warn(`${context} Can't get child folders for folder ${folderName}\n${detail}`)
+}
+
 /**
  * Represents a folder in the PST File.  Allows you to access child folders or items.
  * Items are accessed through a sort of cursor arrangement.  This allows for
@@ -73,12 +85,7 @@ export class PSTFolder extends PSTObject {
         }
       }
     } catch (err) {
-      console.error(
-        "PSTFolder::getSubFolders Can't get child folders for folder " +
-          this.displayName +
-          '\n' +
-          err
-      )
+      logRecoverableFolderWarning('PSTFolder::getSubFolders', this.displayName, err)
       throw err
     }
     return output
@@ -123,12 +130,7 @@ export class PSTFolder extends PSTObject {
       )
       this.subfoldersTable = new PSTTable7C(pstNodeInputStream, tmp)
     } catch (err) {
-      console.error(
-        "PSTFolder::initSubfoldersTable Can't get child folders for folder " +
-          this.displayName +
-          '\n' +
-          err
-      )
+      logRecoverableFolderWarning('PSTFolder::initSubfoldersTable', this.displayName, err)
       throw err
     }
   }

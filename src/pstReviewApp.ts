@@ -42,7 +42,6 @@ import {
 } from './reviewStore'
 import type { ReviewState } from './reviewTypes'
 import {
-  buildSearchIndexDocumentsFromSession,
   refreshSearchIndexFromCatalog,
   type HiddenRuleRecord,
   type SearchIndexDocument,
@@ -1380,6 +1379,7 @@ function createDefaultSmtpTransport(settings: SmtpSettingsRecord): SmtpTransport
 export function createPstReviewApp(options: CreatePstReviewAppOptions): express.Express {
   const app = express()
   const sessions = new Map<string, SessionRecord>()
+  let searchIndexRefreshInProgress = false
   const publicDir = options.publicDir
   const pstRootDir = options.pstRootDir || getDefaultPstRootDirectory()
   const reviewStore = options.reviewStore
@@ -2018,22 +2018,6 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
       return next()
     }
-  }
-
-  async function syncSearchIndexForMailbox(session: SessionRecord): Promise<void> {
-    const reviewRecords = await reviewStore.listReviews(session.filePath)
-    const documents = buildSearchIndexDocumentsFromSession(
-      session.index,
-      {
-        mailboxKey: session.filePath,
-        scopePath: session.scopePath,
-        scopeLabel: session.scopeLabel,
-        fileName: session.fileName,
-        mailboxName: session.index.mailboxName
-      },
-      reviewRecords
-    )
-    await searchIndexStore.replaceMailboxDocuments(session.filePath, documents)
   }
 
   function closeSessionsForMailboxKey(mailboxKey: string): string[] {
@@ -3386,15 +3370,6 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       }
       sessions.set(sessionId, record)
 
-      try {
-        await syncSearchIndexForMailbox(record)
-      } catch (error) {
-        console.warn(
-          `Unable to refresh search index for ${index.fileName}:`,
-          error instanceof Error ? error.message : error
-        )
-      }
-
       const summary = buildSessionSummary(index)
       recordAuditEvent({
         req,
@@ -3475,16 +3450,6 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       }
 
       const restore = restorePstMailboxFromRemoved(pstRootDir, scopePath, fileName)
-      const restoredIndex = openPstMailbox(pstRootDir, restore.scopePath, restore.fileName)
-      await syncSearchIndexForMailbox({
-        id: createSessionId(),
-        index: restoredIndex,
-        filePath: restoredIndex.filePath,
-        fileName: restoredIndex.fileName,
-        scopePath: restore.scopePath,
-        scopeLabel: getScopeLabel(restore.scopePath),
-        mailboxKey: restoredIndex.filePath
-      })
       recordAuditEvent({
         req,
         session: authSession,
@@ -3601,22 +3566,61 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.post(API_ROUTES.searchIndexRefresh, async (req, res) => {
     try {
       const authSession = getAuthSessionFromRequest(req)
-      const summary = await refreshSearchIndexFromCatalog(pstRootDir, reviewStore, searchIndexStore)
-      recordAuditEvent({
-        req,
-        session: authSession,
-        action: 'search.index.refresh',
-        target: 'PST catalog',
-        outcome: 'success',
-        metadata: {
-          mailboxCount: summary.mailboxCount,
-          messageCount: summary.messageCount
-        }
-      })
-      responseJson(res, 200, {
-        summary,
-        hiddenRules: await searchIndexStore.listHiddenRules()
-      })
+      if (authConfig.enabled && !isAdminAuthSession(authSession, authConfig)) {
+        recordAuditEvent({
+          req,
+          session: authSession,
+          action: 'search.index.refresh',
+          target: 'PST catalog',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Admin access required'
+        })
+        return
+      }
+
+      if (searchIndexRefreshInProgress) {
+        recordAuditEvent({
+          req,
+          session: authSession,
+          action: 'search.index.refresh',
+          target: 'PST catalog',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Search index refresh already in progress'
+          }
+        })
+        responseJson(res, 409, {
+          error: 'Search index refresh already in progress'
+        })
+        return
+      }
+
+      searchIndexRefreshInProgress = true
+      try {
+        const summary = await refreshSearchIndexFromCatalog(pstRootDir, reviewStore, searchIndexStore)
+        recordAuditEvent({
+          req,
+          session: authSession,
+          action: 'search.index.refresh',
+          target: 'PST catalog',
+          outcome: 'success',
+          metadata: {
+            mailboxCount: summary.mailboxCount,
+            messageCount: summary.messageCount
+          }
+        })
+        responseJson(res, 200, {
+          summary,
+          hiddenRules: await searchIndexStore.listHiddenRules()
+        })
+      } finally {
+        searchIndexRefreshInProgress = false
+      }
     } catch (error) {
       createRouteErrorHandler(res, error)
     }

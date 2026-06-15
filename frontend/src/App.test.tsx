@@ -157,7 +157,7 @@ describe('auth shell', () => {
     const authenticatedStatus: AuthStatus = {
       authenticated: true,
       enabled: true,
-      canManageUsers: false,
+      canManageUsers: true,
       mfaEnabled: true,
       mfaEnforced: false,
       user: { username: 'admin' },
@@ -198,7 +198,7 @@ describe('auth shell', () => {
     const authenticatedStatus: AuthStatus = {
       authenticated: true,
       enabled: true,
-      canManageUsers: false,
+      canManageUsers: true,
       mfaEnabled: true,
       mfaEnforced: false,
       user: { username: 'admin' },

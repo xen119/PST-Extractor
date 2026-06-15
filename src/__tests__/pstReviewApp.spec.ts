@@ -19,6 +19,11 @@ const publicDir = resolve('./example/public')
 
 jest.setTimeout(30000)
 
+interface StartAppOptions {
+  searchIndexStore?: MemorySearchIndexStore
+  skipInitialRefresh?: boolean
+}
+
 function makeTempDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix))
 }
@@ -131,6 +136,17 @@ function readAuditLogEntries(filePath: string): any[] {
     .map((line) => JSON.parse(line))
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve
+    reject = promiseReject
+  })
+
+  return { promise, resolve, reject }
+}
+
 function parseStoredZipEntries(buffer: Buffer): Map<string, Buffer> {
   const entries = new Map<string, Buffer>()
   let offset = 0
@@ -165,12 +181,15 @@ async function startApp(
   auth?: AppAuthConfig,
   authUserStore?: AuthUserStore,
   appSettingsStore?: AppSettingsStore,
-  smtpTransportFactory?: (settings: any) => any
+  smtpTransportFactory?: (settings: any) => any,
+  options?: StartAppOptions
 ) {
   const auditLogDir = path.join(path.dirname(pstRootDir), 'logs')
   const reviewStore = new MemoryReviewStore()
-  const searchIndexStore = new MemorySearchIndexStore()
-  await refreshSearchIndexFromCatalog(pstRootDir, reviewStore, searchIndexStore)
+  const searchIndexStore = options?.searchIndexStore || new MemorySearchIndexStore()
+  if (!options?.skipInitialRefresh) {
+    await refreshSearchIndexFromCatalog(pstRootDir, reviewStore, searchIndexStore)
+  }
   const app = createPstReviewApp({
     publicDir,
     pstRootDir,
@@ -601,6 +620,7 @@ describe('pst review api', () => {
     server = started.server
     reviewStore = started.reviewStore
     searchIndexStore = started.searchIndexStore
+    const searchIndexRefreshSpy = jest.spyOn(started.searchIndexStore, 'replaceMailboxDocuments')
 
     const opened = await requestJson(`${started.baseUrl}/api/psts/open`, {
       method: 'POST',
@@ -689,6 +709,7 @@ describe('pst review api', () => {
       })
     })
     expect(restore.restored.scopePath).toBe('Case1/Search1')
+    expect(searchIndexRefreshSpy).not.toHaveBeenCalled()
 
     const restoredCatalog = await requestJson(`${started.baseUrl}/api/psts`)
     expect(restoredCatalog.scopes.map((scope: { scopeLabel: string }) => scope.scopeLabel)).toEqual([
@@ -703,7 +724,148 @@ describe('pst review api', () => {
         searchTerm
       )}&mailOnly=1&pageSize=100`
     )
-    expect(afterRestore.page.total).toBe(beforeRemove.page.total)
+    expect(afterRestore.page.total).toBe(afterRemove.page.total)
+  })
+
+  it('rejects concurrent search index refreshes while one is already running', async () => {
+    rootDir = makeTempDir('pst-review-index-refresh-lock-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(pstDir)
+    stageFixture(enronPath, path.join(pstDir, 'sample.pst'))
+
+    const firstReplaceStarted = createDeferred<void>()
+    const releaseRefresh = createDeferred<void>()
+    class BlockingSearchIndexStore extends MemorySearchIndexStore {
+      private started = false
+
+      override async replaceMailboxDocuments(
+        mailboxKey: string,
+        documents: Parameters<MemorySearchIndexStore['replaceMailboxDocuments']>[1]
+      ): Promise<void> {
+        if (!this.started) {
+          this.started = true
+          firstReplaceStarted.resolve()
+          await releaseRefresh.promise
+        }
+        return super.replaceMailboxDocuments(mailboxKey, documents)
+      }
+    }
+
+    const blockingSearchIndexStore = new BlockingSearchIndexStore()
+    const started = await startApp(
+      pstDir,
+      undefined,
+      {
+        username: 'admin',
+        password: 'pst-extractor',
+        sessionTtlMinutes: 180
+      },
+      undefined,
+      undefined,
+      undefined,
+      {
+        searchIndexStore: blockingSearchIndexStore,
+        skipInitialRefresh: true
+      }
+    )
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const loginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'admin',
+        password: 'pst-extractor'
+      })
+    })
+    const cookiePair = getCookiePair(getSetCookieHeader(loginResponse))
+    expect(loginResponse.status).toBe(200)
+
+    const firstRefreshResponsePromise = fetch(`${started.baseUrl}/api/search/index/refresh`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookiePair
+      }
+    })
+
+    await firstReplaceStarted.promise
+
+    const secondRefreshResponse = await fetch(`${started.baseUrl}/api/search/index/refresh`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookiePair
+      }
+    })
+    const secondRefreshPayload = await readJson(secondRefreshResponse)
+    expect(secondRefreshResponse.status).toBe(409)
+    expect(secondRefreshPayload.error).toBe('Search index refresh already in progress')
+
+    releaseRefresh.resolve()
+    const firstRefreshResponse = await firstRefreshResponsePromise
+    const firstRefreshPayload = await readJson(firstRefreshResponse)
+    expect(firstRefreshResponse.status).toBe(200)
+    expect(firstRefreshPayload.summary.mailboxCount).toBe(1)
+  })
+
+  it('waits for the initial search index refresh before listening', async () => {
+    rootDir = makeTempDir('pst-review-index-startup-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(pstDir)
+    stageFixture(enronPath, path.join(pstDir, 'sample.pst'))
+
+    const firstReplaceStarted = createDeferred<void>()
+    const releaseRefresh = createDeferred<void>()
+    class BlockingSearchIndexStore extends MemorySearchIndexStore {
+      private started = false
+
+      override async replaceMailboxDocuments(
+        mailboxKey: string,
+        documents: Parameters<MemorySearchIndexStore['replaceMailboxDocuments']>[1]
+      ): Promise<void> {
+        if (!this.started) {
+          this.started = true
+          firstReplaceStarted.resolve()
+          await releaseRefresh.promise
+        }
+        return super.replaceMailboxDocuments(mailboxKey, documents)
+      }
+    }
+
+    const blockingSearchIndexStore = new BlockingSearchIndexStore()
+    const startPromise = startApp(
+      pstDir,
+      undefined,
+      {
+        username: 'admin',
+        password: 'pst-extractor',
+        sessionTtlMinutes: 180
+      },
+      undefined,
+      undefined,
+      undefined,
+      {
+        searchIndexStore: blockingSearchIndexStore
+      }
+    )
+
+    let started = false
+    startPromise.then(() => {
+      started = true
+    })
+
+    await firstReplaceStarted.promise
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(started).toBe(false)
+
+    releaseRefresh.resolve()
+    const app = await startPromise
+    server = app.server
+    reviewStore = app.reviewStore
+    searchIndexStore = app.searchIndexStore
   })
 
   it('allows appointment items to be flagged and cleared', async () => {
@@ -1828,6 +1990,16 @@ describe('pst review api', () => {
       })
     })
     expect(aliceOpenResponse.sessionId).toBeTruthy()
+
+    const aliceRefreshResponse = await fetch(`${started.baseUrl}/api/search/index/refresh`, {
+      method: 'POST',
+      headers: {
+        Cookie: aliceRecoveryCookiePair
+      }
+    })
+    const aliceRefreshPayload = await readJson(aliceRefreshResponse)
+    expect(aliceRefreshResponse.status).toBe(403)
+    expect(aliceRefreshPayload.error).toBe('Admin access required')
 
     const aliceFilteredActivityLogResponse = await fetch(
       `${started.baseUrl}/api/activity-log?username=alice&limit=20`,

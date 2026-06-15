@@ -13,6 +13,8 @@ import { PSTTask } from './PSTTask.class'
 import { PSTActivity } from './PSTActivity.class'
 import iconv from 'iconv-lite'
 
+const recoverableMessageClassWarnings = new Set<string>()
+
 /**
  * Utility functions for PST components
  * @export
@@ -934,10 +936,13 @@ export class PSTUtil {
           localDescriptorItems
         )
       default:
-        console.error(
-          'PSTUtil::createAppropriatePSTMessageObject unknown message type: ' +
-          messageClass
-        )
+        if (!recoverableMessageClassWarnings.has(messageClass)) {
+          recoverableMessageClassWarnings.add(messageClass)
+          console.warn(
+            'PSTUtil::createAppropriatePSTMessageObject unknown message type: ' +
+            messageClass
+          )
+        }
     }
     return new PSTMessage(theFile, folderIndexNode, table, localDescriptorItems)
   }

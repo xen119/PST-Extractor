@@ -194,6 +194,32 @@ function uniqueTextValues(values: string[]): string[] {
   return [...new Set(values.map((value) => normalizeText(value)).filter(Boolean))]
 }
 
+function dedupeSearchIndexDocuments(documents: SearchIndexDocument[]): SearchIndexDocument[] {
+  const seen = new Set<string>()
+  const deduped: SearchIndexDocument[] = []
+
+  for (const document of documents) {
+    const mailboxKey = normalizeText(document.mailboxKey)
+    const messageId = normalizeText(document.messageId)
+    if (!mailboxKey || !messageId) {
+      continue
+    }
+
+    const dedupeKey = `${mailboxKey}\u0000${messageId}`
+    if (seen.has(dedupeKey)) {
+      continue
+    }
+
+    seen.add(dedupeKey)
+    deduped.push({
+      ...document,
+      mailboxKey
+    })
+  }
+
+  return deduped
+}
+
 function tokenizeSearchText(value: string): string[] {
   return uniqueStrings(
     normalizeExactValue(value)
@@ -704,7 +730,7 @@ export function buildSearchIndexDocumentsFromSession(
     )
   }
 
-  return documents
+  return dedupeSearchIndexDocuments(documents)
 }
 
 class MemoryHiddenRuleStore {
@@ -766,7 +792,7 @@ export class MemorySearchIndexStore implements SearchIndexStore {
   async replaceMailboxDocuments(mailboxKey: string, documents: SearchIndexDocument[]): Promise<void> {
     const key = normalizeText(mailboxKey)
     const records = new Map<string, SearchIndexDocument>()
-    for (const document of documents) {
+    for (const document of dedupeSearchIndexDocuments(documents)) {
       records.set(document.messageId, { ...document, mailboxKey: key })
     }
     this.documents.set(key, records)
@@ -1035,10 +1061,11 @@ export class MongoSearchIndexStore implements SearchIndexStore {
   async replaceMailboxDocuments(mailboxKey: string, documents: SearchIndexDocument[]): Promise<void> {
     const key = normalizeText(mailboxKey)
     await this.documents.deleteMany({ mailboxKey: key })
-    if (!documents.length) {
+    const uniqueDocuments = dedupeSearchIndexDocuments(documents)
+    if (!uniqueDocuments.length) {
       return
     }
-    await this.documents.insertMany(documents.map((document) => ({ ...document, mailboxKey: key })))
+    await this.documents.insertMany(uniqueDocuments.map((document) => ({ ...document, mailboxKey: key })))
   }
 
   async deleteMailboxDocuments(mailboxKey: string): Promise<void> {

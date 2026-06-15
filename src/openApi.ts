@@ -1291,8 +1291,10 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
       [openApiPath(API_ROUTES.searchIndexRefresh)]: {
         post: {
           tags: ['Extraction'],
-          summary: 'Rebuild the cached search index from the PST catalog',
+          summary: 'Rebuild the cached search index from the PST catalog (admin only)',
           responses: {
+            ...errorResponse(403, 'Admin access required'),
+            ...errorResponse(409, 'Search index refresh already in progress'),
             200: jsonResponse({
               type: 'object',
               additionalProperties: true,
