@@ -1,11 +1,17 @@
 import * as React from 'react'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { App, getCasePathFromScopePath } from '@/App'
+import { api } from '@/api'
 import { AppShell, EmailPreview, MessageList, Sidebar, TagManagerDialog } from '@/components/layout'
 import { AuthScreen, MfaReminderDialog } from '@/components/auth'
-import { getCasePathFromScopePath } from '@/App'
-import type { AttachmentDetail, FolderNode, MessageDetail, MessageSummary } from '@/types'
+import type { AttachmentDetail, AuthStatus, FolderNode, InviteLookupResponse, MessageDetail, MessageSummary } from '@/types'
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  window.history.replaceState({}, '', '/')
+})
 
 describe('auth shell', () => {
   it('shows a minimal login screen', () => {
@@ -84,6 +90,40 @@ describe('auth shell', () => {
     expect(screen.getByText('Set your password')).toBeInTheDocument()
     expect(screen.getByLabelText('Password')).toBeInTheDocument()
     expect(screen.getByLabelText('Confirm password')).toBeInTheDocument()
+  })
+
+  it('clears invite loading after the invite lookup succeeds', async () => {
+    const inviteLookupResponse: InviteLookupResponse = {
+      invite: {
+        username: 'jane.doe',
+        createdAt: new Date().toISOString(),
+        recipientEmail: 'jane@example.com',
+        inviteStatus: 'pending',
+        inviteSentAt: new Date().toISOString(),
+        inviteExpiresAt: new Date().toISOString(),
+        inviteAcceptedAt: '',
+        inviteRevokedAt: '',
+        mfaEnabled: false,
+        mfaEnrolledAt: ''
+      }
+    }
+    const anonymousStatus: AuthStatus = {
+      authenticated: false,
+      enabled: true,
+      canManageUsers: false,
+      mfaEnabled: false,
+      user: null,
+      expiresAt: null
+    }
+
+    vi.spyOn(api.auth, 'inviteLookup').mockResolvedValueOnce(inviteLookupResponse)
+    vi.spyOn(api.auth, 'me').mockResolvedValueOnce(anonymousStatus)
+    window.history.pushState({}, '', '/invite/test-token')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'Set your password' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Set password' })).toBeEnabled()
   })
 
   it('shows a blocking MFA reminder without a close button', () => {

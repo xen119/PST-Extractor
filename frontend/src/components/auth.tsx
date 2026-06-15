@@ -138,6 +138,210 @@ export function AuthScreen({
     )
   }
 
+  if (view === 'invite') {
+    return (
+      <section className="fixed inset-0 z-20 grid place-items-center overflow-auto px-4 py-8">
+        <div className="mx-auto w-full max-w-[560px] panel-surface-strong overflow-hidden">
+          <div className="p-8 sm:p-10">
+            <div className="flex items-center gap-4">
+              <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] text-[color:var(--accent)]">
+                <ShieldCheck className="h-7 w-7" aria-hidden="true" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-sm font-semibold tracking-[0.18em] text-[color:var(--muted)] uppercase">
+                  Invite onboarding
+                </div>
+                <h1 className="mt-1 text-3xl font-semibold tracking-tight text-[color:var(--text)]">
+                  Set your password
+                </h1>
+                <p className="mt-2 max-w-xl text-sm leading-6 text-[color:var(--muted)]">
+                  Use this invite to activate your account, then optionally enroll MFA.
+                </p>
+              </div>
+            </div>
+
+            {message ? (
+              <div className="mt-6 rounded-2xl border border-[color:var(--accent-soft)] bg-[color:var(--accent-soft)] px-4 py-3 text-sm text-[color:var(--accent-strong)]">
+                {message}
+              </div>
+            ) : null}
+
+            {error ? (
+              <div className="mt-4 rounded-2xl border border-[color:rgba(220,38,38,0.2)] bg-[color:rgba(220,38,38,0.08)] px-4 py-3 text-sm text-[color:var(--danger)]">
+                {error}
+              </div>
+            ) : null}
+
+            {invite ? (
+              <p className="mt-6 text-xs leading-6 text-[color:var(--muted)]">
+                Account: <span className="font-medium text-[color:var(--text)]">{invite.username}</span>
+                {invite.recipientEmail ? (
+                  <>
+                    {' '}
+                    · <span className="font-medium text-[color:var(--text)]">{invite.recipientEmail}</span>
+                  </>
+                ) : null}
+              </p>
+            ) : null}
+
+            <div className="mt-6 space-y-5">
+              {inviteStep === 'password' ? (
+                <form
+                  className="space-y-4"
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    if (!invitePassword || invitePassword !== inviteConfirmPassword) {
+                      return
+                    }
+                    onInviteAccept(invitePassword)
+                  }}
+                >
+                  <label className="block text-sm font-medium text-[color:var(--text)]">
+                    Password
+                    <Input
+                      className="mt-2"
+                      type="password"
+                      value={invitePassword}
+                      onChange={(event) => setInvitePassword(event.target.value)}
+                      autoComplete="new-password"
+                      autoFocus
+                    />
+                  </label>
+                  <label className="block text-sm font-medium text-[color:var(--text)]">
+                    Confirm password
+                    <Input
+                      className="mt-2"
+                      type="password"
+                      value={inviteConfirmPassword}
+                      onChange={(event) => setInviteConfirmPassword(event.target.value)}
+                      autoComplete="new-password"
+                    />
+                  </label>
+                  <Button type="submit" className="w-full justify-center" disabled={busy}>
+                    {busy ? 'Saving...' : 'Set password'}
+                  </Button>
+                </form>
+              ) : null}
+
+              {inviteStep === 'prompt' ? (
+                <div className="rounded-3xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-4">
+                  <div className="flex items-center gap-3">
+                    <ShieldAlert className="h-5 w-5 text-[color:var(--warning)]" />
+                    <div className="text-sm font-medium text-[color:var(--text)]">Set up MFA</div>
+                  </div>
+                  <p className="mt-2 text-sm text-[color:var(--muted)]">
+                    Optional, but recommended. You can scan a QR code or enter the setup key manually.
+                  </p>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <Button onClick={onInviteMfaStart}>Set up MFA</Button>
+                    <Button variant="ghost" onClick={onInviteMfaSkip}>Skip for now</Button>
+                  </div>
+                </div>
+              ) : null}
+
+              {inviteStep === 'setup' ? (
+                <div className="space-y-4 rounded-3xl border border-[color:var(--line)] bg-[color:var(--surface-strong)] p-4">
+                  <div className="flex items-center gap-3">
+                    <ScanLine className="h-5 w-5 text-[color:var(--accent)]" />
+                    <div>
+                      <div className="text-sm font-semibold text-[color:var(--text)]">Scan the QR code</div>
+                      <div className="text-sm text-[color:var(--muted)]">Use an authenticator app or enter the setup key manually.</div>
+                    </div>
+                  </div>
+                  {inviteSetup ? (
+                    <div className="grid gap-4 lg:grid-cols-[1fr_1.1fr]">
+                      <div className="rounded-2xl border border-[color:var(--line)] bg-white p-3">
+                        <img className="w-full rounded-xl" src={inviteSetup.qrCodeDataUrl} alt="MFA setup QR code" />
+                      </div>
+                      <div className="space-y-3">
+                        <div className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-3">
+                          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">Manual setup key</div>
+                          <code className="mt-2 block break-all rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-strong)] p-3 text-sm text-[color:var(--text)]">{inviteSetup.secret}</code>
+                          <div className="mt-2 break-all text-xs text-[color:var(--muted)]">{inviteSetup.otpauthUri}</div>
+                        </div>
+                        <form
+                          className="space-y-3"
+                          onSubmit={(event) => {
+                            event.preventDefault()
+                            if (!inviteMfaCode.trim()) {
+                              return
+                            }
+                            onInviteMfaSubmit(inviteMfaCode.trim())
+                          }}
+                        >
+                          <label className="block text-sm font-medium text-[color:var(--text)]">
+                            Verification code
+                            <Input
+                              className="mt-2"
+                              value={inviteMfaCode}
+                              onChange={(event) => setInviteMfaCode(event.target.value)}
+                              autoComplete="one-time-code"
+                              inputMode="numeric"
+                              autoFocus
+                            />
+                          </label>
+                          <Button type="submit" className="w-full justify-center" disabled={busy}>
+                            {busy ? 'Verifying...' : 'Verify code'}
+                          </Button>
+                        </form>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="empty-state">Loading MFA setup...</div>
+                  )}
+                </div>
+              ) : null}
+
+              {inviteStep === 'complete' ? (
+                <div className="space-y-4 rounded-3xl border border-[color:var(--line)] bg-[color:var(--surface-strong)] p-4">
+                  <div className="flex items-center gap-3">
+                    <Download className="h-5 w-5 text-[color:var(--accent)]" />
+                    <div>
+                      <div className="text-sm font-semibold text-[color:var(--text)]">Save your recovery codes</div>
+                      <div className="text-sm text-[color:var(--muted)]">Keep these codes somewhere safe. They can be used if you lose access to your authenticator app.</div>
+                    </div>
+                  </div>
+                  <div className="grid max-h-72 gap-2 overflow-auto rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-3 text-sm">
+                    {inviteRecoveryCodes.length ? (
+                      inviteRecoveryCodes.map((code) => (
+                        <code key={code} className="rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-strong)] px-3 py-2">
+                          {code}
+                        </code>
+                      ))
+                    ) : (
+                      <div className="empty-state">No recovery codes available.</div>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      variant="ghost"
+                      onClick={() => {
+                        if (!inviteRecoveryCodes.length) {
+                          return
+                        }
+                        const contents = inviteRecoveryCodes.join('\n')
+                        const blob = new Blob([contents], { type: 'text/plain;charset=utf-8' })
+                        const url = URL.createObjectURL(blob)
+                        const a = document.createElement('a')
+                        a.href = url
+                        a.download = 'mfa-recovery-codes.txt'
+                        a.click()
+                        URL.revokeObjectURL(url)
+                      }}
+                    >
+                      Download recovery codes
+                    </Button>
+                    <Button onClick={onInviteFinish}>Continue to platform</Button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </section>
+    )
+  }
+
   return (
     <section className="fixed inset-0 z-20 grid place-items-center overflow-auto px-4 py-8">
       <div className="mx-auto w-full max-w-[1024px] panel-surface-strong overflow-hidden">

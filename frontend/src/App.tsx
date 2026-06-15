@@ -396,15 +396,10 @@ export function App() {
         const token = getInviteToken()
         setInviteToken(token)
         if (token) {
-          setAuthView('invite')
-          setInviteLoading(true)
-          setAuthMessage('Loading invite details...')
-          const inviteResult = await api.auth.inviteLookup(token)
+          await loadInvite(token)
           if (cancelled) {
             return
           }
-          setInvite(inviteResult.invite)
-          setAuthMessage('Invite validated. Choose a password to continue.')
         }
 
         try {
