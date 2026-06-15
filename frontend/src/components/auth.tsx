@@ -17,6 +17,7 @@ export interface AuthScreenProps {
   invite: UserInvite | null
   inviteStep: InviteStep
   inviteMfaAvailable: boolean
+  inviteMfaEnforced: boolean
   inviteSetup: MfaEnrollmentStartResponse | null
   inviteRecoveryCodes: string[]
   onLogin: (username: string, password: string) => void
@@ -37,6 +38,7 @@ export function AuthScreen({
   invite,
   inviteStep,
   inviteMfaAvailable,
+  inviteMfaEnforced,
   inviteSetup,
   inviteRecoveryCodes,
   onLogin,
@@ -139,6 +141,7 @@ export function AuthScreen({
   }
 
   if (view === 'invite') {
+    const inviteMfaOptional = inviteMfaAvailable && !inviteMfaEnforced
     return (
       <section className="fixed inset-0 z-20 grid place-items-center overflow-auto px-4 py-8">
         <div className="mx-auto w-full max-w-[560px] panel-surface-strong overflow-hidden">
@@ -556,14 +559,18 @@ export function AuthScreen({
                     <div className="rounded-3xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-4">
                       <div className="flex items-center gap-3">
                         <ShieldAlert className="h-5 w-5 text-[color:var(--warning)]" />
-                        <div className="text-sm font-medium text-[color:var(--text)]">Set up MFA</div>
+                        <div className="text-sm font-medium text-[color:var(--text)]">
+                          {inviteMfaEnforced ? 'MFA is required' : 'Set up MFA'}
+                        </div>
                       </div>
                       <p className="mt-2 text-sm text-[color:var(--muted)]">
-                        Optional, but recommended. You can scan a QR code or enter the setup key manually.
+                        {inviteMfaEnforced
+                          ? 'This invite requires multi-factor authentication before you can continue.'
+                          : 'Optional, but recommended. You can scan a QR code or enter the setup key manually.'}
                       </p>
                       <div className="mt-4 flex flex-wrap gap-2">
                         <Button onClick={onInviteMfaStart}>Set up MFA</Button>
-                        <Button variant="ghost" onClick={onInviteMfaSkip}>Skip for now</Button>
+                        {inviteMfaOptional ? <Button variant="ghost" onClick={onInviteMfaSkip}>Skip for now</Button> : null}
                       </div>
                     </div>
                   ) : null}
@@ -674,11 +681,13 @@ export function AuthScreen({
 export function MfaReminderDialog({
   open,
   username,
+  allowSkip,
   onSetup,
   onSkip
 }: {
   open: boolean
   username: string
+  allowSkip: boolean
   onSetup: () => void
   onSkip: () => void
 }) {
@@ -701,11 +710,13 @@ export function MfaReminderDialog({
             </div>
           </div>
           <p className="text-sm leading-6 text-[color:var(--muted)]">
-            This account does not have multi-factor authentication enabled. Add MFA to reduce the risk of unauthorized access.
+            {allowSkip
+              ? 'This account does not have multi-factor authentication enabled. Add MFA to reduce the risk of unauthorized access.'
+              : 'This account requires multi-factor authentication before you can continue.'}
           </p>
           <div className="flex flex-wrap justify-end gap-2">
             <Button onClick={onSetup}>Set up MFA</Button>
-            <Button variant="ghost" onClick={onSkip}>Skip for now</Button>
+            {allowSkip ? <Button variant="ghost" onClick={onSkip}>Skip for now</Button> : null}
           </div>
         </div>
       </DialogContent>

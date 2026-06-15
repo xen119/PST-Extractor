@@ -28,6 +28,7 @@ export interface AuthUserListItem {
   inviteAcceptedAt: string
   inviteRevokedAt: string
   mfaEnabled: boolean
+  mfaEnforced: boolean
   mfaEnrolledAt: string
 }
 
@@ -50,6 +51,7 @@ export interface AuthMfaCompletionResult {
 
 export interface AuthUserStore {
   listUsers(): Promise<AuthUserListItem[]>
+  getUser(username: string): Promise<AuthUserListItem | null>
   authenticate(username: string, password: string): Promise<AuthUserListItem | null>
   addUser(username: string, password: string): Promise<AuthUserListItem>
   createInvite(
@@ -65,6 +67,7 @@ export interface AuthUserStore {
   completeMfaEnrollment(username: string, code: string): Promise<AuthMfaCompletionResult>
   verifyMfaChallenge(username: string, code: string): Promise<AuthUserListItem | null>
   resetMfa(username: string): Promise<AuthUserListItem | null>
+  setMfaEnforced(username: string, enforced: boolean): Promise<AuthUserListItem | null>
   deleteUser(username: string): Promise<AuthUserListItem | null>
   close(): Promise<void>
 }
@@ -173,6 +176,7 @@ function buildStoredAuthUserRecord(input: {
   inviteIssuedAt?: string
   inviteTokenHash?: string
   mfaEnabled?: boolean
+  mfaEnforced?: boolean
   mfaEnrolledAt?: string
   mfaSecretEncrypted?: string
   mfaSecretNonce?: string
@@ -201,6 +205,7 @@ function buildStoredAuthUserRecord(input: {
     inviteIssuedAt: normalizeText(input.inviteIssuedAt),
     inviteTokenHash: normalizeText(input.inviteTokenHash),
     mfaEnabled: Boolean(input.mfaEnabled),
+    mfaEnforced: Boolean(input.mfaEnforced),
     mfaEnrolledAt: normalizeText(input.mfaEnrolledAt),
     mfaSecretEncrypted: normalizeText(input.mfaSecretEncrypted),
     mfaSecretNonce: normalizeText(input.mfaSecretNonce),
@@ -240,6 +245,7 @@ function normalizeStoredAuthUserRecord(value: unknown): StoredAuthUserRecord | n
     inviteIssuedAt: normalizeText(source.inviteIssuedAt),
     inviteTokenHash: normalizeText(source.inviteTokenHash),
     mfaEnabled: Boolean(source.mfaEnabled),
+    mfaEnforced: Boolean(source.mfaEnforced),
     mfaEnrolledAt: normalizeText(source.mfaEnrolledAt),
     mfaSecretEncrypted: normalizeText(source.mfaSecretEncrypted),
     mfaSecretNonce: normalizeText(source.mfaSecretNonce),
@@ -275,6 +281,7 @@ function toAuthUserListItem(record: StoredAuthUserRecord): AuthUserListItem {
     inviteAcceptedAt: record.inviteAcceptedAt,
     inviteRevokedAt: record.inviteRevokedAt,
     mfaEnabled: Boolean(record.mfaEnabled),
+    mfaEnforced: Boolean(record.mfaEnforced),
     mfaEnrolledAt: record.mfaEnrolledAt
   }
 }
@@ -302,6 +309,7 @@ function buildLegacyUserRecord(username: string, password: string, createdAt = n
     inviteAcceptedAt: createdAt,
     inviteTokenHash: '',
     mfaEnabled: false,
+    mfaEnforced: false,
     mfaRecoveryCodes: []
   })
 }
@@ -331,6 +339,7 @@ function buildInviteRecord(
     salt: '',
     passwordHash: '',
     mfaEnabled: false,
+    mfaEnforced: existing?.mfaEnforced ?? false,
     mfaEnrolledAt: '',
     mfaSecretEncrypted: '',
     mfaSecretNonce: '',
@@ -495,6 +504,11 @@ class MemoryAuthUserStore implements AuthUserStore {
 
   async listUsers(): Promise<AuthUserListItem[]> {
     return sortAuthUsers([...this.users.values()].map(toAuthUserListItem))
+  }
+
+  async getUser(username: string): Promise<AuthUserListItem | null> {
+    const record = this.getRecord(username)
+    return record ? toAuthUserListItem(record) : null
   }
 
   async authenticate(username: string, password: string): Promise<AuthUserListItem | null> {
@@ -743,6 +757,21 @@ class MemoryAuthUserStore implements AuthUserStore {
     return toAuthUserListItem(updated)
   }
 
+  async setMfaEnforced(username: string, enforced: boolean): Promise<AuthUserListItem | null> {
+    const record = this.getRecord(username)
+    if (!record) {
+      return null
+    }
+
+    const updated = buildStoredAuthUserRecord({
+      ...record,
+      updatedAt: new Date().toISOString(),
+      mfaEnforced: Boolean(enforced)
+    })
+    this.setRecord(updated)
+    return toAuthUserListItem(updated)
+  }
+
   async deleteUser(username: string): Promise<AuthUserListItem | null> {
     const record = this.removeRecord(username)
     return record ? toAuthUserListItem(record) : null
@@ -924,6 +953,11 @@ export class MongoAuthUserStore implements AuthUserStore {
         .filter((record): record is StoredAuthUserRecord => Boolean(record))
         .map(toAuthUserListItem)
     )
+  }
+
+  async getUser(username: string): Promise<AuthUserListItem | null> {
+    const record = await this.getRecord(username)
+    return record ? toAuthUserListItem(record) : null
   }
 
   async authenticate(username: string, password: string): Promise<AuthUserListItem | null> {
@@ -1168,6 +1202,21 @@ export class MongoAuthUserStore implements AuthUserStore {
     }
 
     const updated = buildDisabledMfaRecord(record)
+    await this.setRecord(updated)
+    return toAuthUserListItem(updated)
+  }
+
+  async setMfaEnforced(username: string, enforced: boolean): Promise<AuthUserListItem | null> {
+    const record = await this.getRecord(username)
+    if (!record) {
+      return null
+    }
+
+    const updated = buildStoredAuthUserRecord({
+      ...record,
+      updatedAt: new Date().toISOString(),
+      mfaEnforced: Boolean(enforced)
+    })
     await this.setRecord(updated)
     return toAuthUserListItem(updated)
   }

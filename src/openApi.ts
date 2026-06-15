@@ -265,6 +265,7 @@ function authManagedUserSchema(): Record<string, unknown> {
       'inviteAcceptedAt',
       'inviteRevokedAt',
       'mfaEnabled',
+      'mfaEnforced',
       'mfaEnrolledAt'
     ],
     properties: {
@@ -277,6 +278,7 @@ function authManagedUserSchema(): Record<string, unknown> {
       inviteAcceptedAt: { type: 'string' },
       inviteRevokedAt: { type: 'string' },
       mfaEnabled: { type: 'boolean' },
+      mfaEnforced: { type: 'boolean' },
       mfaEnrolledAt: { type: 'string' }
     }
   }
@@ -317,6 +319,17 @@ function authUserDeleteResponseSchema(): Record<string, unknown> {
     required: ['user'],
     properties: {
       user: authManagedUserSchema()
+    }
+  }
+}
+
+function authMfaEnforceRequestSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['enforced'],
+    properties: {
+      enforced: { type: 'boolean' }
     }
   }
 }
@@ -567,12 +580,13 @@ function authStatusSchema(): Record<string, unknown> {
   return {
     type: 'object',
     additionalProperties: true,
-    required: ['authenticated', 'enabled', 'canManageUsers', 'mfaEnabled', 'user', 'expiresAt'],
+    required: ['authenticated', 'enabled', 'canManageUsers', 'mfaEnabled', 'mfaEnforced', 'user', 'expiresAt'],
     properties: {
       authenticated: { type: 'boolean' },
       enabled: { type: 'boolean' },
       canManageUsers: { type: 'boolean' },
       mfaEnabled: { type: 'boolean' },
+      mfaEnforced: { type: 'boolean' },
       user: {
         nullable: true,
         ...authUserSchema()
@@ -912,6 +926,27 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
           responses: {
             200: jsonResponse(authUserDeleteResponseSchema()),
             ...errorResponse(400, 'Authentication is disabled'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Admin access required'),
+            ...errorResponse(404, 'User not found')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authUserMfaEnforce)]: {
+        post: {
+          tags: ['Auth'],
+          summary: 'Enable or disable MFA enforcement for a local viewer user',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: authMfaEnforceRequestSchema()
+              }
+            }
+          },
+          responses: {
+            200: jsonResponse(authUserDeleteResponseSchema()),
+            ...errorResponse(400, 'Authentication is disabled or username is required'),
             ...errorResponse(401, 'Authentication required'),
             ...errorResponse(403, 'Admin access required'),
             ...errorResponse(404, 'User not found')

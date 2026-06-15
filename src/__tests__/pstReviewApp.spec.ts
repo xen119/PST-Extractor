@@ -583,6 +583,7 @@ describe('pst review api', () => {
     expect(openApi.paths['/api/psts/open']).toBeDefined()
     expect(openApi.paths['/api/sessions/{sessionId}/messages/{messageId}/review']).toBeDefined()
     expect(openApi.paths['/api/exports/flagged.zip']).toBeDefined()
+    expect(openApi.paths['/api/auth/users/{username}/mfa/enforce']).toBeDefined()
 
     const docsResponse = await fetch(`${started.baseUrl}/api/docs`)
     const docsHtml = await docsResponse.text()
@@ -1468,6 +1469,7 @@ describe('pst review api', () => {
     expect(loginPayload.enabled).toBe(true)
     expect(loginPayload.canManageUsers).toBe(true)
     expect(loginPayload.mfaEnabled).toBe(false)
+    expect(loginPayload.mfaEnforced).toBe(false)
     expect(loginPayload.user.username).toBe('admin')
     expect(setCookie).toContain('HttpOnly')
     expect(cookiePair).toContain('pst-review-session=')
@@ -1482,6 +1484,7 @@ describe('pst review api', () => {
     expect(mePayload.authenticated).toBe(true)
     expect(mePayload.canManageUsers).toBe(true)
     expect(mePayload.mfaEnabled).toBe(false)
+    expect(mePayload.mfaEnforced).toBe(false)
     expect(mePayload.user.username).toBe('admin')
 
     const catalog = await requestJson(`${started.baseUrl}/api/psts`, {
@@ -1517,6 +1520,29 @@ describe('pst review api', () => {
     const authUserStore = createMemoryAuthUserStore([
       { username: 'admin', password: 'pst-extractor' }
     ])
+    const appSettingsStore = createMemoryAppSettingsStore({
+      enabled: true,
+      host: 'smtp.example.test',
+      port: 587,
+      secure: false,
+      username: 'smtp-user',
+      password: 'smtp-secret',
+      fromName: 'DV PST Mail Explorer',
+      fromAddress: 'noreply@example.test',
+      replyTo: 'support@example.test'
+    })
+    const sentMessages: Array<Record<string, unknown>> = []
+    const smtpTransportFactory = () => ({
+      sendMail: async (message: Record<string, unknown>) => {
+        sentMessages.push(message)
+        return {
+          messageId: 'invite-message-id',
+          accepted: [String(message.to || '')],
+          rejected: []
+        }
+      },
+      close: async () => undefined
+    })
     fs.mkdirSync(pstDir)
     stageFixture(enronPath, path.join(pstDir, 'sample.pst'))
 
@@ -1525,7 +1551,7 @@ describe('pst review api', () => {
       password: 'pst-extractor',
       sessionTtlMinutes: 180,
       publicBaseUrl: 'https://portal.example.test'
-    }, authUserStore)
+    }, authUserStore, appSettingsStore, smtpTransportFactory)
     server = started.server
     reviewStore = started.reviewStore
     searchIndexStore = started.searchIndexStore
@@ -1567,9 +1593,27 @@ describe('pst review api', () => {
     expect(createResponse.status).toBe(200)
     expect(createPayload.user.username).toBe('alice')
     expect(createPayload.user.inviteStatus).toBe('pending')
-    expect(createPayload.emailSent).toBe(false)
+    expect(createPayload.emailSent).toBe(true)
     expect(createPayload.inviteUrl).toContain('/invite/')
     expect(new URL(createPayload.inviteUrl).origin).toBe('https://portal.example.test')
+    expect(sentMessages.length).toBe(1)
+    expect(String(sentMessages[0].html || '')).toContain('Click here to setup your access to DV PST Mail Explorer')
+    expect(String(sentMessages[0].text || '')).toContain('Click here to setup your access to DV PST Mail Explorer')
+
+    const enforceResponse = await fetch(`${started.baseUrl}/api/auth/users/alice/mfa/enforce`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookiePair,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        enforced: true
+      })
+    })
+    const enforcePayload = await readJson(enforceResponse)
+    expect(enforceResponse.status).toBe(200)
+    expect(enforcePayload.user.username).toBe('alice')
+    expect(enforcePayload.user.mfaEnforced).toBe(true)
 
     const inviteToken = String(new URL(createPayload.inviteUrl).pathname.split('/').pop() || '')
     const inviteLookupResponse = await fetch(
@@ -1579,6 +1623,7 @@ describe('pst review api', () => {
     expect(inviteLookupResponse.status).toBe(200)
     expect(inviteLookupPayload.invite.username).toBe('alice')
     expect(inviteLookupPayload.invite.inviteStatus).toBe('pending')
+    expect(inviteLookupPayload.invite.mfaEnforced).toBe(true)
 
     const acceptResponse = await fetch(
       `${started.baseUrl}/api/auth/invites/${encodeURIComponent(inviteToken)}/accept`,
@@ -1597,6 +1642,7 @@ describe('pst review api', () => {
     const aliceCookiePair = getCookiePair(getSetCookieHeader(acceptResponse))
     expect(acceptResponse.status).toBe(200)
     expect(acceptPayload.user.username).toBe('alice')
+    expect(acceptPayload.user.mfaEnforced).toBe(true)
     expect(acceptPayload.mfaAvailable).toBe(true)
 
     const inviteLookupAfterAcceptResponse = await fetch(
@@ -1668,7 +1714,8 @@ describe('pst review api', () => {
     ).toEqual(
       expect.objectContaining({
         inviteStatus: 'active',
-        mfaEnabled: true
+        mfaEnabled: true,
+        mfaEnforced: true
       })
     )
 
@@ -1705,6 +1752,7 @@ describe('pst review api', () => {
     expect(aliceChallengeResponse.status).toBe(200)
     expect(aliceChallengePayload.authenticated).toBe(true)
     expect(aliceChallengePayload.mfaEnabled).toBe(true)
+    expect(aliceChallengePayload.mfaEnforced).toBe(true)
     expect(aliceChallengePayload.user.username).toBe('alice')
 
     const aliceMeResponse = await fetch(`${started.baseUrl}/api/auth/me`, {
@@ -1716,6 +1764,7 @@ describe('pst review api', () => {
     expect(aliceMeResponse.status).toBe(200)
     expect(aliceMePayload.authenticated).toBe(true)
     expect(aliceMePayload.mfaEnabled).toBe(true)
+    expect(aliceMePayload.mfaEnforced).toBe(true)
     expect(aliceMePayload.user.username).toBe('alice')
 
     const aliceRecoveryLoginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
@@ -1752,6 +1801,20 @@ describe('pst review api', () => {
     expect(aliceRecoveryChallengeResponse.status).toBe(200)
     expect(aliceRecoveryChallengePayload.authenticated).toBe(true)
     expect(aliceRecoveryChallengePayload.user.username).toBe('alice')
+
+    const aliceEnforceResponse = await fetch(`${started.baseUrl}/api/auth/users/alice/mfa/enforce`, {
+      method: 'POST',
+      headers: {
+        Cookie: aliceCookiePair,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        enforced: false
+      })
+    })
+    const aliceEnforcePayload = await readJson(aliceEnforceResponse)
+    expect(aliceEnforceResponse.status).toBe(403)
+    expect(aliceEnforcePayload.error).toBe('Admin access required')
 
     const aliceOpenResponse = await requestJson(`${started.baseUrl}/api/psts/open`, {
       method: 'POST',
@@ -1852,6 +1915,7 @@ describe('pst review api', () => {
     expect(aliceRestartLoginPayload.authenticated).toBe(false)
     expect(aliceRestartLoginPayload.mfaRequired).toBe(true)
     expect(aliceRestartLoginPayload.mfaEnabled).toBe(false)
+    expect(aliceRestartLoginPayload.mfaEnforced).toBe(true)
     expect(aliceRestartLoginPayload.user.username).toBe('alice')
 
     const aliceRestartChallengeResponse = await fetch(
@@ -1872,6 +1936,7 @@ describe('pst review api', () => {
     expect(aliceRestartChallengeResponse.status).toBe(200)
     expect(aliceRestartChallengePayload.authenticated).toBe(true)
     expect(aliceRestartChallengePayload.mfaEnabled).toBe(true)
+    expect(aliceRestartChallengePayload.mfaEnforced).toBe(true)
     expect(aliceRestartChallengePayload.user.username).toBe('alice')
 
     const adminRestartLoginResponse = await fetch(`${restarted.baseUrl}/api/auth/login`, {
@@ -1890,6 +1955,7 @@ describe('pst review api', () => {
     expect(adminRestartLoginPayload.authenticated).toBe(true)
     expect(adminRestartLoginPayload.canManageUsers).toBe(true)
     expect(adminRestartLoginPayload.mfaEnabled).toBe(false)
+    expect(adminRestartLoginPayload.mfaEnforced).toBe(false)
 
     const deleteAliceResponse = await fetch(`${restarted.baseUrl}/api/auth/users/alice`, {
       method: 'DELETE',

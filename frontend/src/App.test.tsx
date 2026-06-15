@@ -54,6 +54,7 @@ describe('auth shell', () => {
         onInviteMfaSubmit={vi.fn()}
         onInviteFinish={vi.fn()}
         onOpenLogin={vi.fn()}
+        inviteMfaEnforced={false}
       />
     )
 
@@ -90,6 +91,7 @@ describe('auth shell', () => {
           inviteAcceptedAt: '',
           inviteRevokedAt: '',
           mfaEnabled: false,
+          mfaEnforced: false,
           mfaEnrolledAt: ''
         }}
         inviteStep="password"
@@ -104,6 +106,7 @@ describe('auth shell', () => {
         onInviteMfaSubmit={vi.fn()}
         onInviteFinish={vi.fn()}
         onOpenLogin={vi.fn()}
+        inviteMfaEnforced={false}
       />
     )
 
@@ -124,6 +127,7 @@ describe('auth shell', () => {
         inviteAcceptedAt: '',
         inviteRevokedAt: '',
         mfaEnabled: false,
+        mfaEnforced: false,
         mfaEnrolledAt: ''
       }
     }
@@ -132,6 +136,7 @@ describe('auth shell', () => {
       enabled: true,
       canManageUsers: false,
       mfaEnabled: false,
+      mfaEnforced: false,
       user: null,
       expiresAt: null
     }
@@ -154,6 +159,7 @@ describe('auth shell', () => {
       enabled: true,
       canManageUsers: false,
       mfaEnabled: true,
+      mfaEnforced: false,
       user: { username: 'admin' },
       expiresAt: null
     }
@@ -194,6 +200,7 @@ describe('auth shell', () => {
       enabled: true,
       canManageUsers: false,
       mfaEnabled: true,
+      mfaEnforced: false,
       user: { username: 'admin' },
       expiresAt: null
     }
@@ -231,12 +238,20 @@ describe('auth shell', () => {
   })
 
   it('shows a blocking MFA reminder without a close button', () => {
-    render(<MfaReminderDialog open username="admin" onSetup={vi.fn()} onSkip={vi.fn()} />)
+    render(<MfaReminderDialog open username="admin" allowSkip onSetup={vi.fn()} onSkip={vi.fn()} />)
 
     expect(screen.getByRole('heading', { name: 'Set up MFA' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Set up MFA' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Skip for now' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Close' })).not.toBeInTheDocument()
+  })
+
+  it('hides skip when MFA is enforced', () => {
+    render(<MfaReminderDialog open username="admin" allowSkip={false} onSetup={vi.fn()} onSkip={vi.fn()} />)
+
+    expect(screen.getByRole('heading', { name: 'Set up MFA' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Set up MFA' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Skip for now' })).not.toBeInTheDocument()
   })
 })
 
@@ -346,6 +361,7 @@ describe('shell and preview', () => {
           selectedPstFileName="mailbox-a.pst"
           onCaseChange={vi.fn()}
           onScopeChange={vi.fn()}
+          canRefreshSearchIndex
           onRefreshSearchIndex={vi.fn()}
           onOpenMailbox={vi.fn()}
           folderTree={null}
@@ -363,6 +379,31 @@ describe('shell and preview', () => {
     expect(screen.getByRole('button', { name: 'Refresh search index' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'mailbox-a.pst' })).toBeInTheDocument()
     expect(screen.queryByText('Found 2 mailbox files in Case Alpha / Search One.')).not.toBeInTheDocument()
+  })
+
+  it('hides the search index refresh button for non-admin users', () => {
+    render(
+      <div style={{ width: 420, height: 800 }}>
+        <Sidebar
+          caseOptions={[{ label: 'Case Alpha', value: 'Case Alpha', count: 1 }]}
+          selectedCasePath="Case Alpha"
+          selectedScopePath="Case Alpha/Search One"
+          searchOptions={[{ label: 'Search One', value: 'Case Alpha/Search One', count: 1 }]}
+          catalogFiles={[]}
+          selectedPstFileName=""
+          onCaseChange={vi.fn()}
+          onScopeChange={vi.fn()}
+          canRefreshSearchIndex={false}
+          onRefreshSearchIndex={vi.fn()}
+          onOpenMailbox={vi.fn()}
+          folderTree={null}
+          currentFolderId=""
+          onSelectFolder={vi.fn()}
+        />
+      </div>
+    )
+
+    expect(screen.queryByRole('button', { name: 'Refresh search index' })).not.toBeInTheDocument()
   })
 
   it('hides empty folders and keeps the mailbox selector compact', () => {
@@ -411,6 +452,7 @@ describe('shell and preview', () => {
           selectedPstFileName="mailbox.pst"
           onCaseChange={vi.fn()}
           onScopeChange={vi.fn()}
+          canRefreshSearchIndex
           onRefreshSearchIndex={vi.fn()}
           onOpenMailbox={vi.fn()}
           folderTree={tree}

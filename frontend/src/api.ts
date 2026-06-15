@@ -125,6 +125,12 @@ export const api = {
     resetMfa: (username: string) =>
       requestJson<{ user: UserInvite }>(`/api/auth/users/${encodeURIComponent(username)}/mfa/reset`, {
         method: 'POST'
+      }),
+    setMfaEnforced: (username: string, enforced: boolean) =>
+      requestJson<{ user: UserInvite }>(`/api/auth/users/${encodeURIComponent(username)}/mfa/enforce`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enforced })
       })
   },
   settings: {

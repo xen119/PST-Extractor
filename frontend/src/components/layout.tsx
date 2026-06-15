@@ -170,6 +170,7 @@ interface SidebarProps {
   selectedPstFileName: string
   onCaseChange: (value: string) => void
   onScopeChange: (value: string) => void
+  canRefreshSearchIndex: boolean
   onRefreshSearchIndex: () => void
   onOpenMailbox: (fileName: string, scopePath: string) => void
   folderTree: FolderNode | null
@@ -188,6 +189,7 @@ export function Sidebar({
   selectedPstFileName,
   onCaseChange,
   onScopeChange,
+  canRefreshSearchIndex,
   onRefreshSearchIndex,
   onOpenMailbox,
   folderTree,
@@ -204,9 +206,11 @@ export function Sidebar({
           <div className="panel-title">Case / Search</div>
           <div className="text-sm text-[color:var(--muted)]">Browse and open a mailbox</div>
         </div>
-        <IconButton label="Refresh search index" onClick={onRefreshSearchIndex}>
-          <RefreshCw className="h-4 w-4" />
-        </IconButton>
+        {canRefreshSearchIndex ? (
+          <IconButton label="Refresh search index" onClick={onRefreshSearchIndex}>
+            <RefreshCw className="h-4 w-4" />
+          </IconButton>
+        ) : null}
       </div>
 
       <div className="space-y-3 border-t border-[color:var(--line)] px-4 py-4">

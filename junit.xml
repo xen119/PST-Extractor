@@ -1,7 +1,41 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuites name="jest tests" tests="1" failures="0" errors="0" time="1.072">
-  <testsuite name="viewer UI shell" errors="0" failures="0" skipped="0" timestamp="2026-06-15T12:38:20" time="0.977" tests="1">
-    <testcase classname="viewer UI shell builds the React shell and omits hidden-filters controls" name="viewer UI shell builds the React shell and omits hidden-filters controls" time="0.006">
+<testsuites name="jest tests" tests="18" failures="0" errors="0" time="44.26">
+  <testsuite name="pst review api" errors="0" failures="0" skipped="0" timestamp="2026-06-15T13:57:25" time="44.015" tests="18">
+    <testcase classname="pst review api serves mailbox catalog, extraction, review endpoints, and swagger docs" name="pst review api serves mailbox catalog, extraction, review endpoints, and swagger docs" time="5.717">
+    </testcase>
+    <testcase classname="pst review api moves PSTs into and out of the removed archive without deleting them" name="pst review api moves PSTs into and out of the removed archive without deleting them" time="2.199">
+    </testcase>
+    <testcase classname="pst review api allows appointment items to be flagged and cleared" name="pst review api allows appointment items to be flagged and cleared" time="2.084">
+    </testcase>
+    <testcase classname="pst review api exports a flagged mail and appointment bundle as a zip archive" name="pst review api exports a flagged mail and appointment bundle as a zip archive" time="2.019">
+    </testcase>
+    <testcase classname="pst review api honors bundle scope when exporting flagged items" name="pst review api honors bundle scope when exporting flagged items" time="7.481">
+    </testcase>
+    <testcase classname="pst review api isolates review state and flagged bundles per authenticated user" name="pst review api isolates review state and flagged bundles per authenticated user" time="1.41">
+    </testcase>
+    <testcase classname="pst review api opens PST root mailboxes when scopePath is empty" name="pst review api opens PST root mailboxes when scopePath is empty" time="2.041">
+    </testcase>
+    <testcase classname="pst review api bypasses auth for loopback requests" name="pst review api bypasses auth for loopback requests" time="0.596">
+    </testcase>
+    <testcase classname="pst review api rejects remote requests without a token when auth is required" name="pst review api rejects remote requests without a token when auth is required" time="0.631">
+    </testcase>
+    <testcase classname="pst review api allows remote requests when auth succeeds and responds to cors preflight" name="pst review api allows remote requests when auth succeeds and responds to cors preflight" time="0.651">
+    </testcase>
+    <testcase classname="pst review api skips the external auth middleware for protected routes after local sign-in" name="pst review api skips the external auth middleware for protected routes after local sign-in" time="0.661">
+    </testcase>
+    <testcase classname="pst review api authenticates the default viewer account and protects session cookies" name="pst review api authenticates the default viewer account and protects session cookies" time="0.697">
+    </testcase>
+    <testcase classname="pst review api adds additional viewer users and persists them across restarts" name="pst review api adds additional viewer users and persists them across restarts" time="2.917">
+    </testcase>
+    <testcase classname="pst review api supports self-service mfa enrollment after a non-admin login" name="pst review api supports self-service mfa enrollment after a non-admin login" time="1.53">
+    </testcase>
+    <testcase classname="pst review api builds invite links from the request origin when no public base url is configured" name="pst review api builds invite links from the request origin when no public base url is configured" time="0.724">
+    </testcase>
+    <testcase classname="pst review api serves SMTP settings, preserves passwords, and sends test emails" name="pst review api serves SMTP settings, preserves passwords, and sends test emails" time="1.41">
+    </testcase>
+    <testcase classname="pst review api writes activity log entries to disk and replays them after restart" name="pst review api writes activity log entries to disk and replays them after restart" time="2.547">
+    </testcase>
+    <testcase classname="pst review api expires viewer sessions after the configured ttl" name="pst review api expires viewer sessions after the configured ttl" time="2.153">
     </testcase>
   </testsuite>
 </testsuites>

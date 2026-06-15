@@ -18,6 +18,7 @@ import {
   Send,
   Settings,
   ShieldAlert,
+  ShieldCheck,
   SunMedium,
   Trash2,
   UserPlus,
@@ -281,6 +282,7 @@ export function App() {
   const [inviteLoading, setInviteLoading] = React.useState(false)
   const [inviteStep, setInviteStep] = React.useState<InviteStep>('password')
   const [inviteMfaAvailable, setInviteMfaAvailable] = React.useState(false)
+  const [inviteMfaEnforced, setInviteMfaEnforced] = React.useState(false)
   const [inviteSetup, setInviteSetup] = React.useState<MfaEnrollmentStartResponse | null>(null)
   const [inviteRecoveryCodes, setInviteRecoveryCodes] = React.useState<string[]>([])
   const [selfMfaOpen, setSelfMfaOpen] = React.useState(false)
@@ -356,8 +358,15 @@ export function App() {
   const canManageUsers = Boolean(authStatus?.canManageUsers)
   const mfaEnabled = Boolean(authStatus?.mfaEnabled)
   const inviteFlowActive = Boolean(inviteToken)
-  const showReminder = authenticated && !mfaEnabled && !mfaReminderDismissed && !selfMfaOpen && !inviteFlowActive
-  const workspaceReady = authenticated && (mfaEnabled || mfaReminderDismissed || !authStatus?.enabled)
+  const mfaEnforced = Boolean(authStatus?.mfaEnforced)
+  const showReminder =
+    authenticated &&
+    !mfaEnabled &&
+    !selfMfaOpen &&
+    !inviteFlowActive &&
+    (mfaEnforced || !mfaReminderDismissed)
+  const workspaceReady =
+    authenticated && (mfaEnabled || (!mfaEnforced && mfaReminderDismissed) || !authStatus?.enabled)
   const breadcrumbs = React.useMemo(() => {
     const folderNode = getFolderNode(folderTree, currentFolderId)
     const parts = [
@@ -417,7 +426,11 @@ export function App() {
             setAuthError('')
             setAuthMessage('')
             if (status.user?.username && !status.mfaEnabled) {
-              setMfaReminderDismissed(readReminderDismissed(status.user.username))
+              const dismissed = status.mfaEnforced ? false : readReminderDismissed(status.user.username)
+              setMfaReminderDismissed(dismissed)
+              if (status.mfaEnforced) {
+                writeReminderDismissed(status.user.username, false)
+              }
             }
           } else if (status.mfaRequired && status.user?.username) {
             setAuthView('mfa')
@@ -467,7 +480,7 @@ export function App() {
       return
     }
 
-    setMfaReminderDismissed(readReminderDismissed(username))
+    setMfaReminderDismissed(mfaEnforced ? false : readReminderDismissed(username))
     const rememberedCasePath = readWorkspaceStorageItem('casePath', true, username, '')
     const rememberedScopePath = readWorkspaceStorageItem('scopePath', true, username, '')
     const normalizedCasePath = getCasePathFromScopePath(rememberedCasePath || rememberedScopePath)
@@ -484,7 +497,7 @@ export function App() {
     setReviewTaggedOnly(readWorkspaceStorageBool('reviewTaggedOnly', true, username, false))
     setActivityFilterUser(readWorkspaceStorageItem('activityFilterUser', true, username, ''))
     setHiddenFiltersOpen(readWorkspaceStorageBool('hiddenFiltersOpen', true, username, hiddenFiltersOpen))
-  }, [authenticated, hiddenFiltersOpen, setHiddenFiltersOpen, username])
+  }, [authenticated, hiddenFiltersOpen, mfaEnforced, setHiddenFiltersOpen, username])
 
   React.useEffect(() => {
     if (!authenticated || !username) {
@@ -842,7 +855,11 @@ export function App() {
       setAuthView('login')
       setMfaChallengeUsername('')
       if (response.user?.username && !response.mfaEnabled) {
-        writeReminderDismissed(response.user.username, readReminderDismissed(response.user.username))
+        const dismissed = response.mfaEnforced ? false : readReminderDismissed(response.user.username)
+        setMfaReminderDismissed(dismissed)
+        if (response.mfaEnforced) {
+          writeReminderDismissed(response.user.username, false)
+        }
       }
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : 'Login failed')
@@ -878,6 +895,8 @@ export function App() {
       catalogLoadKeyRef.current = ''
       setInvite(null)
       setInviteStep('password')
+      setInviteMfaAvailable(false)
+      setInviteMfaEnforced(false)
       setInviteSetup(null)
       setInviteRecoveryCodes([])
       setSelfMfaOpen(false)
@@ -929,9 +948,15 @@ export function App() {
     try {
       const response: InviteLookupResponse = await api.auth.inviteLookup(token)
       setInvite(response.invite)
+      setInviteMfaAvailable(!response.invite.mfaEnabled)
+      setInviteMfaEnforced(Boolean(response.invite.mfaEnforced))
       setAuthView('invite')
       setAuthMessage('Invite validated. Choose a password to continue.')
     } catch (error) {
+      setInvite(null)
+      setInviteStep('password')
+      setInviteMfaAvailable(false)
+      setInviteMfaEnforced(false)
       setAuthError(error instanceof Error ? error.message : 'Unable to validate invite')
     } finally {
       setInviteLoading(false)
@@ -958,7 +983,12 @@ export function App() {
     try {
       const response: InviteAcceptResponse = await api.auth.inviteAccept(inviteToken, password)
       setInviteMfaAvailable(Boolean(response.mfaAvailable))
-      setAuthMessage('Password saved. You can now continue with optional MFA setup.')
+      setInviteMfaEnforced(Boolean(response.user?.mfaEnforced))
+      setAuthMessage(
+        response.user?.mfaEnforced
+          ? 'Password saved. MFA setup is required before you can continue.'
+          : 'Password saved. You can now continue with optional MFA setup.'
+      )
       if (response.mfaAvailable) {
         setInviteStep('prompt')
       } else {
@@ -1001,7 +1031,7 @@ export function App() {
   }
 
   async function continueInviteToPlatform(): Promise<void> {
-    if (invite?.username) {
+    if (invite?.username && !invite.mfaEnforced) {
       writeReminderDismissed(invite.username, true)
     }
     setMfaReminderDismissed(true)
@@ -1137,6 +1167,24 @@ export function App() {
       await loadUsers()
     } catch (error) {
       setUsersError(error instanceof Error ? error.message : 'Unable to reset MFA')
+    } finally {
+      setUsersLoading(false)
+    }
+  }
+
+  async function toggleMfaEnforcement(usernameToToggle: string, enforced: boolean): Promise<void> {
+    setUsersLoading(true)
+    try {
+      const response = await api.auth.setMfaEnforced(usernameToToggle, enforced)
+      setAuthStatus((current) =>
+        current && usernameToToggle === username ? { ...current, mfaEnforced: Boolean(response.user.mfaEnforced) } : current
+      )
+      await loadUsers()
+      if (selectedAdminUser === usernameToToggle) {
+        await loadUserActivity(usernameToToggle)
+      }
+    } catch (error) {
+      setUsersError(error instanceof Error ? error.message : 'Unable to update MFA enforcement')
     } finally {
       setUsersLoading(false)
     }
@@ -1479,7 +1527,7 @@ export function App() {
   }
 
   async function setMfaReminderSkipped(): Promise<void> {
-    if (username) {
+    if (username && !mfaEnforced) {
       writeReminderDismissed(username, true)
     }
     setMfaReminderDismissed(true)
@@ -1574,6 +1622,7 @@ export function App() {
         writeWorkspaceStorageItem('casePath', true, username, nextCasePath)
         writeWorkspaceStorageItem('scopePath', true, username, nextScopePath)
       }}
+      canRefreshSearchIndex={canManageUsers}
       onRefreshSearchIndex={() => {
         void handleRefreshSearchIndex()
       }}
@@ -1881,6 +1930,7 @@ export function App() {
       <MfaReminderDialog
         open={showReminder}
         username={username}
+        allowSkip={!mfaEnforced}
         onSetup={() => {
           void openSelfServiceMfa()
         }}
@@ -1968,6 +2018,9 @@ export function App() {
         onResetMfa={(value) => {
           void resetMfa(value)
         }}
+        onToggleMfaEnforcement={(value, enforced) => {
+          void toggleMfaEnforcement(value, enforced)
+        }}
         onCopyInvite={(value) => {
           const selected = users.find((item) => item.username === value)
           if (selected?.inviteUrl) {
@@ -2045,6 +2098,7 @@ export function App() {
           invite={invite}
           inviteStep={inviteStep}
           inviteMfaAvailable={inviteMfaAvailable}
+          inviteMfaEnforced={inviteMfaEnforced}
           inviteSetup={inviteSetup}
           inviteRecoveryCodes={inviteRecoveryCodes}
           onLogin={(user, pass) => {
@@ -2104,6 +2158,7 @@ function UserManagementDialog({
   onResendInvite,
   onRevokeInvite,
   onResetMfa,
+  onToggleMfaEnforcement,
   onCopyInvite
 }: {
   open: boolean
@@ -2127,6 +2182,7 @@ function UserManagementDialog({
   onResendInvite: (username: string) => void
   onRevokeInvite: (username: string) => void
   onResetMfa: (username: string) => void
+  onToggleMfaEnforcement: (username: string, enforced: boolean) => void
   onCopyInvite: (username: string) => void
 }) {
   return (
@@ -2217,7 +2273,18 @@ function UserManagementDialog({
                             <div className="min-w-0">
                               <div className="flex items-center gap-2">
                                 <div className="truncate font-semibold text-[color:var(--text)]">{user.username}</div>
-                                {user.mfaEnabled ? <Badge className="border-[color:var(--accent-soft)] bg-[color:var(--accent-soft)] text-[color:var(--accent-strong)]">MFA</Badge> : <Badge>MFA off</Badge>}
+                                {user.mfaEnabled ? (
+                                  <Badge className="border-[color:var(--accent-soft)] bg-[color:var(--accent-soft)] text-[color:var(--accent-strong)]">
+                                    MFA on
+                                  </Badge>
+                                ) : (
+                                  <Badge>MFA off</Badge>
+                                )}
+                                {user.mfaEnforced ? (
+                                  <Badge className="border-[color:var(--warning-bg)] bg-[color:var(--warning-bg)] text-[color:var(--warning)]">
+                                    Required
+                                  </Badge>
+                                ) : null}
                                 <Badge>{user.inviteStatus}</Badge>
                               </div>
                               <div className="mt-1 truncate text-xs text-[color:var(--muted)]">{user.recipientEmail}</div>
@@ -2225,44 +2292,54 @@ function UserManagementDialog({
                                 {user.inviteStatus === 'pending' ? 'Pending invite' : user.inviteStatus === 'active' ? 'Active account' : user.inviteStatus}
                               </div>
                             </div>
-                              <div className="flex shrink-0 items-center gap-1">
-                                {user.inviteUrl ? (
-                                  <IconButton
-                                    label="Copy invite link"
-                                    className="h-9 w-9"
-                                    onClick={(event) => {
-                                      event.stopPropagation()
-                                      onCopyInvite(user.username)
-                                    }}
-                                  >
-                                    <Link2 className="h-4 w-4" />
-                                  </IconButton>
-                                ) : null}
-                                {user.inviteStatus === 'pending' ? (
-                                  <IconButton
-                                    label="Resend invite"
-                                    className="h-9 w-9"
-                                    onClick={(event) => {
-                                      event.stopPropagation()
-                                      onResendInvite(user.username)
-                                    }}
-                                  >
-                                    <Send className="h-4 w-4" />
-                                  </IconButton>
-                                ) : null}
-                                {user.inviteStatus === 'pending' ? (
-                                  <IconButton
-                                    label="Revoke invite"
-                                    className="h-9 w-9"
-                                    onClick={(event) => {
-                                      event.stopPropagation()
-                                      onRevokeInvite(user.username)
-                                    }}
-                                  >
-                                    <RotateCcw className="h-4 w-4" />
-                                  </IconButton>
-                                ) : null}
-                                {user.username !== 'admin' ? (
+                            <div className="flex shrink-0 items-center gap-1">
+                              {user.inviteUrl ? (
+                                <IconButton
+                                  label="Copy invite link"
+                                  className="h-9 w-9"
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    onCopyInvite(user.username)
+                                  }}
+                                >
+                                  <Link2 className="h-4 w-4" />
+                                </IconButton>
+                              ) : null}
+                              {user.inviteStatus === 'pending' ? (
+                                <IconButton
+                                  label="Resend invite"
+                                  className="h-9 w-9"
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    onResendInvite(user.username)
+                                  }}
+                                >
+                                  <Send className="h-4 w-4" />
+                                </IconButton>
+                              ) : null}
+                              {user.inviteStatus === 'pending' ? (
+                                <IconButton
+                                  label="Revoke invite"
+                                  className="h-9 w-9"
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    onRevokeInvite(user.username)
+                                  }}
+                                >
+                                  <RotateCcw className="h-4 w-4" />
+                                </IconButton>
+                              ) : null}
+                              <IconButton
+                                label={user.mfaEnforced ? 'Remove MFA enforcement' : 'Enforce MFA'}
+                                className="h-9 w-9"
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  onToggleMfaEnforcement(user.username, !user.mfaEnforced)
+                                }}
+                              >
+                                {user.mfaEnforced ? <ShieldCheck className="h-4 w-4" /> : <ShieldAlert className="h-4 w-4" />}
+                              </IconButton>
+                              {user.username !== 'admin' ? (
                                 <IconButton
                                   label="Delete user"
                                   className="h-9 w-9 icon-button-danger"

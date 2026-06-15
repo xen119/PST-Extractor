@@ -12,6 +12,7 @@ export const API_ROUTES = {
   authUserInviteResend: '/api/auth/users/:username/invite/resend',
   authUserInvite: '/api/auth/users/:username/invite',
   authUserMfaReset: '/api/auth/users/:username/mfa/reset',
+  authUserMfaEnforce: '/api/auth/users/:username/mfa/enforce',
   smtpSettings: '/api/settings/smtp',
   smtpSettingsTest: '/api/settings/smtp/test',
   activityLog: '/api/activity-log',

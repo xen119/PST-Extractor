@@ -7,6 +7,7 @@ export interface AuthStatus {
   enabled: boolean
   canManageUsers: boolean
   mfaEnabled: boolean
+  mfaEnforced: boolean
   user: AuthUser | null
   expiresAt: string | null
   mfaRequired?: boolean
@@ -254,6 +255,7 @@ export interface UserInvite {
   inviteAcceptedAt: string
   inviteRevokedAt: string
   mfaEnabled: boolean
+  mfaEnforced: boolean
   mfaEnrolledAt: string
   inviteUrl?: string
 }

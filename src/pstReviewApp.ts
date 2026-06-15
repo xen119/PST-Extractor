@@ -152,6 +152,7 @@ interface AuthStatusResponse {
   enabled: boolean
   canManageUsers: boolean
   mfaEnabled: boolean
+  mfaEnforced: boolean
   mfaRequired: boolean
   mfaChallengeExpiresAt: string | null
   user: {
@@ -173,6 +174,10 @@ interface AuthUserCreateResponse {
 
 interface AuthUserDeleteResponse {
   user: AuthUserListItem
+}
+
+interface AuthMfaEnforceRequestBody {
+  enforced?: boolean
 }
 
 interface AuthInviteLookupResponse {
@@ -1588,7 +1593,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   function buildAuthStatus(
     session: AuthSessionRecord | null,
     challenge: AuthMfaChallengeRecord | null = null,
-    mfaEnabled = false
+    mfaEnabled = false,
+    mfaEnforced = false
   ): AuthStatusResponse {
     const canManageUsers = isAdminAuthSession(session, authConfig)
     if (!authConfig.enabled) {
@@ -1597,6 +1603,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         enabled: false,
         canManageUsers: false,
         mfaEnabled: false,
+        mfaEnforced: false,
         mfaRequired: false,
         mfaChallengeExpiresAt: null,
         user: null,
@@ -1611,6 +1618,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           enabled: true,
           canManageUsers: false,
           mfaEnabled: false,
+          mfaEnforced: Boolean(mfaEnforced),
           mfaRequired: true,
           mfaChallengeExpiresAt: new Date(challenge.expiresAt).toISOString(),
           user: {
@@ -1625,6 +1633,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         enabled: true,
         canManageUsers,
         mfaEnabled: false,
+        mfaEnforced: false,
         mfaRequired: false,
         mfaChallengeExpiresAt: null,
         user: null,
@@ -1637,6 +1646,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       enabled: true,
       canManageUsers,
       mfaEnabled: Boolean(mfaEnabled),
+      mfaEnforced: Boolean(mfaEnforced),
       mfaRequired: false,
       mfaChallengeExpiresAt: null,
       user: {
@@ -1846,14 +1856,50 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     inviteExpiresAt: string
   }): string {
     return [
-      `You have been invited to PST Mail Explorer as ${input.username}.`,
+      `You have been invited to DV PST Mail Explorer as ${input.username}.`,
       '',
-      `Set your password here: ${input.inviteUrl}`,
+      'Click here to setup your access to DV PST Mail Explorer:',
+      input.inviteUrl,
       '',
-      `This invite expires at ${input.inviteExpiresAt}.`,
-      '',
-      'If you were not expecting this invite, you can ignore this email.'
+      `This invite expires at ${input.inviteExpiresAt}.`
     ].join('\n')
+  }
+
+  function escapeHtml(value: string): string {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+  }
+
+  function buildInviteEmailHtml(input: {
+    username: string
+    inviteUrl: string
+    inviteExpiresAt: string
+  }): string {
+    const inviteLinkText = 'Click here to setup your access to DV PST Mail Explorer'
+    return [
+      '<!doctype html>',
+      '<html>',
+      '<body style="margin:0;padding:0;background:#f4f7fb;color:#1f2937;font-family:Arial,Helvetica,sans-serif;">',
+      '<div style="max-width:640px;margin:0 auto;padding:32px;">',
+      '<div style="background:#ffffff;border:1px solid #d7e0ee;border-radius:20px;padding:28px;">',
+      `<p style="margin:0 0 12px;font-size:16px;line-height:24px;">You have been invited to <strong>DV PST Mail Explorer</strong> as ${escapeHtml(
+        input.username
+      )}.</p>`,
+      `<p style="margin:0 0 16px;font-size:16px;line-height:24px;"><a href="${escapeHtml(
+        input.inviteUrl
+      )}" style="color:#2f6feb;text-decoration:underline;">${escapeHtml(inviteLinkText)}</a></p>`,
+      `<p style="margin:0;font-size:14px;line-height:22px;color:#4b5563;">This invite expires at ${escapeHtml(
+        input.inviteExpiresAt
+      )}.</p>`,
+      '</div>',
+      '</div>',
+      '</body>',
+      '</html>'
+    ].join('')
   }
 
   async function sendInviteEmail(input: {
@@ -1880,6 +1926,11 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           to: input.recipientEmail,
           subject: 'PST Mail Explorer invitation',
           text: buildInviteEmailText({
+            username: input.username,
+            inviteUrl: input.inviteUrl,
+            inviteExpiresAt: input.inviteExpiresAt
+          }),
+          html: buildInviteEmailHtml({
             username: input.username,
             inviteUrl: input.inviteUrl,
             inviteExpiresAt: input.inviteExpiresAt
@@ -2026,7 +2077,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     res.status(200).sendFile(path.join(publicDir, 'index.html'))
   })
 
-  app.get(API_ROUTES.authMe, (req, res) => {
+  app.get(API_ROUTES.authMe, async (req, res) => {
     try {
       res.set('Cache-Control', 'no-store')
       const session = getAuthSessionFromRequest(req)
@@ -2044,7 +2095,21 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         return
       }
 
-      responseJson(res, 200, buildAuthStatus(session, challenge, session?.mfaEnabled ?? false))
+      const currentUser = session
+        ? await authUserStore.getUser(session.username)
+        : challenge
+          ? await authUserStore.getUser(challenge.username)
+          : null
+      responseJson(
+        res,
+        200,
+        buildAuthStatus(
+          session,
+          challenge,
+          session?.mfaEnabled ?? Boolean(currentUser?.mfaEnabled),
+          Boolean(currentUser?.mfaEnforced)
+        )
+      )
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
@@ -2094,10 +2159,11 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           target: user.username,
           outcome: 'success',
           metadata: {
-            mfaRequired: true
+            mfaRequired: true,
+            mfaEnforced: Boolean(user.mfaEnforced)
           }
         })
-        responseJson(res, 200, buildAuthStatus(null, challenge))
+        responseJson(res, 200, buildAuthStatus(null, challenge, false, Boolean(user.mfaEnforced)))
         return
       }
 
@@ -2108,9 +2174,12 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         actor: buildAuditActor(session, user.username),
         action: 'auth.login',
         target: user.username,
-        outcome: 'success'
+        outcome: 'success',
+        metadata: {
+          mfaEnforced: Boolean(user.mfaEnforced)
+        }
       })
-      responseJson(res, 200, buildAuthStatus(session, null, Boolean(user.mfaEnabled)))
+      responseJson(res, 200, buildAuthStatus(session, null, Boolean(user.mfaEnabled), Boolean(user.mfaEnforced)))
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
@@ -2622,6 +2691,86 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     }
   })
 
+  app.post(API_ROUTES.authUserMfaEnforce, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        throw createAppError(400, 'Authentication is disabled')
+      }
+
+      const session = getAuthSessionFromRequest(req)
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      if (!isAdminAuthSession(session, authConfig)) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.mfa.enforce',
+          target: normalizeAuthUsername(req.params.username) || 'local users',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Admin access required'
+        })
+        return
+      }
+
+      const targetUsername = normalizeAuthUsername(req.params.username)
+      if (!targetUsername) {
+        responseJson(res, 400, {
+          error: 'Username is required'
+        })
+        return
+      }
+
+      const body = (req.body || {}) as AuthMfaEnforceRequestBody
+      const enforced = Boolean(body.enforced)
+      const user = await authUserStore.setMfaEnforced(targetUsername, enforced)
+      if (!user) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.mfa.enforce',
+          target: targetUsername,
+          outcome: 'denied',
+          metadata: {
+            reason: 'User not found',
+            enforced
+          }
+        })
+        responseJson(res, 404, {
+          error: 'User not found'
+        })
+        return
+      }
+
+      recordAuditEvent({
+        req,
+        session,
+        action: 'auth.users.mfa.enforce',
+        target: user.username,
+        outcome: 'success',
+        metadata: {
+          enforced,
+          mfaEnabled: Boolean(user.mfaEnabled)
+        }
+      })
+      responseJson(res, 200, {
+        user
+      } satisfies AuthUserDeleteResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
   app.get(API_ROUTES.authInviteLookup, async (req, res) => {
     try {
       res.set('Cache-Control', 'no-store')
@@ -2691,7 +2840,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         target: user.username,
         outcome: 'success',
         metadata: {
-          mfaEnabled: Boolean(user.mfaEnabled)
+          mfaEnabled: Boolean(user.mfaEnabled),
+          mfaEnforced: Boolean(user.mfaEnforced)
         }
       })
       responseJson(res, 200, {
@@ -2754,7 +2904,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         target: user.username,
         outcome: 'success'
       })
-      responseJson(res, 200, buildAuthStatus(session, null, Boolean(user.mfaEnabled)))
+      responseJson(res, 200, buildAuthStatus(session, null, Boolean(user.mfaEnabled), Boolean(user.mfaEnforced)))
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
