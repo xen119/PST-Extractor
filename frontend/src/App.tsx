@@ -71,6 +71,10 @@ import { useUiStore } from '@/store/ui'
 
 type WorkspaceMode = 'folder' | 'search'
 type SearchScope = 'pst' | 'search' | 'all'
+type OpenMailboxOptions = {
+  preserveWorkspaceMode?: boolean
+  selectedMessageId?: string
+}
 type SmtpFormState = {
   enabled: boolean
   host: string
@@ -257,6 +261,23 @@ function getFolderNode(root: FolderNode | null, folderId: string): FolderNode | 
 
 function getMessagePreviewTitle(detail: MessageDetail | null): string {
   return detail?.subject || '(no subject)'
+}
+
+function isSameMailboxContext(
+  message: MessageSummary,
+  currentFileName: string,
+  currentScopePath: string
+): boolean {
+  const nextFileName = normalizeText(message.fileName || '')
+  const nextScopePath = normalizeText(message.scopePath || '')
+  const normalizedCurrentFileName = normalizeText(currentFileName)
+  const normalizedCurrentScopePath = normalizeText(currentScopePath)
+
+  if (!nextFileName || !nextScopePath || !normalizedCurrentFileName || !normalizedCurrentScopePath) {
+    return true
+  }
+
+  return nextFileName === normalizedCurrentFileName && nextScopePath === normalizedCurrentScopePath
 }
 
 export function App() {
@@ -685,7 +706,12 @@ export function App() {
             ? selectedMessageId
             : page.items.find((item) => item.id === storedMessageId)?.id || page.items[0]?.id || ''
           if (nextMessageId && nextMessageId !== selectedMessageId) {
-            setSelectedMessageId(nextMessageId)
+            const nextMessage = page.items.find((item) => item.id === nextMessageId)
+            if (nextMessage) {
+              void openMessageSummary(nextMessage)
+            } else {
+              setSelectedMessageId(nextMessageId)
+            }
           }
         }
       } catch (error) {
@@ -775,7 +801,7 @@ export function App() {
 
     const first = currentPage.items.find((item) => item.id === selectedMessageId) || currentPage.items[0]
     if (first && first.id !== selectedMessageId) {
-      setSelectedMessageId(first.id)
+      void openMessageSummary(first)
     }
   }, [currentPage, selectedMessageId, sessionId, workspaceReady])
 
@@ -1354,7 +1380,12 @@ export function App() {
     }
   }
 
-  async function openMailbox(fileName: string, scopePath: string, catalogResponse?: PstCatalogResponse): Promise<void> {
+  async function openMailbox(
+    fileName: string,
+    scopePath: string,
+    catalogResponse?: PstCatalogResponse,
+    options: OpenMailboxOptions = {}
+  ): Promise<void> {
     const effectiveScope = scopePath || selectedScopePath || selectedCasePath || catalogResponse?.scopePath || catalog?.scopePath || ''
     try {
       const response: SessionOpenResponse = await api.pst.open(effectiveScope, fileName)
@@ -1366,12 +1397,18 @@ export function App() {
       setSelectedPstFileName(response.fileName)
       setSelectedCasePath(nextCasePath)
       setSelectedScopePath(effectiveScope || response.scopePath)
-      setWorkspaceMode('folder')
-      setPageIndex(1)
-      const storedFolderId = readWorkspaceStorageItem('folderId', true, username, '')
-      const folderToOpen = getFolderNode(response.tree, storedFolderId)?.id || response.tree?.id || ''
-      if (folderToOpen) {
-        setCurrentFolderId(folderToOpen)
+      if (options.selectedMessageId) {
+        setSelectedMessageId(options.selectedMessageId)
+        writeWorkspaceStorageItem('messageId', true, username, options.selectedMessageId)
+      }
+      if (!options.preserveWorkspaceMode) {
+        setWorkspaceMode('folder')
+        setPageIndex(1)
+        const storedFolderId = readWorkspaceStorageItem('folderId', true, username, '')
+        const folderToOpen = getFolderNode(response.tree, storedFolderId)?.id || response.tree?.id || ''
+        if (folderToOpen) {
+          setCurrentFolderId(folderToOpen)
+        }
       }
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : 'Unable to open PST')
@@ -1393,6 +1430,25 @@ export function App() {
     writeWorkspaceStorageItem('messageId', true, username, messageId)
   }
 
+  async function openMessageSummary(message: MessageSummary): Promise<void> {
+    const currentFileName = selectedPstFileName || sessionSummary?.fileName || ''
+    const currentScopePath = selectedScopePath || selectedCasePath
+
+    if (!isSameMailboxContext(message, currentFileName, currentScopePath)) {
+      const nextFileName = message.fileName || currentFileName
+      const nextScopePath = message.scopePath || currentScopePath
+      if (nextFileName && nextScopePath) {
+        await openMailbox(nextFileName, nextScopePath, catalog || undefined, {
+          preserveWorkspaceMode: true,
+          selectedMessageId: message.id
+        })
+        return
+      }
+    }
+
+    await openMessage(message.id)
+  }
+
   async function openPrevMessage(): Promise<void> {
     if (!currentPage?.items?.length) {
       return
@@ -1400,7 +1456,7 @@ export function App() {
     const index = currentPage.items.findIndex((item) => item.id === selectedMessageId)
     const next = index > 0 ? currentPage.items[index - 1] : null
     if (next) {
-      await openMessage(next.id)
+      await openMessageSummary(next)
     }
   }
 
@@ -1411,7 +1467,7 @@ export function App() {
     const index = currentPage.items.findIndex((item) => item.id === selectedMessageId)
     const next = index >= 0 && index < currentPage.items.length - 1 ? currentPage.items[index + 1] : null
     if (next) {
-      await openMessage(next.id)
+      await openMessageSummary(next)
     }
   }
 
@@ -1660,8 +1716,8 @@ export function App() {
       onSortChange={(value) => setSort(value)}
       onReviewFlaggedChange={(value) => setReviewFlaggedOnly(value)}
       onReviewTaggedChange={(value) => setReviewTaggedOnly(value)}
-      onSelectMessage={(messageId) => {
-        void openMessage(messageId)
+      onSelectMessage={(message) => {
+        void openMessageSummary(message)
       }}
       onPrevPage={() => {
         const nextPage = Math.max(1, pageIndex - 1)

@@ -14,6 +14,7 @@ import type {
   InviteLookupResponse,
   MessageDetail,
   MessageSummary,
+  PageResponse,
   PstCatalogResponse
 } from '@/types'
 
@@ -572,6 +573,199 @@ describe('shell and preview', () => {
     expect(onOpenFullView).toHaveBeenCalled()
     await user.click(screen.getByLabelText('Download JSON'))
     expect(screen.getByLabelText('Recipients')).toBeInTheDocument()
+  })
+
+  it('opens a search result from a different mailbox in the reading pane', async () => {
+    const user = userEvent.setup()
+    const authenticatedStatus: AuthStatus = {
+      authenticated: true,
+      enabled: true,
+      canManageUsers: true,
+      mfaEnabled: true,
+      mfaEnforced: false,
+      user: { username: 'admin' },
+      expiresAt: null
+    }
+    const catalog: PstCatalogResponse = {
+      rootPath: '',
+      rootExists: true,
+      message: '',
+      scopePath: 'Case Alpha/Search One',
+      scopeLabel: 'Search One',
+      scopes: [
+        {
+          scopePath: 'Case Alpha/Search One',
+          scopeLabel: 'Search One',
+          fileCount: 1,
+          files: [
+            {
+              fileName: 'mailbox-a.pst',
+              size: 1024,
+              modifiedAt: new Date().toISOString(),
+              scopePath: 'Case Alpha/Search One'
+            }
+          ]
+        },
+        {
+          scopePath: 'Case Beta/Search Two',
+          scopeLabel: 'Search Two',
+          fileCount: 1,
+          files: [
+            {
+              fileName: 'mailbox-b.pst',
+              size: 2048,
+              modifiedAt: new Date().toISOString(),
+              scopePath: 'Case Beta/Search Two'
+            }
+          ]
+        }
+      ],
+      files: []
+    }
+    const currentDetail: MessageDetail = {
+      subject: 'Current mailbox message',
+      senderName: 'Alice Example',
+      senderEmailAddress: 'alice@example.com',
+      sortDate: new Date().toISOString(),
+      bodyText: 'Current mailbox body'
+    }
+    const targetDetail: MessageDetail = {
+      subject: 'Target search result',
+      senderName: 'Bob Example',
+      senderEmailAddress: 'bob@example.com',
+      sortDate: new Date().toISOString(),
+      bodyText: 'Target mailbox body'
+    }
+    const searchResultsPage: PageResponse<MessageSummary> = {
+      items: [
+        {
+          id: 'search-hit',
+          messageId: 'search-hit',
+          subject: 'Target search result',
+          senderName: 'Bob Example',
+          senderEmailAddress: 'bob@example.com',
+          sortDate: new Date().toISOString(),
+          fileName: 'mailbox-b.pst',
+          scopePath: 'Case Beta/Search Two',
+          isMailLike: true,
+          review: {
+            flagged: false,
+            tags: [],
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          }
+        }
+      ],
+      total: 1,
+      page: 1,
+      pageSize: 50,
+      totalPages: 1,
+      query: 'target',
+      mailOnly: false,
+      sort: 'date-desc'
+    }
+    const searchResponse = {
+      scope: 'search' as const,
+      scopePath: 'Case Alpha/Search One',
+      scopeLabel: 'Search One',
+      page: searchResultsPage
+    }
+
+    vi.spyOn(api.auth, 'me').mockResolvedValueOnce(authenticatedStatus)
+    vi.spyOn(api.pst, 'catalog').mockResolvedValueOnce(catalog)
+    vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue({ items: [] })
+    vi.spyOn(api.pst, 'open').mockImplementation(async (_scopePath, fileName) => {
+      if (fileName === 'mailbox-b.pst') {
+        return {
+          sessionId: 'session-b',
+          scopePath: 'Case Beta/Search Two',
+          scopeLabel: 'Search Two',
+          fileName: 'mailbox-b.pst',
+          summary: {
+            fileName: 'mailbox-b.pst',
+            mailboxName: 'mailbox-b.pst'
+          },
+          tree: {
+            id: 'root-b',
+            displayName: 'Inbox',
+            path: 'root-b',
+            children: []
+          }
+        }
+      }
+
+      return {
+        sessionId: 'session-a',
+        scopePath: 'Case Alpha/Search One',
+        scopeLabel: 'Search One',
+        fileName: 'mailbox-a.pst',
+        summary: {
+          fileName: 'mailbox-a.pst',
+          mailboxName: 'mailbox-a.pst'
+        },
+        tree: {
+          id: 'root-a',
+          displayName: 'Inbox',
+          path: 'root-a',
+          children: []
+        }
+      }
+    })
+    vi.spyOn(api.session, 'folderMessages').mockResolvedValue({
+      sessionId: 'session-a',
+      page: {
+        items: [
+          {
+            id: 'current-message',
+            messageId: 'current-message',
+            subject: 'Current mailbox message',
+            senderName: 'Alice Example',
+            senderEmailAddress: 'alice@example.com',
+            sortDate: new Date().toISOString(),
+            fileName: 'mailbox-a.pst',
+            scopePath: 'Case Alpha/Search One',
+            isMailLike: true,
+            review: {
+              flagged: false,
+              tags: [],
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            }
+          } satisfies MessageSummary
+        ],
+        total: 1,
+        page: 1,
+        pageSize: 50,
+        totalPages: 1,
+        query: '',
+        mailOnly: false,
+        sort: 'date-desc'
+      }
+    })
+    vi.spyOn(api, 'search').mockResolvedValue(searchResponse)
+    vi.spyOn(api.session, 'messageDetail').mockImplementation(async (sessionId, messageId) => {
+      if (sessionId === 'session-b' && messageId === 'search-hit') {
+        return { sessionId, detail: targetDetail }
+      }
+      return { sessionId, detail: currentDetail }
+    })
+
+    window.history.replaceState({}, '', '/')
+    render(
+      <div style={{ width: 1800, height: 1600 }}>
+        <App />
+      </div>
+    )
+
+    expect(await screen.findByText('Current mailbox message')).toBeInTheDocument()
+
+    await user.type(screen.getByPlaceholderText('Keywords, "phrases", + AND, | OR'), 'target')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Scope' }), 'all')
+    await user.click(screen.getByRole('button', { name: 'Run search' }))
+
+    expect(await screen.findByText('Target mailbox body')).toBeInTheDocument()
+    expect(api.pst.open).toHaveBeenCalledWith('Case Beta/Search Two', 'mailbox-b.pst')
+    expect(screen.getByText('Target mailbox body')).toBeInTheDocument()
   })
 
   it('shows the tag manager modal', async () => {

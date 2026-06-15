@@ -381,7 +381,7 @@ interface MessageListProps {
   onSortChange: (value: string) => void
   onReviewFlaggedChange: (value: boolean) => void
   onReviewTaggedChange: (value: boolean) => void
-  onSelectMessage: (messageId: string) => void
+  onSelectMessage: (message: MessageSummary) => void
   onPrevPage: () => void
   onNextPage: () => void
   onOpenBundle: () => void
@@ -503,7 +503,7 @@ export function MessageList({
                       <MessageRow
                         item={item}
                         active={item.id === selectedMessageId}
-                        onSelect={() => onSelectMessage(item.id)}
+                        onSelect={() => onSelectMessage(item)}
                       />
                     </div>
                   )
