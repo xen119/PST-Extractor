@@ -1602,9 +1602,6 @@ export function App() {
       sort={sort}
       reviewFlaggedOnly={reviewFlaggedOnly}
       reviewTaggedOnly={reviewTaggedOnly}
-      hiddenFiltersOpen={hiddenFiltersOpen}
-      hiddenRules={hiddenRules}
-      hiddenFiltersCount={hiddenRules.length}
       onQueryChange={setSearchQuery}
       onSearch={() => {
         void runSearch()
@@ -1614,10 +1611,6 @@ export function App() {
       onSortChange={(value) => setSort(value)}
       onReviewFlaggedChange={(value) => setReviewFlaggedOnly(value)}
       onReviewTaggedChange={(value) => setReviewTaggedOnly(value)}
-      onToggleHiddenFilters={() => setHiddenFiltersOpen(!hiddenFiltersOpen)}
-      onRemoveHiddenFilter={(filterId) => {
-        void deleteHiddenFilter(filterId)
-      }}
       onSelectMessage={(messageId) => {
         void openMessage(messageId)
       }}
@@ -1647,9 +1640,6 @@ export function App() {
           reviewTagged: reviewTaggedOnly
         })
         triggerDownload(url, 'flagged-bundle.zip')
-      }}
-      onCreateHiddenFilter={(kind, value, label) => {
-        void createHiddenFilter(kind, value, label)
       }}
       selectedMessageId={selectedMessageId}
       sessionId={sessionId}

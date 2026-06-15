@@ -983,6 +983,247 @@ describe('pst review api', () => {
     expect([...allEntries.keys()].some((name) => name.includes('second.ost'))).toBe(true)
   })
 
+  it('isolates review state and flagged bundles per authenticated user', async () => {
+    rootDir = makeTempDir('pst-review-api-review-scope-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
+    stageFixture(enronPath, path.join(pstDir, 'Case1', 'Search1', 'review-scope.pst'))
+
+    const authUserStore = createMemoryAuthUserStore([
+      { username: 'admin', password: 'pst-extractor' },
+      { username: 'bob', password: 'bob-password' }
+    ])
+    const started = await startApp(
+      pstDir,
+      undefined,
+      {
+        username: 'admin',
+        password: 'pst-extractor',
+        sessionTtlMinutes: 180
+      },
+      authUserStore
+    )
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    async function login(username: string, password: string): Promise<string> {
+      const response = await fetch(`${started.baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ username, password })
+      })
+      expect(response.status).toBe(200)
+      return getCookiePair(getSetCookieHeader(response))
+    }
+
+    const adminCookie = await login('admin', 'pst-extractor')
+    const bobCookie = await login('bob', 'bob-password')
+
+    const opened = await requestJson(`${started.baseUrl}/api/psts/open`, {
+      method: 'POST',
+      headers: {
+        Cookie: adminCookie,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        scopePath: 'Case1/Search1',
+        fileName: 'review-scope.pst'
+      })
+    })
+
+    const mailFolder = findMailFolder(opened.tree)
+    expect(mailFolder).toBeTruthy()
+    const mailFolderPage = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/folders/${encodeURIComponent(
+        mailFolder!.id
+      )}/messages?pageSize=20`,
+      {
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    const mailItem = mailFolderPage.page.items.find((item: { kind: string }) => item.kind === 'mail')
+    expect(mailItem).toBeTruthy()
+
+    await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
+        mailItem.id
+      )}/review`,
+      {
+        method: 'PATCH',
+        headers: {
+          Cookie: adminCookie,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          flagged: true,
+          tags: ['Admin']
+        })
+      }
+    )
+
+    await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
+        mailItem.id
+      )}/review`,
+      {
+        method: 'PATCH',
+        headers: {
+          Cookie: bobCookie,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          flagged: true,
+          tags: ['Bob']
+        })
+      }
+    )
+
+    const adminReview = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
+        mailItem.id
+      )}/review`,
+      {
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    expect(adminReview.review.flagged).toBe(true)
+    expect(adminReview.review.tags).toEqual(['Admin'])
+
+    const bobReview = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
+        mailItem.id
+      )}/review`,
+      {
+        headers: {
+          Cookie: bobCookie
+        }
+      }
+    )
+    expect(bobReview.review.flagged).toBe(true)
+    expect(bobReview.review.tags).toEqual(['Bob'])
+
+    const adminQueue = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/review?reviewFlagged=1`,
+      {
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    expect(adminQueue.items.map((item: { messageId: string }) => item.messageId)).toContain(
+      mailItem.id
+    )
+    expect(
+      adminQueue.items.every((item: { reviewerUsername?: string }) => item.reviewerUsername === 'admin')
+    ).toBe(true)
+
+    const bobQueue = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/review?reviewFlagged=1`,
+      {
+        headers: {
+          Cookie: bobCookie
+        }
+      }
+    )
+    expect(bobQueue.items.map((item: { messageId: string }) => item.messageId)).toContain(
+      mailItem.id
+    )
+    expect(
+      bobQueue.items.every((item: { reviewerUsername?: string }) => item.reviewerUsername === 'bob')
+    ).toBe(true)
+
+    const adminSearch = await requestJson(
+      `${started.baseUrl}/api/search?scope=pst&sessionId=${opened.sessionId}&reviewFlagged=1&pageSize=20`,
+      {
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    expect(adminSearch.page.total).toBeGreaterThan(0)
+    expect(
+      adminSearch.page.items.every((item: { review: { tags: string[] } }) =>
+        item.review.tags.includes('Admin')
+      )
+    ).toBe(true)
+
+    const bobSearch = await requestJson(
+      `${started.baseUrl}/api/search?scope=pst&sessionId=${opened.sessionId}&reviewFlagged=1&pageSize=20`,
+      {
+        headers: {
+          Cookie: bobCookie
+        }
+      }
+    )
+    expect(bobSearch.page.total).toBeGreaterThan(0)
+    expect(
+      bobSearch.page.items.every((item: { review: { tags: string[] } }) =>
+        item.review.tags.includes('Bob')
+      )
+    ).toBe(true)
+
+    const adminBundle = await requestBuffer(
+      `${started.baseUrl}/api/exports/flagged.zip?scope=pst&sessionId=${opened.sessionId}`,
+      {
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    const adminEntries = parseStoredZipEntries(adminBundle.buffer)
+    const adminManifest = JSON.parse(adminEntries.get('manifest.json')!.toString('utf8'))
+    expect(adminManifest.counts.total).toBe(1)
+    expect(adminManifest.items).toHaveLength(1)
+    expect(adminManifest.items[0].review.tags).toEqual(['Admin'])
+
+    const bobBundle = await requestBuffer(
+      `${started.baseUrl}/api/exports/flagged.zip?scope=pst&sessionId=${opened.sessionId}`,
+      {
+        headers: {
+          Cookie: bobCookie
+        }
+      }
+    )
+    const bobEntries = parseStoredZipEntries(bobBundle.buffer)
+    const bobManifest = JSON.parse(bobEntries.get('manifest.json')!.toString('utf8'))
+    expect(bobManifest.counts.total).toBe(1)
+    expect(bobManifest.items).toHaveLength(1)
+    expect(bobManifest.items[0].review.tags).toEqual(['Bob'])
+
+    const auditEntries = readAuditLogEntries(started.auditLogPath)
+    expect(auditEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: 'message.review.update',
+          actor: expect.objectContaining({ username: 'admin' }),
+          metadata: expect.objectContaining({ reviewerUsername: 'admin' })
+        }),
+        expect.objectContaining({
+          action: 'message.review.update',
+          actor: expect.objectContaining({ username: 'bob' }),
+          metadata: expect.objectContaining({ reviewerUsername: 'bob' })
+        }),
+        expect.objectContaining({
+          action: 'bundle.export',
+          actor: expect.objectContaining({ username: 'admin' }),
+          metadata: expect.objectContaining({ reviewerUsername: 'admin' })
+        }),
+        expect.objectContaining({
+          action: 'bundle.export',
+          actor: expect.objectContaining({ username: 'bob' }),
+          metadata: expect.objectContaining({ reviewerUsername: 'bob' })
+        })
+      ])
+    )
+  })
+
   it('opens PST root mailboxes when scopePath is empty', async () => {
     rootDir = makeTempDir('pst-review-api-root-')
     const pstDir = path.join(rootDir, 'PST')

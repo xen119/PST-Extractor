@@ -1,7 +1,7 @@
 import { randomBytes } from 'crypto'
 import { MongoClient } from 'mongodb'
 import type { ReviewStore } from './reviewStore'
-import type { ReviewState } from './reviewTypes'
+import type { ReviewRecord, ReviewState } from './reviewTypes'
 import type { MessageSummary, ViewerSessionIndex } from './viewer'
 
 export type SearchScope = 'all' | 'search' | 'pst'
@@ -57,6 +57,10 @@ export interface SearchIndexDocument {
   addressValues: string[]
   subjectValues: string[]
   review: ReviewState
+  reviewStates: Array<{
+    reviewerUsername: string
+    review: ReviewState
+  }>
   reviewTagValues: string[]
   updatedAt: string
 }
@@ -66,6 +70,7 @@ export interface SearchIndexSearchOptions {
   scopePath?: string
   mailboxKey?: string
   allowedMailboxKeys?: string[]
+  reviewerUsername?: string
   query: string
   mode: SearchMode
   mailOnly: boolean
@@ -103,7 +108,12 @@ export interface SearchIndexStore {
   isPersistent: boolean
   replaceMailboxDocuments(mailboxKey: string, documents: SearchIndexDocument[]): Promise<void>
   deleteMailboxDocuments(mailboxKey: string): Promise<void>
-  updateReviewState(mailboxKey: string, messageId: string, review: ReviewState | null): Promise<void>
+  updateReviewState(
+    mailboxKey: string,
+    messageId: string,
+    reviewerUsername: string,
+    review: ReviewState | null
+  ): Promise<void>
   clearAllDocuments(): Promise<void>
   listHiddenRules(): Promise<HiddenRuleRecord[]>
   upsertHiddenRule(input: {
@@ -166,6 +176,10 @@ function normalizeText(value: unknown): string {
 
 function normalizeExactValue(value: unknown): string {
   return normalizeText(value).toLowerCase()
+}
+
+function normalizeReviewerUsername(value: unknown): string {
+  return normalizeText(value) || 'anonymous'
 }
 
 function escapeRegex(value: string): string {
@@ -348,6 +362,35 @@ function normalizeReview(review: ReviewState | null | undefined): ReviewState {
   )
 }
 
+function resolveReviewState(
+  reviewStates: Array<{ reviewerUsername: string; review: ReviewState }> | undefined,
+  reviewerUsername: string | undefined
+): ReviewState | null {
+  const normalizedReviewerUsername = normalizeReviewerUsername(reviewerUsername)
+  const entry = (reviewStates || []).find(
+    (state) => normalizeReviewerUsername(state.reviewerUsername) === normalizedReviewerUsername
+  )
+  return entry ? normalizeReview(entry.review) : null
+}
+
+function buildReviewStateEntries(records: ReviewRecord[]): Array<{
+  reviewerUsername: string
+  review: ReviewState
+}> {
+  return records.map((record) => ({
+    reviewerUsername: normalizeReviewerUsername(record.reviewerUsername),
+    review: normalizeReview(record)
+  }))
+}
+
+function resolveReviewTagValues(
+  reviewStates: Array<{ reviewerUsername: string; review: ReviewState }> | undefined,
+  reviewerUsername: string | undefined
+): string[] {
+  const review = resolveReviewState(reviewStates, reviewerUsername)
+  return review ? buildReviewTagValues(review) : []
+}
+
 function sortDocuments(left: SearchIndexDocument, right: SearchIndexDocument, sort: string): number {
   if (sort === 'order') {
     if (left.scopeLabel !== right.scopeLabel) {
@@ -448,16 +491,29 @@ function buildFilterMatch(
     filter.isMailLike = true
   }
 
+  const reviewerUsername = normalizeReviewerUsername(options.reviewerUsername)
+  const reviewClause: Record<string, unknown> = { reviewerUsername }
   if (options.reviewFlaggedOnly) {
-    filter['review.flagged'] = true
+    reviewClause['review.flagged'] = true
   }
 
   if (options.reviewTaggedOnly) {
-    filter['review.tags.0'] = { $exists: true }
+    reviewClause['review.tags.0'] = { $exists: true }
   }
 
   if (options.reviewTag) {
-    filter.reviewTagValues = normalizeExactValue(options.reviewTag)
+    reviewClause['review.tags'] = {
+      $elemMatch: {
+        $regex: `^${escapeRegex(normalizeText(options.reviewTag))}$`,
+        $options: 'i'
+      }
+    }
+  }
+
+  if (Object.keys(reviewClause).length > 1) {
+    filter.reviewStates = {
+      $elemMatch: reviewClause
+    }
   }
 
   const normalizedMailboxKeys = uniqueTextValues(allowedMailboxKeys)
@@ -513,6 +569,19 @@ function buildReviewTagValues(review: ReviewState): string[] {
   return uniqueStrings(review.tags)
 }
 
+function resolveSearchIndexDocument(
+  record: SearchIndexDocument,
+  reviewerUsername: string | undefined
+): SearchIndexDocument {
+  const review = resolveReviewState(record.reviewStates, reviewerUsername)
+  const normalizedReview = normalizeReview(review)
+  return {
+    ...record,
+    review: normalizedReview,
+    reviewTagValues: resolveReviewTagValues(record.reviewStates, reviewerUsername)
+  }
+}
+
 function toDocument(
   base: Omit<
     SearchIndexDocument,
@@ -524,11 +593,14 @@ function toDocument(
     | 'reviewTagValues'
     | 'bodySearchText'
     | 'review'
+    | 'reviewStates'
   >,
   bodySearchText: string,
-  review: ReviewState | null
+  reviewStates: Array<{
+    reviewerUsername: string
+    review: ReviewState
+  }>
 ): SearchIndexDocument {
-  const normalizedReview = normalizeReview(review)
   const searchText = buildSearchText(base, bodySearchText)
   const subjectValues = uniqueStrings([base.subject, base.originalSubject])
   return {
@@ -546,8 +618,12 @@ function toDocument(
       base.resolvedDisplayBCC
     ),
     subjectValues,
-    review: normalizedReview,
-    reviewTagValues: buildReviewTagValues(normalizedReview),
+    review: normalizeReview(null),
+    reviewStates: reviewStates.map((entry) => ({
+      reviewerUsername: normalizeReviewerUsername(entry.reviewerUsername),
+      review: normalizeReview(entry.review)
+    })),
+    reviewTagValues: [],
     updatedAt: new Date().toISOString()
   }
 }
@@ -561,12 +637,29 @@ export function buildSearchIndexDocumentsFromSession(
     fileName: string
     mailboxName: string
   },
-  reviewMap: Map<string, ReviewState>
+  reviewRecords: ReviewRecord[]
 ): SearchIndexDocument[] {
+  const reviewStatesByMessageId = new Map<
+    string,
+    Array<{ reviewerUsername: string; review: ReviewState }>
+  >()
+
+  for (const record of reviewRecords) {
+    const messageId = normalizeText(record.messageId)
+    if (!messageId) {
+      continue
+    }
+    const entries = reviewStatesByMessageId.get(messageId) || []
+    entries.push({
+      reviewerUsername: normalizeReviewerUsername(record.reviewerUsername),
+      review: normalizeReview(record)
+    })
+    reviewStatesByMessageId.set(messageId, entries)
+  }
+
   const documents: SearchIndexDocument[] = []
 
   for (const message of session.messages.values()) {
-    const review = reviewMap.get(message.id) || null
     const bodySearchText = normalizeExactValue(session.searchTextByMessageId.get(message.id) || '')
     documents.push(
       toDocument(
@@ -606,7 +699,7 @@ export function buildSearchIndexDocumentsFromSession(
           isMailLike: message.isMailLike
         },
         bodySearchText,
-        review
+        reviewStatesByMessageId.get(message.id) || []
       )
     )
   }
@@ -686,6 +779,7 @@ export class MemorySearchIndexStore implements SearchIndexStore {
   async updateReviewState(
     mailboxKey: string,
     messageId: string,
+    reviewerUsername: string,
     review: ReviewState | null
   ): Promise<void> {
     const key = normalizeText(mailboxKey)
@@ -697,9 +791,20 @@ export class MemorySearchIndexStore implements SearchIndexStore {
     if (!record) {
       return
     }
+    const normalizedReviewerUsername = normalizeReviewerUsername(reviewerUsername)
     const normalizedReview = normalizeReview(review)
+    const reviewStates = [...(record.reviewStates || [])].filter(
+      (entry) => normalizeReviewerUsername(entry.reviewerUsername) !== normalizedReviewerUsername
+    )
+    if (normalizedReview.flagged || normalizedReview.tags.length > 0) {
+      reviewStates.push({
+        reviewerUsername: normalizedReviewerUsername,
+        review: normalizedReview
+      })
+    }
     mailbox.set(record.messageId, {
       ...record,
+      reviewStates,
       review: normalizedReview,
       reviewTagValues: buildReviewTagValues(normalizedReview),
       updatedAt: new Date().toISOString()
@@ -733,7 +838,10 @@ export class MemorySearchIndexStore implements SearchIndexStore {
     const matched = records
       .filter((record) => matchesDocument(record, options, hiddenRules))
       .sort((left, right) => sortDocuments(left, right, options.sort))
-    return paginateSearchResults(matched, options, hiddenRules)
+    const resolved = matched.map((record) =>
+      resolveSearchIndexDocument(record, options.reviewerUsername)
+    )
+    return paginateSearchResults(resolved, options, hiddenRules)
   }
 
   async close(): Promise<void> {
@@ -761,15 +869,16 @@ function matchesDocument(
     return false
   }
 
-  if (options.reviewFlaggedOnly && !record.review.flagged) {
+  const review = resolveReviewState(record.reviewStates, options.reviewerUsername)
+  if (options.reviewFlaggedOnly && !review?.flagged) {
     return false
   }
-  if (options.reviewTaggedOnly && record.review.tags.length === 0) {
+  if (options.reviewTaggedOnly && (!review || review.tags.length === 0)) {
     return false
   }
   if (options.reviewTag) {
     const needle = normalizeExactValue(options.reviewTag)
-    if (!record.reviewTagValues.includes(needle)) {
+    if (!review || !review.tags.some((tag) => normalizeExactValue(tag) === needle)) {
       return false
     }
   }
@@ -910,8 +1019,9 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     await documents.createIndex?.({ scopePath: 1, searchTokens: 1 })
     await documents.createIndex?.({ scopePath: 1, addressValues: 1 })
     await documents.createIndex?.({ scopePath: 1, subjectValues: 1 })
-    await documents.createIndex?.({ mailboxKey: 1, 'review.flagged': 1 })
-    await documents.createIndex?.({ mailboxKey: 1, reviewTagValues: 1 })
+    await documents.createIndex?.({ mailboxKey: 1, 'reviewStates.reviewerUsername': 1 })
+    await documents.createIndex?.({ mailboxKey: 1, 'reviewStates.review.flagged': 1 })
+    await documents.createIndex?.({ mailboxKey: 1, 'reviewStates.review.tags': 1 })
     await documents.createIndex?.({ mailboxKey: 1, sortDateMs: -1 })
     await rules.createIndex?.({ kind: 1, value: 1 }, { unique: true })
     await rules.createIndex?.({ updatedAt: -1 })
@@ -938,11 +1048,32 @@ export class MongoSearchIndexStore implements SearchIndexStore {
   async updateReviewState(
     mailboxKey: string,
     messageId: string,
+    reviewerUsername: string,
     review: ReviewState | null
   ): Promise<void> {
     const normalizedMailboxKey = normalizeText(mailboxKey)
     const normalizedMessageId = normalizeText(messageId)
+    const normalizedReviewerUsername = normalizeReviewerUsername(reviewerUsername)
     const normalizedReview = normalizeReview(review)
+    const existing = await this.documents.findOne({
+      mailboxKey: normalizedMailboxKey,
+      messageId: normalizedMessageId
+    })
+    if (!existing) {
+      return
+    }
+    const existingStates = Array.isArray((existing as SearchIndexDocument).reviewStates)
+      ? [...(existing as SearchIndexDocument).reviewStates]
+      : []
+    const reviewStates = existingStates.filter(
+      (entry) => normalizeReviewerUsername(entry.reviewerUsername) !== normalizedReviewerUsername
+    )
+    if (normalizedReview.flagged || normalizedReview.tags.length > 0) {
+      reviewStates.push({
+        reviewerUsername: normalizedReviewerUsername,
+        review: normalizedReview
+      })
+    }
     await this.documents.updateOne(
       {
         mailboxKey: normalizedMailboxKey,
@@ -950,6 +1081,7 @@ export class MongoSearchIndexStore implements SearchIndexStore {
       },
       {
         $set: {
+          reviewStates,
           review: normalizedReview,
           reviewTagValues: buildReviewTagValues(normalizedReview),
           updatedAt: new Date().toISOString()
@@ -1004,9 +1136,10 @@ export class MongoSearchIndexStore implements SearchIndexStore {
       .skip(start)
       .limit(options.pageSize)
       .toArray()
+    const resolvedItems = items.map((record) => resolveSearchIndexDocument(record, options.reviewerUsername))
     const parsed = parseSearchTerms(options.query, options.mode)
     return {
-      items,
+      items: resolvedItems,
       total,
       page,
       pageSize: options.pageSize,
@@ -1073,8 +1206,7 @@ export async function refreshSearchIndexFromCatalog(
       try {
         const session = openPstMailbox(rootPath, scope.scopePath, file.fileName)
         const mailboxKey = session.filePath
-        const messageIds = [...session.messages.keys()]
-        const reviewMap = await reviewStore.getMany(mailboxKey, messageIds)
+        const reviewRecords = await reviewStore.listReviews(mailboxKey)
         const documents = buildSearchIndexDocumentsFromSession(
           session,
           {
@@ -1084,7 +1216,7 @@ export async function refreshSearchIndexFromCatalog(
             fileName: file.fileName,
             mailboxName: session.mailboxName
           },
-          reviewMap
+          reviewRecords
         )
         await searchIndexStore.replaceMailboxDocuments(mailboxKey, documents)
         mailboxCount += 1

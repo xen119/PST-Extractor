@@ -45,6 +45,7 @@ import {
   buildSearchIndexDocumentsFromSession,
   refreshSearchIndexFromCatalog,
   type HiddenRuleRecord,
+  type SearchIndexDocument,
   type SearchIndexPage,
   type SearchIndexStore,
   type SearchScope
@@ -1042,6 +1043,10 @@ function normalizeReviewState(review: ReviewState | null): ReviewState {
   )
 }
 
+function getReviewOwnerUsername(session: AuthSessionRecord | null | undefined): string {
+  return normalizeText(session?.username || '') || 'anonymous'
+}
+
 function buildReviewedSummary(
   summary: MessageSummary,
   review: ReviewState | null
@@ -1105,9 +1110,13 @@ function createAppError(statusCode: number, message: string): Error {
 
 function toReviewableContext(
   session: SessionRecord,
-  summary: MessageSummary
+  summary: MessageSummary,
+  reviewerUsername: string
 ) {
-  return buildReviewContext(session.filePath, session.fileName, summary)
+  return {
+    ...buildReviewContext(session.filePath, session.fileName, summary),
+    reviewerUsername: normalizeText(reviewerUsername) || 'anonymous'
+  }
 }
 
 function getSessionOrThrow(
@@ -1124,14 +1133,15 @@ function getSessionOrThrow(
 async function buildMessageDetailResponse(
   session: SessionRecord,
   messageId: string,
-  reviewStore: ReviewStore
+  reviewStore: ReviewStore,
+  reviewerUsername: string
 ): Promise<ReviewedMessageDetail> {
   const summary = session.index.messages.get(messageId)
   if (!summary) {
     throw createAppError(404, `Unknown message: ${messageId}`)
   }
 
-  const review = await reviewStore.getReview(session.filePath, messageId)
+  const review = await reviewStore.getReview(session.filePath, messageId, reviewerUsername)
   if (summary.parseError) {
     return buildReviewedDetail(buildEmptyMessageDetail(summary), review)
   }
@@ -1170,7 +1180,8 @@ async function buildReviewedFolderPage(
   folderId: string,
   options: ListFolderOptions,
   reviewStore: ReviewStore,
-  hiddenRules: HiddenRuleRecord[]
+  hiddenRules: HiddenRuleRecord[],
+  reviewerUsername: string
 ): Promise<ReviewedFolderPage> {
   const { folder, items: collectedItems } = collectFolderMessages(
     session.index,
@@ -1184,7 +1195,8 @@ async function buildReviewedFolderPage(
   )
   const reviewMap = await reviewStore.getMany(
     session.filePath,
-    collectedItems.map((message) => message.id)
+    collectedItems.map((message) => message.id),
+    reviewerUsername
   )
 
   let items = [...collectedItems]
@@ -1216,7 +1228,8 @@ async function buildReviewedFolderPage(
   const pageItems = sorted.slice(start, start + options.pageSize)
   const pageReviewMap = await reviewStore.getMany(
     session.filePath,
-    pageItems.map((item) => item.id)
+    pageItems.map((item) => item.id),
+    reviewerUsername
   )
 
   return {
@@ -1242,9 +1255,17 @@ async function buildFolderPageWithReviews(
   folderId: string,
   options: ListFolderOptions,
   reviewStore: ReviewStore,
-  hiddenRules: HiddenRuleRecord[]
+  hiddenRules: HiddenRuleRecord[],
+  reviewerUsername: string
 ): Promise<ReviewedFolderPage> {
-  return buildReviewedFolderPage(session, folderId, options, reviewStore, hiddenRules)
+  return buildReviewedFolderPage(
+    session,
+    folderId,
+    options,
+    reviewStore,
+    hiddenRules,
+    reviewerUsername
+  )
 }
 
 function assertReviewableMessage(summary: MessageSummary): void {
@@ -1949,8 +1970,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   }
 
   async function syncSearchIndexForMailbox(session: SessionRecord): Promise<void> {
-    const messageIds = [...session.index.messages.keys()]
-    const reviewMap = await reviewStore.getMany(session.filePath, messageIds)
+    const reviewRecords = await reviewStore.listReviews(session.filePath)
     const documents = buildSearchIndexDocumentsFromSession(
       session.index,
       {
@@ -1960,7 +1980,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         fileName: session.fileName,
         mailboxName: session.index.mailboxName
       },
-      reviewMap
+      reviewRecords
     )
     await searchIndexStore.replaceMailboxDocuments(session.filePath, documents)
   }
@@ -3345,6 +3365,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.get(API_ROUTES.search, async (req, res) => {
     try {
       const authSession = getAuthSessionFromRequest(req)
+      const reviewerUsername = getReviewOwnerUsername(authSession)
       const filters = parseReviewFilters(req.query as Record<string, string | string[] | undefined>)
       const scope = parseSearchScope(req.query.scope) as SearchScope
       const requestedScopePath = normalizeScopePath(req.query.scopePath)
@@ -3379,6 +3400,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         scopePath,
         mailboxKey,
         allowedMailboxKeys,
+        reviewerUsername,
         query: filters.query,
         mode: filters.mode,
         mailOnly: filters.mailOnly,
@@ -3411,7 +3433,15 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         scope,
         scopePath: page.scopePath || scopePath,
         scopeLabel: page.scopeLabel || scopeLabel,
-        page
+        page: {
+          ...page,
+          items: page.items.map((item) => {
+            const { reviewStates: _reviewStates, ...rest } = item as SearchIndexDocument & {
+              reviewStates?: unknown
+            }
+            return rest
+          })
+        }
       })
     } catch (error) {
       createRouteErrorHandler(res, error)
@@ -3557,6 +3587,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.get(API_ROUTES.folderMessages, async (req, res) => {
     try {
       const authSession = getAuthSessionFromRequest(req)
+      const reviewerUsername = getReviewOwnerUsername(authSession)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const folderId = normalizeText(req.params.folderId)
       const filters = parseReviewFilters(req.query as Record<string, string | string[] | undefined>)
@@ -3566,7 +3597,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         folderId,
         filters,
         reviewStore,
-        hiddenRules
+        hiddenRules,
+        reviewerUsername
       )
       recordAuditEvent({
         req,
@@ -3595,9 +3627,15 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.get(API_ROUTES.messageDetail, async (req, res) => {
     try {
       const authSession = getAuthSessionFromRequest(req)
+      const reviewerUsername = getReviewOwnerUsername(authSession)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const messageId = normalizeText(req.params.messageId)
-      const detail = await buildMessageDetailResponse(session, messageId, reviewStore)
+      const detail = await buildMessageDetailResponse(
+        session,
+        messageId,
+        reviewStore,
+        reviewerUsername
+      )
       recordAuditEvent({
         req,
         session: authSession,
@@ -3622,9 +3660,15 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.get(API_ROUTES.messageExtract, async (req, res) => {
     try {
       const authSession = getAuthSessionFromRequest(req)
+      const reviewerUsername = getReviewOwnerUsername(authSession)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const messageId = normalizeText(req.params.messageId)
-      const detail = await buildMessageDetailResponse(session, messageId, reviewStore)
+      const detail = await buildMessageDetailResponse(
+        session,
+        messageId,
+        reviewStore,
+        reviewerUsername
+      )
       const fields = normalizeExtractionFields(req.query.fields)
       recordAuditEvent({
         req,
@@ -3651,6 +3695,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.get(API_ROUTES.folderExtract, async (req, res) => {
     try {
       const authSession = getAuthSessionFromRequest(req)
+      const reviewerUsername = getReviewOwnerUsername(authSession)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const folderId = normalizeText(req.params.folderId)
       const filters = parseReviewFilters(req.query as Record<string, string | string[] | undefined>)
@@ -3661,7 +3706,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         folderId,
         filters,
         reviewStore,
-        hiddenRules
+        hiddenRules,
+        reviewerUsername
       )
       const folder = getFolderSummary(session.index, folderId)
       const extraction = buildFolderExtractionPage(
@@ -3711,9 +3757,15 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.get(API_ROUTES.messageExportJson, async (req, res) => {
     try {
       const authSession = getAuthSessionFromRequest(req)
+      const reviewerUsername = getReviewOwnerUsername(authSession)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const messageId = normalizeText(req.params.messageId)
-      const detail = await buildMessageDetailResponse(session, messageId, reviewStore)
+      const detail = await buildMessageDetailResponse(
+        session,
+        messageId,
+        reviewStore,
+        reviewerUsername
+      )
       const fileName = `${safeDownloadName(detail.subject || 'message', 'message')}.json`
       responseBinary(
         res,
@@ -3774,6 +3826,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.get(API_ROUTES.flaggedBundleExport, async (req, res) => {
     try {
       const authSession = getAuthSessionFromRequest(req)
+      const reviewerUsername = getReviewOwnerUsername(authSession)
       const query = req.query as FlaggedBundleQuery
       const scope = parseFlaggedBundleScope(query.scope)
       const scopePath = normalizeScopePath(query.scopePath)
@@ -3814,7 +3867,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       for (const mailbox of mailboxes) {
         let mailboxSession = mailbox.session || null
         let flaggedReviews = await reviewStore.listReviews(mailbox.mailboxKey, {
-          flaggedOnly: true
+          flaggedOnly: true,
+          reviewerUsername
         })
         if (!flaggedReviews.length) {
           continue
@@ -3986,6 +4040,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           scope,
           scopePath: manifest.scope.scopePath,
           scopeLabel: manifest.scope.scopeLabel,
+          reviewerUsername,
           exported: manifest.counts.exported,
           failed: manifest.counts.failed
         }
@@ -4031,9 +4086,13 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.get(API_ROUTES.messageReview, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
+      const reviewerUsername = getReviewOwnerUsername(authSession)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const messageId = normalizeText(req.params.messageId)
-      const review = normalizeReviewState(await reviewStore.getReview(session.filePath, messageId))
+      const review = normalizeReviewState(
+        await reviewStore.getReview(session.filePath, messageId, reviewerUsername)
+      )
       responseJson(res, 200, {
         sessionId: session.id,
         messageId,
@@ -4047,6 +4106,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.patch(API_ROUTES.messageReview, async (req, res) => {
     try {
       const authSession = getAuthSessionFromRequest(req)
+      const reviewerUsername = getReviewOwnerUsername(authSession)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const messageId = normalizeText(req.params.messageId)
       const body = (req.body || {}) as ReviewPatchBody
@@ -4057,11 +4117,16 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       const summary = getMessageSummary(session.index, messageId)
       assertReviewableMessage(summary)
       const review = await reviewStore.upsertReview({
-        ...toReviewableContext(session, summary),
+        ...toReviewableContext(session, summary, reviewerUsername),
         flagged: body.flagged,
         tags: body.tags
       })
-      await searchIndexStore.updateReviewState(session.filePath, messageId, review)
+      await searchIndexStore.updateReviewState(
+        session.filePath,
+        messageId,
+        reviewerUsername,
+        review
+      )
       recordAuditEvent({
         req,
         session: authSession,
@@ -4070,6 +4135,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         outcome: 'success',
         metadata: {
           fileName: session.fileName,
+          reviewerUsername,
           flagged: review ? review.flagged : false,
           tagCount: review ? review.tags.length : 0
         }
@@ -4088,10 +4154,11 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.delete(API_ROUTES.messageReview, async (req, res) => {
     try {
       const authSession = getAuthSessionFromRequest(req)
+      const reviewerUsername = getReviewOwnerUsername(authSession)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const messageId = normalizeText(req.params.messageId)
-      await reviewStore.deleteReview(session.filePath, messageId)
-      await searchIndexStore.updateReviewState(session.filePath, messageId, null)
+      await reviewStore.deleteReview(session.filePath, messageId, reviewerUsername)
+      await searchIndexStore.updateReviewState(session.filePath, messageId, reviewerUsername, null)
       recordAuditEvent({
         req,
         session: authSession,
@@ -4099,7 +4166,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         target: messageId,
         outcome: 'success',
         metadata: {
-          fileName: session.fileName
+          fileName: session.fileName,
+          reviewerUsername
         }
       })
       responseJson(res, 200, {
@@ -4114,6 +4182,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
   app.get(API_ROUTES.mailboxReviewQueue, async (req, res) => {
     try {
+      const authSession = getAuthSessionFromRequest(req)
+      const reviewerUsername = getReviewOwnerUsername(authSession)
       const session = getSessionOrThrow(sessions, req.params.sessionId)
       const filters = parseReviewFilters(req.query as Record<string, string | string[] | undefined>)
       const pageSize = filters.pageSize
@@ -4122,7 +4192,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         query: filters.query,
         flaggedOnly: filters.reviewFlaggedOnly,
         taggedOnly: filters.reviewTaggedOnly,
-        tag: filters.reviewTag
+        tag: filters.reviewTag,
+        reviewerUsername
       })
       const total = records.length
       const totalPages = Math.max(1, Math.ceil(total / pageSize))

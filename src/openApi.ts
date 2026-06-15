@@ -208,6 +208,7 @@ function reviewRecordSchema(): Record<string, unknown> {
           messageClass: { type: 'string' },
           kind: { type: 'string' },
           isMailLike: { type: 'boolean' },
+          reviewerUsername: { type: 'string' },
           subject: { type: 'string' },
           senderName: { type: 'string' },
           senderEmailAddress: { type: 'string' },

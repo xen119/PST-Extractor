@@ -9,6 +9,7 @@ export interface ReviewState {
 
 export interface ReviewRecord extends ReviewState {
   mailboxKey: string
+  reviewerUsername: string
   fileName: string
   messageId: string
   descriptorId: string
@@ -30,6 +31,7 @@ export interface ReviewRecord extends ReviewState {
 
 export interface ReviewContext {
   mailboxKey: string
+  reviewerUsername: string
   fileName: string
   messageId: string
   descriptorId: string
@@ -60,4 +62,5 @@ export interface ReviewSearchOptions {
   taggedOnly?: boolean
   tag?: string
   messageIds?: string[]
+  reviewerUsername?: string
 }

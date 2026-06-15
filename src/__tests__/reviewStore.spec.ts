@@ -8,7 +8,8 @@ import {
 import type { ReviewRecord } from '../reviewTypes'
 
 function makeContext() {
-  return buildReviewContext('/mailboxes/team.pst', 'team.pst', {
+  return {
+    ...buildReviewContext('/mailboxes/team.pst', 'team.pst', {
     id: 'message-1',
     descriptorId: 'descriptor-1',
     folderId: 'folder-1',
@@ -37,12 +38,15 @@ function makeContext() {
     hasAttachments: true,
     isRead: false,
     isMailLike: true
-  })
+    }),
+    reviewerUsername: 'admin'
+  }
 }
 
 function makeRecord(overrides: Partial<ReviewRecord> = {}): ReviewRecord {
   return {
     mailboxKey: '/mailboxes/team.pst',
+    reviewerUsername: 'admin',
     fileName: 'team.pst',
     messageId: 'message-1',
     descriptorId: 'descriptor-1',
@@ -80,6 +84,10 @@ function matchesClause(record: ReviewRecord, clause: Record<string, unknown>): b
 
 function matchesFilter(record: ReviewRecord, filter: Record<string, unknown>): boolean {
   if (filter.mailboxKey && record.mailboxKey !== filter.mailboxKey) {
+    return false
+  }
+
+  if (filter.reviewerUsername && record.reviewerUsername !== filter.reviewerUsername) {
     return false
   }
 
@@ -163,8 +171,12 @@ function createFakeCollection(
       onUpdate?.(filter, update, options)
       const mailboxKey = String((filter as Record<string, unknown>).mailboxKey || '')
       const messageId = String((filter as Record<string, unknown>).messageId || '')
+      const reviewerUsername = String((filter as Record<string, unknown>).reviewerUsername || '')
       const existingIndex = storage.findIndex(
-        (record) => record.mailboxKey === mailboxKey && record.messageId === messageId
+        (record) =>
+          record.mailboxKey === mailboxKey &&
+          record.messageId === messageId &&
+          record.reviewerUsername === reviewerUsername
       )
       const nextRecord = {
         ...(options?.upsert ? {} : storage[existingIndex] || {}),
@@ -181,10 +193,15 @@ function createFakeCollection(
     async deleteOne(filter) {
       const mailboxKey = String((filter as Record<string, unknown>).mailboxKey || '')
       const messageId = String((filter as Record<string, unknown>).messageId || '')
+      const reviewerUsername = String((filter as Record<string, unknown>).reviewerUsername || '')
       const originalLength = storage.length
       for (let index = storage.length - 1; index >= 0; index--) {
         const record = storage[index]
-        if (record.mailboxKey === mailboxKey && record.messageId === messageId) {
+        if (
+          record.mailboxKey === mailboxKey &&
+          record.messageId === messageId &&
+          record.reviewerUsername === reviewerUsername
+        ) {
           storage.splice(index, 1)
         }
       }
@@ -202,10 +219,12 @@ describe('review store helpers', () => {
       flaggedOnly: true,
       taggedOnly: true,
       tag: 'Urgent',
-      messageIds: ['message-1', 'message-2']
+      messageIds: ['message-1', 'message-2'],
+      reviewerUsername: 'admin'
     })
 
     expect(filter.mailboxKey).toBe('/mailboxes/team.pst')
+    expect(filter.reviewerUsername).toBe('admin')
     expect(filter.messageId).toEqual({ $in: ['message-1', 'message-2'] })
     expect(filter.flagged).toBe(true)
     expect(filter['tags.0']).toEqual({ $exists: true })
@@ -244,25 +263,31 @@ describe('review store helpers', () => {
       updatedAt: expect.any(String)
     })
 
-    expect(await store.getReview(context.mailboxKey, context.messageId)).toEqual(review)
+    expect(await store.getReview(context.mailboxKey, context.messageId, context.reviewerUsername)).toEqual(review)
 
     const queue = await store.listReviews(context.mailboxKey, {
       flaggedOnly: true,
-      tag: 'urgent'
+      tag: 'urgent',
+      reviewerUsername: context.reviewerUsername
     })
     expect(queue).toHaveLength(1)
     expect(queue[0].messageId).toBe(context.messageId)
 
     const searchResults = await store.listReviews(context.mailboxKey, {
-      query: 'review'
+      query: 'review',
+      reviewerUsername: context.reviewerUsername
     })
     expect(searchResults.map((record) => record.messageId)).toEqual([
       context.messageId,
       'message-2'
     ])
 
-    await expect(store.deleteReview(context.mailboxKey, context.messageId)).resolves.toBe(true)
-    expect(await store.getReview(context.mailboxKey, context.messageId)).toBeNull()
+    await expect(
+      store.deleteReview(context.mailboxKey, context.messageId, context.reviewerUsername)
+    ).resolves.toBe(true)
+    expect(
+      await store.getReview(context.mailboxKey, context.messageId, context.reviewerUsername)
+    ).toBeNull()
 
     await store.close()
   })

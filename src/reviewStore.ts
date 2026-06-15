@@ -29,10 +29,14 @@ export interface ReviewCollectionLike {
 export interface ReviewStore {
   kind: 'memory' | 'mongo'
   isPersistent: boolean
-  getReview(mailboxKey: string, messageId: string): Promise<ReviewState | null>
-  getMany(mailboxKey: string, messageIds: string[]): Promise<Map<string, ReviewState>>
+  getReview(mailboxKey: string, messageId: string, reviewerUsername: string): Promise<ReviewState | null>
+  getMany(
+    mailboxKey: string,
+    messageIds: string[],
+    reviewerUsername: string
+  ): Promise<Map<string, ReviewState>>
   upsertReview(input: ReviewPatchInput): Promise<ReviewState | null>
-  deleteReview(mailboxKey: string, messageId: string): Promise<boolean>
+  deleteReview(mailboxKey: string, messageId: string, reviewerUsername: string): Promise<boolean>
   listReviews(mailboxKey: string, options?: ReviewSearchOptions): Promise<ReviewRecord[]>
   close(): Promise<void>
 }
@@ -45,6 +49,10 @@ function normalizeText(value: unknown): string {
     .replace(/\s+/g, ' ')
 }
 
+function normalizeReviewerUsername(value: unknown): string {
+  return normalizeText(value) || 'anonymous'
+}
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
@@ -53,8 +61,14 @@ function buildMailboxKey(message: Pick<ReviewContext, 'mailboxKey'>): string {
   return normalizeText(message.mailboxKey)
 }
 
-function buildReviewKey(mailboxKey: string, messageId: string): string {
-  return `${normalizeText(mailboxKey)}::${normalizeText(messageId)}`
+function buildReviewKey(
+  mailboxKey: string,
+  messageId: string,
+  reviewerUsername: string
+): string {
+  return `${normalizeText(mailboxKey)}::${normalizeText(messageId)}::${normalizeReviewerUsername(
+    reviewerUsername
+  )}`
 }
 
 export function normalizeReviewTags(input: unknown): string[] {
@@ -89,6 +103,7 @@ export function buildReviewContext(
 ): ReviewContext {
   return {
     mailboxKey: normalizeText(mailboxKey),
+    reviewerUsername: 'anonymous',
     fileName: normalizeText(fileName),
     messageId: normalizeText(summary.id),
     descriptorId: normalizeText(summary.descriptorId),
@@ -114,6 +129,10 @@ export function buildReviewSearchFilter(
   options: ReviewSearchOptions = {}
 ): Record<string, unknown> {
   const filter: Record<string, unknown> = { mailboxKey: normalizeText(mailboxKey) }
+  const reviewerUsername = normalizeText(options.reviewerUsername)
+  if (reviewerUsername) {
+    filter.reviewerUsername = reviewerUsername
+  }
   const messageIds = Array.from(new Set((options.messageIds || []).map((value) => normalizeText(value)).filter(Boolean)))
 
   if (messageIds.length) {
@@ -162,6 +181,9 @@ export function buildReviewSearchFilter(
 }
 
 function matchesReviewSearch(record: ReviewRecord, options: ReviewSearchOptions = {}): boolean {
+  if (options.reviewerUsername && record.reviewerUsername !== normalizeReviewerUsername(options.reviewerUsername)) {
+    return false
+  }
   if (options.flaggedOnly && !record.flagged) {
     return false
   }
@@ -233,15 +255,23 @@ export class MemoryReviewStore implements ReviewStore {
   public isPersistent = false
   private readonly records = new Map<string, ReviewRecord>()
 
-  async getReview(mailboxKey: string, messageId: string): Promise<ReviewState | null> {
-    const record = this.records.get(buildReviewKey(mailboxKey, messageId)) || null
+  async getReview(
+    mailboxKey: string,
+    messageId: string,
+    reviewerUsername: string
+  ): Promise<ReviewState | null> {
+    const record = this.records.get(buildReviewKey(mailboxKey, messageId, reviewerUsername)) || null
     return toReviewState(record)
   }
 
-  async getMany(mailboxKey: string, messageIds: string[]): Promise<Map<string, ReviewState>> {
+  async getMany(
+    mailboxKey: string,
+    messageIds: string[],
+    reviewerUsername: string
+  ): Promise<Map<string, ReviewState>> {
     const result = new Map<string, ReviewState>()
     for (const messageId of messageIds) {
-      const record = this.records.get(buildReviewKey(mailboxKey, messageId))
+      const record = this.records.get(buildReviewKey(mailboxKey, messageId, reviewerUsername))
       if (record) {
         result.set(record.messageId, toReviewState(record) as ReviewState)
       }
@@ -252,7 +282,8 @@ export class MemoryReviewStore implements ReviewStore {
   async upsertReview(input: ReviewPatchInput): Promise<ReviewState | null> {
     const mailboxKey = buildMailboxKey(input)
     const messageId = normalizeText(input.messageId)
-    const key = buildReviewKey(mailboxKey, messageId)
+    const reviewerUsername = normalizeReviewerUsername(input.reviewerUsername)
+    const key = buildReviewKey(mailboxKey, messageId, reviewerUsername)
     const existing = this.records.get(key) || null
     const tags =
       input.tags === undefined ? existing?.tags || [] : normalizeReviewTags(input.tags)
@@ -266,6 +297,7 @@ export class MemoryReviewStore implements ReviewStore {
     const now = new Date().toISOString()
     const record: ReviewRecord = {
       mailboxKey,
+      reviewerUsername,
       fileName: normalizeText(input.fileName),
       messageId,
       descriptorId: normalizeText(input.descriptorId),
@@ -292,8 +324,12 @@ export class MemoryReviewStore implements ReviewStore {
     return toReviewState(record)
   }
 
-  async deleteReview(mailboxKey: string, messageId: string): Promise<boolean> {
-    return this.records.delete(buildReviewKey(mailboxKey, messageId))
+  async deleteReview(
+    mailboxKey: string,
+    messageId: string,
+    reviewerUsername: string
+  ): Promise<boolean> {
+    return this.records.delete(buildReviewKey(mailboxKey, messageId, reviewerUsername))
   }
 
   async listReviews(mailboxKey: string, options: ReviewSearchOptions = {}): Promise<ReviewRecord[]> {
@@ -323,22 +359,32 @@ export class MongoReviewStore implements ReviewStore {
     const client = new MongoClient(uri)
     await client.connect()
     const collection = client.db(dbName).collection<ReviewDocument>(DEFAULT_COLLECTION_NAME)
-    await collection.createIndex({ mailboxKey: 1, messageId: 1 }, { unique: true })
+    await collection.createIndex({ mailboxKey: 1, messageId: 1, reviewerUsername: 1 }, { unique: true })
     await collection.createIndex({ mailboxKey: 1, flagged: 1 })
     await collection.createIndex({ mailboxKey: 1, updatedAt: -1 })
     await collection.createIndex({ mailboxKey: 1, tags: 1 })
+    await collection.createIndex({ mailboxKey: 1, reviewerUsername: 1 })
     return new MongoReviewStore(collection as unknown as ReviewCollectionLike, client)
   }
 
-  async getReview(mailboxKey: string, messageId: string): Promise<ReviewState | null> {
+  async getReview(
+    mailboxKey: string,
+    messageId: string,
+    reviewerUsername: string
+  ): Promise<ReviewState | null> {
     const record = await this.collection.findOne({
       mailboxKey: normalizeText(mailboxKey),
-      messageId: normalizeText(messageId)
+      messageId: normalizeText(messageId),
+      reviewerUsername: normalizeReviewerUsername(reviewerUsername)
     })
     return toReviewState(record)
   }
 
-  async getMany(mailboxKey: string, messageIds: string[]): Promise<Map<string, ReviewState>> {
+  async getMany(
+    mailboxKey: string,
+    messageIds: string[],
+    reviewerUsername: string
+  ): Promise<Map<string, ReviewState>> {
     const ids = Array.from(new Set(messageIds.map((value) => normalizeText(value)).filter(Boolean)))
     const result = new Map<string, ReviewState>()
     if (!ids.length) {
@@ -347,6 +393,7 @@ export class MongoReviewStore implements ReviewStore {
     const records = await this.collection
       .find({
         mailboxKey: normalizeText(mailboxKey),
+        reviewerUsername: normalizeReviewerUsername(reviewerUsername),
         messageId: { $in: ids }
       })
       .sort({ updatedAt: -1 })
@@ -360,19 +407,21 @@ export class MongoReviewStore implements ReviewStore {
   async upsertReview(input: ReviewPatchInput): Promise<ReviewState | null> {
     const mailboxKey = buildMailboxKey(input)
     const messageId = normalizeText(input.messageId)
-    const existing = await this.collection.findOne({ mailboxKey, messageId })
+    const reviewerUsername = normalizeReviewerUsername(input.reviewerUsername)
+    const existing = await this.collection.findOne({ mailboxKey, messageId, reviewerUsername })
     const tags =
       input.tags === undefined ? existing?.tags || [] : normalizeReviewTags(input.tags)
     const flagged = input.flagged === undefined ? existing?.flagged || false : Boolean(input.flagged)
 
     if (!flagged && tags.length === 0) {
-      await this.collection.deleteOne({ mailboxKey, messageId })
+      await this.collection.deleteOne({ mailboxKey, messageId, reviewerUsername })
       return null
     }
 
     const now = new Date().toISOString()
     const record: ReviewRecord = {
       mailboxKey,
+      reviewerUsername,
       fileName: normalizeText(input.fileName),
       messageId,
       descriptorId: normalizeText(input.descriptorId),
@@ -397,7 +446,7 @@ export class MongoReviewStore implements ReviewStore {
     }
 
     await this.collection.updateOne(
-      { mailboxKey, messageId },
+      { mailboxKey, messageId, reviewerUsername },
       {
         $set: record
       },
@@ -406,10 +455,15 @@ export class MongoReviewStore implements ReviewStore {
     return toReviewState(record)
   }
 
-  async deleteReview(mailboxKey: string, messageId: string): Promise<boolean> {
+  async deleteReview(
+    mailboxKey: string,
+    messageId: string,
+    reviewerUsername: string
+  ): Promise<boolean> {
     const result = await this.collection.deleteOne({
       mailboxKey: normalizeText(mailboxKey),
-      messageId: normalizeText(messageId)
+      messageId: normalizeText(messageId),
+      reviewerUsername: normalizeReviewerUsername(reviewerUsername)
     })
     return Boolean(result.deletedCount && result.deletedCount > 0)
   }

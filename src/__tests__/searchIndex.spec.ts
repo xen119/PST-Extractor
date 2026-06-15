@@ -48,6 +48,7 @@ function makeDocument(overrides: Partial<SearchIndexDocument> = {}): SearchIndex
       createdAt: '',
       updatedAt: ''
     },
+    reviewStates: [],
     reviewTagValues: [],
     updatedAt: now,
     ...overrides
@@ -271,5 +272,72 @@ describe('search index cache', () => {
     })
     expect(restored.total).toBe(1)
     expect(restored.items[0].messageId).toBe('message:1')
+  })
+
+  it('resolves review filters per reviewer username', async () => {
+    const store = new MemorySearchIndexStore()
+    await store.replaceMailboxDocuments('C:/PST/Case1/Search1/alpha.pst', [
+      makeDocument({
+        review: {
+          flagged: false,
+          tags: [],
+          createdAt: '',
+          updatedAt: ''
+        },
+        reviewStates: [
+          {
+            reviewerUsername: 'admin',
+            review: {
+              flagged: true,
+              tags: ['Admin'],
+              createdAt: '2024-01-03T00:00:00.000Z',
+              updatedAt: '2024-01-03T00:00:00.000Z'
+            }
+          },
+          {
+            reviewerUsername: 'bob',
+            review: {
+              flagged: false,
+              tags: ['Bob'],
+              createdAt: '2024-01-04T00:00:00.000Z',
+              updatedAt: '2024-01-04T00:00:00.000Z'
+            }
+          }
+        ]
+      })
+    ])
+
+    const adminResults = await store.search({
+      scope: 'all',
+      query: 'project',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'date-desc',
+      page: 1,
+      pageSize: 20,
+      reviewerUsername: 'admin',
+      reviewFlaggedOnly: true,
+      reviewTaggedOnly: false,
+      reviewTag: ''
+    })
+    expect(adminResults.total).toBe(1)
+    expect(adminResults.items[0].review.flagged).toBe(true)
+    expect(adminResults.items[0].review.tags).toEqual(['Admin'])
+
+    const bobResults = await store.search({
+      scope: 'all',
+      query: 'project',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'date-desc',
+      page: 1,
+      pageSize: 20,
+      reviewerUsername: 'bob',
+      reviewFlaggedOnly: true,
+      reviewTaggedOnly: false,
+      reviewTag: ''
+    })
+    expect(bobResults.total).toBe(0)
+    expect(bobResults.items).toHaveLength(0)
   })
 })

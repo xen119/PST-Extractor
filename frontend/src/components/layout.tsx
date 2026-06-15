@@ -6,7 +6,6 @@ import {
   ChevronRight,
   ChevronDown,
   Download,
-  Eraser,
   Flag,
   Mail,
   Maximize2,
@@ -371,9 +370,6 @@ interface MessageListProps {
   sort: string
   reviewFlaggedOnly: boolean
   reviewTaggedOnly: boolean
-  hiddenFiltersOpen: boolean
-  hiddenRules: Array<{ filterId: string; label: string; value: string; kind: 'address' | 'subject' }>
-  hiddenFiltersCount: number
   onQueryChange: (value: string) => void
   onSearch: () => void
   onSearchScopeChange: (value: 'pst' | 'search' | 'all') => void
@@ -381,13 +377,10 @@ interface MessageListProps {
   onSortChange: (value: string) => void
   onReviewFlaggedChange: (value: boolean) => void
   onReviewTaggedChange: (value: boolean) => void
-  onToggleHiddenFilters: () => void
-  onRemoveHiddenFilter: (filterId: string) => void
   onSelectMessage: (messageId: string) => void
   onPrevPage: () => void
   onNextPage: () => void
   onOpenBundle: () => void
-  onCreateHiddenFilter: (kind: 'address' | 'subject', value: string, label?: string) => void
   onPageChange?: (page: number) => void
   selectedMessageId: string
   sessionId: string | null
@@ -402,9 +395,6 @@ export function MessageList({
   sort,
   reviewFlaggedOnly,
   reviewTaggedOnly,
-  hiddenFiltersOpen,
-  hiddenRules,
-  hiddenFiltersCount,
   onQueryChange,
   onSearch,
   onSearchScopeChange,
@@ -412,13 +402,10 @@ export function MessageList({
   onSortChange,
   onReviewFlaggedChange,
   onReviewTaggedChange,
-  onToggleHiddenFilters,
-  onRemoveHiddenFilter,
   onSelectMessage,
   onPrevPage,
   onNextPage,
   onOpenBundle,
-  onCreateHiddenFilter,
   selectedMessageId,
   sessionId
 }: MessageListProps) {
@@ -460,9 +447,6 @@ export function MessageList({
           sort={sort}
           reviewFlaggedOnly={reviewFlaggedOnly}
           reviewTaggedOnly={reviewTaggedOnly}
-          hiddenFiltersOpen={hiddenFiltersOpen}
-          hiddenFiltersCount={hiddenFiltersCount}
-          hiddenRules={hiddenRules}
           onQueryChange={onQueryChange}
           onSearch={onSearch}
           onSearchScopeChange={onSearchScopeChange}
@@ -470,9 +454,6 @@ export function MessageList({
           onSortChange={onSortChange}
           onReviewFlaggedChange={onReviewFlaggedChange}
           onReviewTaggedChange={onReviewTaggedChange}
-          onToggleHiddenFilters={onToggleHiddenFilters}
-          onRemoveHiddenFilter={onRemoveHiddenFilter}
-          onCreateHiddenFilter={onCreateHiddenFilter}
         />
       </div>
 
@@ -543,9 +524,6 @@ function MessageSearchBar(props: {
   sort: string
   reviewFlaggedOnly: boolean
   reviewTaggedOnly: boolean
-  hiddenFiltersOpen: boolean
-  hiddenFiltersCount: number
-  hiddenRules: Array<{ filterId: string; label: string; value: string; kind: 'address' | 'subject' }>
   onQueryChange: (value: string) => void
   onSearch: () => void
   onSearchScopeChange: (value: 'pst' | 'search' | 'all') => void
@@ -553,13 +531,7 @@ function MessageSearchBar(props: {
   onSortChange: (value: string) => void
   onReviewFlaggedChange: (value: boolean) => void
   onReviewTaggedChange: (value: boolean) => void
-  onToggleHiddenFilters: () => void
-  onRemoveHiddenFilter: (filterId: string) => void
-  onCreateHiddenFilter: (kind: 'address' | 'subject', value: string, label?: string) => void
 }) {
-  const [hiddenFilterKind, setHiddenFilterKind] = React.useState<'address' | 'subject'>('address')
-  const [hiddenFilterValue, setHiddenFilterValue] = React.useState('')
-
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-end gap-2">
@@ -634,73 +606,6 @@ function MessageSearchBar(props: {
           >
             <TagIcon className="h-4 w-4" />
           </IconButton>
-          <Popover
-            open={props.hiddenFiltersOpen}
-            onOpenChange={(open) => {
-              if (open !== props.hiddenFiltersOpen) {
-                props.onToggleHiddenFilters()
-              }
-            }}
-          >
-            <PopoverTrigger asChild>
-              <IconButton label="Hidden filters">
-                <ChevronDown className="h-4 w-4" />
-              </IconButton>
-            </PopoverTrigger>
-            <PopoverContent className="w-[30rem]">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-sm font-semibold text-[color:var(--text)]">Hidden filters</div>
-                  <div className="text-xs text-[color:var(--muted)]">{props.hiddenFiltersCount} active filters</div>
-                </div>
-                <Badge>{props.hiddenFiltersCount}</Badge>
-              </div>
-              <Separator className="my-3" />
-              <div className="space-y-2">
-                {props.hiddenRules.length ? (
-                  props.hiddenRules.map((rule) => (
-                    <div key={rule.filterId} className="flex items-center justify-between gap-2 rounded-2xl border border-[color:var(--line)] px-3 py-2">
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium text-[color:var(--text)]">{rule.label}</div>
-                        <div className="text-xs text-[color:var(--muted)]">{rule.kind}: {rule.value}</div>
-                      </div>
-                      <IconButton label="Remove hidden filter" className="h-8 w-8" onClick={() => props.onRemoveHiddenFilter(rule.filterId)}>
-                        <Eraser className="h-4 w-4" />
-                      </IconButton>
-                    </div>
-                  ))
-                ) : (
-                  <div className="empty-state py-6">No hidden filters yet.</div>
-                )}
-              </div>
-              <Separator className="my-3" />
-              <div className="space-y-2">
-                <div className="grid grid-cols-[9rem_1fr_auto] gap-2">
-                  <select className="select" value={hiddenFilterKind} onChange={(event) => setHiddenFilterKind(event.target.value as 'address' | 'subject')}>
-                    <option value="address">Address</option>
-                    <option value="subject">Subject</option>
-                  </select>
-                  <Input
-                    value={hiddenFilterValue}
-                    onChange={(event) => setHiddenFilterValue(event.target.value)}
-                    placeholder="Hidden value"
-                  />
-                  <Button
-                    variant="secondary"
-                    onClick={() => {
-                      if (!hiddenFilterValue.trim()) {
-                        return
-                      }
-                      props.onCreateHiddenFilter(hiddenFilterKind, hiddenFilterValue.trim(), hiddenFilterValue.trim())
-                      setHiddenFilterValue('')
-                    }}
-                  >
-                    Add
-                  </Button>
-                </div>
-              </div>
-            </PopoverContent>
-          </Popover>
         </div>
       </div>
 
