@@ -35,7 +35,7 @@ import {
 import { AppShell, EmailPreview, EmptyState, MessageList, Sidebar, TagManagerDialog } from '@/components/layout'
 import { Badge, Button, Dialog, DialogContent, DialogDescription, DialogTitle, IconButton, Input, PopoverClose, ScrollArea, Separator } from '@/components/ui'
 import { deriveSearchMode, normalizeSearchResultsPage } from '@/lib/search'
-import { downloadTextFile, formatDate, normalizeText } from '@/lib/utils'
+import { cn, downloadTextFile, formatDate, normalizeText } from '@/lib/utils'
 import {
   getWorkspaceStorageNamespace,
   readWorkspaceStorageBool,
@@ -297,7 +297,6 @@ export function App() {
   const [selectedCasePath, setSelectedCasePath] = React.useState('')
   const [selectedScopePath, setSelectedScopePath] = React.useState('')
   const [selectedPstFileName, setSelectedPstFileName] = React.useState('')
-  const [isRemovedCatalog, setIsRemovedCatalog] = React.useState(false)
   const [sessionId, setSessionId] = React.useState<string | null>(null)
   const [sessionSummary, setSessionSummary] = React.useState<SessionOpenResponse['summary'] | null>(null)
   const [folderTree, setFolderTree] = React.useState<FolderNode | null>(null)
@@ -343,6 +342,9 @@ export function App() {
   const [activityMessage, setActivityMessage] = React.useState('')
   const [activityEntries, setActivityEntries] = React.useState<ActivityLogEntry[]>([])
   const [activityFilterUser, setActivityFilterUser] = React.useState('')
+  const [searchIndexRefreshOpen, setSearchIndexRefreshOpen] = React.useState(false)
+  const [searchIndexRefreshBusy, setSearchIndexRefreshBusy] = React.useState(false)
+  const [searchIndexRefreshError, setSearchIndexRefreshError] = React.useState('')
   const [mfaReminderDismissed, setMfaReminderDismissed] = React.useState(false)
   const [tagsDialogOpen, setTagsDialogOpen] = React.useState(false)
   const [fullViewOpen, setFullViewOpen] = React.useState(false)
@@ -465,7 +467,6 @@ export function App() {
       return
     }
 
-    setIsRemovedCatalog(readWorkspaceStorageBool('catalogMode', true, username, false))
     setMfaReminderDismissed(readReminderDismissed(username))
     const rememberedCasePath = readWorkspaceStorageItem('casePath', true, username, '')
     const rememberedScopePath = readWorkspaceStorageItem('scopePath', true, username, '')
@@ -490,7 +491,6 @@ export function App() {
       return
     }
 
-    writeWorkspaceStorageItem('catalogMode', true, username, isRemovedCatalog)
     writeWorkspaceStorageItem('casePath', true, username, selectedCasePath)
     writeWorkspaceStorageItem('scopePath', true, username, selectedScopePath)
     writeWorkspaceStorageItem('pstFileName', true, username, selectedPstFileName)
@@ -509,7 +509,6 @@ export function App() {
     authenticated,
     currentFolderId,
     hiddenFiltersOpen,
-    isRemovedCatalog,
     mailOnly,
     reviewFlaggedOnly,
     reviewTaggedOnly,
@@ -531,14 +530,14 @@ export function App() {
     let cancelled = false
 
     async function loadCatalog(): Promise<void> {
-      const loadKey = `root|${isRemovedCatalog ? 'removed' : 'active'}`
+      const loadKey = 'root|active'
       if (catalogLoadKeyRef.current === loadKey) {
         return
       }
 
       try {
         setMessagesLoading(true)
-        const response = await api.pst.catalog('', isRemovedCatalog)
+        const response = await api.pst.catalog('')
         if (cancelled) {
           return
         }
@@ -584,7 +583,7 @@ export function App() {
     return () => {
       cancelled = true
     }
-  }, [authenticated, isRemovedCatalog, selectedCasePath, selectedScopePath, username, workspaceReady])
+  }, [authenticated, selectedCasePath, selectedScopePath, username, workspaceReady])
 
   React.useEffect(() => {
     if (!workspaceReady || !authenticated || !catalog?.scopes?.length || !activeCatalogScope) {
@@ -876,6 +875,7 @@ export function App() {
       }
       setMfaReminderDismissed(false)
       setAuthStatus(null)
+      catalogLoadKeyRef.current = ''
       setInvite(null)
       setInviteStep('password')
       setInviteSetup(null)
@@ -917,6 +917,9 @@ export function App() {
       setAuthView('login')
       setAuthMessage('')
       setAuthError('')
+      setSearchIndexRefreshOpen(false)
+      setSearchIndexRefreshBusy(false)
+      setSearchIndexRefreshError('')
     }
   }
 
@@ -1425,6 +1428,34 @@ export function App() {
     await refreshCurrentPage()
   }
 
+  async function handleRefreshSearchIndex(): Promise<void> {
+    if (searchIndexRefreshBusy) {
+      return
+    }
+
+    setSearchIndexRefreshOpen(true)
+    setSearchIndexRefreshBusy(true)
+    setSearchIndexRefreshError('')
+    try {
+      await refreshSearchIndex()
+      setSearchIndexRefreshBusy(false)
+      setSearchIndexRefreshError('')
+      setSearchIndexRefreshOpen(false)
+    } catch (error) {
+      setSearchIndexRefreshBusy(false)
+      setSearchIndexRefreshError(error instanceof Error ? error.message : 'Unable to refresh search index')
+    }
+  }
+
+  function dismissRefreshModal(): void {
+    if (searchIndexRefreshBusy) {
+      return
+    }
+
+    setSearchIndexRefreshOpen(false)
+    setSearchIndexRefreshError('')
+  }
+
   async function createHiddenFilter(kind: 'address' | 'subject', value: string, label?: string): Promise<void> {
     await api.hiddenFilters.create(kind, value, label)
     const response = await api.hiddenFilters.list()
@@ -1520,7 +1551,6 @@ export function App() {
 
   const sidebarNode = workspaceReady ? (
     <Sidebar
-      isRemovedCatalog={isRemovedCatalog}
       catalogMessage={catalogMessage}
       caseOptions={caseSelectorOptions}
       selectedCasePath={selectedCasePath}
@@ -1544,24 +1574,11 @@ export function App() {
         writeWorkspaceStorageItem('casePath', true, username, nextCasePath)
         writeWorkspaceStorageItem('scopePath', true, username, nextScopePath)
       }}
-      onCatalogModeToggle={() => {
-        setIsRemovedCatalog((current) => !current)
-      }}
-      onRefreshCatalog={() => {
-        void refreshCatalogRoot()
+      onRefreshSearchIndex={() => {
+        void handleRefreshSearchIndex()
       }}
       onOpenMailbox={(fileName, scopePath) => {
         void openMailbox(fileName, scopePath)
-      }}
-      onRemoveMailbox={(fileName, scopePath) => {
-        void moveMailbox(async () => {
-          await api.pst.remove(scopePath, fileName)
-        })
-      }}
-      onRestoreMailbox={(fileName, scopePath) => {
-        void moveMailbox(async () => {
-          await api.pst.restore(scopePath, fileName)
-        })
       }}
       folderTree={folderTree}
       currentFolderId={currentFolderId}
@@ -1631,9 +1648,6 @@ export function App() {
         })
         triggerDownload(url, 'flagged-bundle.zip')
       }}
-      onRefreshSearchIndex={() => {
-        void refreshSearchIndex()
-      }}
       onCreateHiddenFilter={(kind, value, label) => {
         void createHiddenFilter(kind, value, label)
       }}
@@ -1692,40 +1706,84 @@ export function App() {
     </div>
   )
 
-  async function refreshCatalogRoot(): Promise<void> {
-    if (!authenticated) {
-      return
-    }
-    try {
-      const response = await api.pst.catalog('', isRemovedCatalog)
-      catalogLoadKeyRef.current = ''
-      setCatalog(response)
-      setCatalogMessage(response.message)
-      setCaseOptions(response.scopes || [])
-    } catch (error) {
-      setCatalogMessage(error instanceof Error ? error.message : 'Unable to refresh catalog')
-    }
-  }
+  const refreshIndexDialog =
+    searchIndexRefreshOpen || searchIndexRefreshBusy || Boolean(searchIndexRefreshError) ? (
+      <Dialog
+        open={searchIndexRefreshOpen || searchIndexRefreshBusy || Boolean(searchIndexRefreshError)}
+        onOpenChange={(open) => {
+          if (!open && !searchIndexRefreshBusy) {
+            dismissRefreshModal()
+          }
+        }}
+      >
+        <DialogContent
+          showCloseButton={false}
+          className="w-[min(92vw,520px)]"
+          onPointerDownOutside={(event) => event.preventDefault()}
+          onEscapeKeyDown={(event) => event.preventDefault()}
+        >
+          <div className="space-y-5 p-6">
+            <div className="flex items-start gap-4">
+              <div
+                className={cn(
+                  'flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border',
+                  searchIndexRefreshError
+                    ? 'border-[color:rgba(220,38,38,0.2)] bg-[color:rgba(220,38,38,0.08)] text-[color:var(--danger)]'
+                    : 'border-[color:var(--line)] bg-[color:var(--surface-soft)] text-[color:var(--accent)]'
+                )}
+              >
+                {searchIndexRefreshError ? (
+                  <ShieldAlert className="h-6 w-6" aria-hidden="true" />
+                ) : (
+                  <RefreshCw className="h-6 w-6 animate-spin" aria-hidden="true" />
+                )}
+              </div>
+              <div className="min-w-0">
+                <DialogTitle className="text-2xl">
+                  {searchIndexRefreshError ? 'Reindex failed' : 'Rebuilding search index'}
+                </DialogTitle>
+                <DialogDescription className="mt-2">
+                  {searchIndexRefreshError
+                    ? 'The workspace stayed locked while the refresh ran.'
+                    : 'Please wait while PST files and search data are rebuilt.'}
+                </DialogDescription>
+              </div>
+            </div>
 
-  async function moveMailbox(action: () => Promise<unknown>): Promise<void> {
-    try {
-      await action()
-      setSelectedMessageId('')
-      setSelectedMessage(null)
-      setSessionId(null)
-      setSessionSummary(null)
-      setFolderTree(null)
-      setCurrentFolderId('')
-      setSelectedPstFileName('')
-      setCurrentPage(null)
-      setPageIndex(1)
-      setWorkspaceMode('folder')
-      setCatalogMessage('Mailbox moved. Refreshing catalog...')
-      await refreshCatalogRoot()
-    } catch (error) {
-      setCatalogMessage(error instanceof Error ? error.message : 'Unable to update mailbox')
-    }
-  }
+            {!searchIndexRefreshError ? (
+              <div
+                className="h-2 overflow-hidden rounded-full bg-[color:var(--surface-soft)]"
+                role="progressbar"
+                aria-label="Search index refresh progress"
+                aria-valuetext="Rebuilding search index"
+              >
+                <div className="search-index-progress-bar h-full w-1/3 rounded-full bg-[color:var(--accent)]" />
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-[color:rgba(220,38,38,0.2)] bg-[color:rgba(220,38,38,0.08)] px-4 py-3 text-sm text-[color:var(--danger)]">
+                {searchIndexRefreshError}
+              </div>
+            )}
+
+            {searchIndexRefreshError ? (
+              <div className="flex items-center justify-end gap-2">
+                <Button variant="ghost" onClick={dismissRefreshModal} disabled={searchIndexRefreshBusy}>
+                  Dismiss
+                </Button>
+                <Button
+                  onClick={() => {
+                    void handleRefreshSearchIndex()
+                  }}
+                  disabled={searchIndexRefreshBusy}
+                >
+                  Retry
+                </Button>
+              </div>
+            ) : null}
+          </div>
+        </DialogContent>
+      </Dialog>
+    ) : null
 
   const appContent = authenticated ? (
     <>
@@ -1742,7 +1800,8 @@ export function App() {
         sidebar={sidebarNode}
         messagePanel={messageNode}
         preview={previewNode}
-      /> 
+      />
+      {refreshIndexDialog}
 
       <Dialog
         open={fullViewOpen && Boolean(selectedMessage)}

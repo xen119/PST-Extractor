@@ -6,12 +6,32 @@ import { App, getCasePathFromScopePath } from '@/App'
 import { api } from '@/api'
 import { AppShell, EmailPreview, MessageList, Sidebar, TagManagerDialog } from '@/components/layout'
 import { AuthScreen, MfaReminderDialog } from '@/components/auth'
-import type { AttachmentDetail, AuthStatus, FolderNode, InviteLookupResponse, MessageDetail, MessageSummary } from '@/types'
+import type {
+  AttachmentDetail,
+  AuthStatus,
+  FolderNode,
+  HiddenRulesResponse,
+  InviteLookupResponse,
+  MessageDetail,
+  MessageSummary,
+  PstCatalogResponse
+} from '@/types'
 
 afterEach(() => {
   vi.restoreAllMocks()
   window.history.replaceState({}, '', '/')
 })
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve
+    reject = promiseReject
+  })
+
+  return { promise, resolve, reject }
+}
 
 describe('auth shell', () => {
   it('shows a minimal login screen', () => {
@@ -126,6 +146,90 @@ describe('auth shell', () => {
     expect(screen.getByRole('button', { name: 'Set password' })).toBeEnabled()
   })
 
+  it('blocks the workspace while the search index refresh runs', async () => {
+    const user = userEvent.setup()
+    const refreshDeferred = createDeferred<unknown>()
+    const authenticatedStatus: AuthStatus = {
+      authenticated: true,
+      enabled: true,
+      canManageUsers: false,
+      mfaEnabled: true,
+      user: { username: 'admin' },
+      expiresAt: null
+    }
+    const emptyCatalog: PstCatalogResponse = {
+      rootPath: '',
+      rootExists: true,
+      message: '',
+      scopePath: '',
+      scopeLabel: 'PST root',
+      scopes: [],
+      files: []
+    }
+    const hiddenRulesResponse: HiddenRulesResponse = { items: [] }
+
+    vi.spyOn(api.auth, 'me').mockResolvedValueOnce(authenticatedStatus)
+    vi.spyOn(api.pst, 'catalog').mockResolvedValueOnce(emptyCatalog)
+    vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue(hiddenRulesResponse)
+    vi.spyOn(api.pst, 'refreshSearchIndex').mockReturnValueOnce(refreshDeferred.promise)
+
+    render(<App />)
+
+    const refreshButton = await screen.findByRole('button', { name: 'Refresh search index' })
+    await user.click(refreshButton)
+
+    expect(await screen.findByRole('heading', { name: 'Rebuilding search index' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Refresh search index' })).not.toBeInTheDocument()
+
+    refreshDeferred.resolve({})
+
+    await screen.findByRole('button', { name: 'Refresh search index' })
+    expect(screen.queryByRole('heading', { name: 'Rebuilding search index' })).not.toBeInTheDocument()
+  })
+
+  it('shows an error state when search index refresh fails and allows dismissal', async () => {
+    const user = userEvent.setup()
+    const authenticatedStatus: AuthStatus = {
+      authenticated: true,
+      enabled: true,
+      canManageUsers: false,
+      mfaEnabled: true,
+      user: { username: 'admin' },
+      expiresAt: null
+    }
+    const emptyCatalog: PstCatalogResponse = {
+      rootPath: '',
+      rootExists: true,
+      message: '',
+      scopePath: '',
+      scopeLabel: 'PST root',
+      scopes: [],
+      files: []
+    }
+    const hiddenRulesResponse: HiddenRulesResponse = { items: [] }
+    const refreshError = new Error('Refresh failed')
+
+    vi.spyOn(api.auth, 'me').mockResolvedValueOnce(authenticatedStatus)
+    vi.spyOn(api.pst, 'catalog').mockResolvedValueOnce(emptyCatalog)
+    vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue(hiddenRulesResponse)
+    vi.spyOn(api.pst, 'refreshSearchIndex').mockRejectedValueOnce(refreshError)
+
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'Refresh search index' }))
+
+    expect(await screen.findByRole('heading', { name: 'Reindex failed' })).toBeInTheDocument()
+    expect(screen.getByText('Refresh failed')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Dismiss' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Refresh search index' })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Dismiss' }))
+
+    await screen.findByRole('button', { name: 'Refresh search index' })
+    expect(screen.queryByRole('heading', { name: 'Reindex failed' })).not.toBeInTheDocument()
+  })
+
   it('shows a blocking MFA reminder without a close button', () => {
     render(<MfaReminderDialog open username="admin" onSetup={vi.fn()} onSkip={vi.fn()} />)
 
@@ -221,7 +325,6 @@ describe('shell and preview', () => {
     render(
       <div style={{ width: 420, height: 800 }}>
         <Sidebar
-          isRemovedCatalog={false}
           caseOptions={[
             { label: 'Case Alpha', value: 'Case Alpha', count: 3 },
             { label: 'Case Beta', value: 'Case Beta', count: 2 }
@@ -243,11 +346,8 @@ describe('shell and preview', () => {
           selectedPstFileName="mailbox-a.pst"
           onCaseChange={vi.fn()}
           onScopeChange={vi.fn()}
-          onCatalogModeToggle={vi.fn()}
-          onRefreshCatalog={vi.fn()}
+          onRefreshSearchIndex={vi.fn()}
           onOpenMailbox={vi.fn()}
-          onRemoveMailbox={vi.fn()}
-          onRestoreMailbox={vi.fn()}
           folderTree={null}
           currentFolderId=""
           onSelectFolder={vi.fn()}
@@ -255,12 +355,12 @@ describe('shell and preview', () => {
       </div>
     )
 
-    expect(screen.getByRole('button', { name: 'Show removed PSTs' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'Case Alpha' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'Search One' })).toBeInTheDocument()
     expect(screen.queryByText('Case Alpha (3)')).not.toBeInTheDocument()
     expect(screen.queryByText('Search One (2)')).not.toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: 'Mailbox selector' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Refresh search index' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'mailbox-a.pst' })).toBeInTheDocument()
     expect(screen.queryByText('Found 2 mailbox files in Case Alpha / Search One.')).not.toBeInTheDocument()
   })
@@ -295,7 +395,6 @@ describe('shell and preview', () => {
     render(
       <div style={{ width: 420, height: 900 }}>
         <Sidebar
-          isRemovedCatalog={false}
           caseOptions={[{ label: 'Case Alpha', value: 'Case Alpha', count: 1 }]}
           selectedCasePath="Case Alpha"
           selectedScopePath="Case Alpha/Search One"
@@ -312,11 +411,8 @@ describe('shell and preview', () => {
           selectedPstFileName="mailbox.pst"
           onCaseChange={vi.fn()}
           onScopeChange={vi.fn()}
-          onCatalogModeToggle={vi.fn()}
-          onRefreshCatalog={vi.fn()}
+          onRefreshSearchIndex={vi.fn()}
           onOpenMailbox={vi.fn()}
-          onRemoveMailbox={vi.fn()}
-          onRestoreMailbox={vi.fn()}
           folderTree={tree}
           currentFolderId="inbox"
           onSelectFolder={vi.fn()}
@@ -331,80 +427,10 @@ describe('shell and preview', () => {
     expect(screen.queryByText('Empty')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Inbox - 2/ })).toBeInTheDocument()
     expect(screen.queryByText(/- 0/)).not.toBeInTheDocument()
-  })
-
-  it('calls the mailbox remove and restore actions', async () => {
-    const user = userEvent.setup()
-    const onRemoveMailbox = vi.fn()
-    const onRestoreMailbox = vi.fn()
-
-    const { rerender } = render(
-      <div style={{ width: 420, height: 900 }}>
-        <Sidebar
-          isRemovedCatalog={false}
-          caseOptions={[{ label: 'Case Alpha', value: 'Case Alpha', count: 1 }]}
-          selectedCasePath="Case Alpha"
-          selectedScopePath="Case Alpha/Search One"
-          searchOptions={[{ label: 'Search One', value: 'Case Alpha/Search One', count: 1 }]}
-          catalogFiles={[
-            {
-              fileName: 'mailbox.pst',
-              size: 1024,
-              modifiedAt: new Date().toISOString(),
-              scopePath: 'Case Alpha/Search One'
-            }
-          ]}
-          selectedPstFileName="mailbox.pst"
-          onCaseChange={vi.fn()}
-          onScopeChange={vi.fn()}
-          onCatalogModeToggle={vi.fn()}
-          onRefreshCatalog={vi.fn()}
-          onOpenMailbox={vi.fn()}
-          onRemoveMailbox={onRemoveMailbox}
-          onRestoreMailbox={onRestoreMailbox}
-          folderTree={null}
-          currentFolderId=""
-          onSelectFolder={vi.fn()}
-        />
-      </div>
-    )
-
-    await user.click(screen.getByRole('button', { name: 'Remove PST' }))
-    expect(onRemoveMailbox).toHaveBeenCalledWith('mailbox.pst', 'Case Alpha/Search One')
-
-    rerender(
-      <div style={{ width: 420, height: 900 }}>
-        <Sidebar
-          isRemovedCatalog
-          caseOptions={[{ label: 'Case Alpha', value: 'Case Alpha', count: 1 }]}
-          selectedCasePath="Case Alpha"
-          selectedScopePath="Case Alpha/Search One"
-          searchOptions={[{ label: 'Search One', value: 'Case Alpha/Search One', count: 1 }]}
-          catalogFiles={[
-            {
-              fileName: 'mailbox.pst',
-              size: 1024,
-              modifiedAt: new Date().toISOString(),
-              scopePath: 'Case Alpha/Search One'
-            }
-          ]}
-          selectedPstFileName="mailbox.pst"
-          onCaseChange={vi.fn()}
-          onScopeChange={vi.fn()}
-          onCatalogModeToggle={vi.fn()}
-          onRefreshCatalog={vi.fn()}
-          onOpenMailbox={vi.fn()}
-          onRemoveMailbox={onRemoveMailbox}
-          onRestoreMailbox={onRestoreMailbox}
-          folderTree={null}
-          currentFolderId=""
-          onSelectFolder={vi.fn()}
-        />
-      </div>
-    )
-
-    await user.click(screen.getByRole('button', { name: 'Restore PST' }))
-    expect(onRestoreMailbox).toHaveBeenCalledWith('mailbox.pst', 'Case Alpha/Search One')
+    expect(screen.getByRole('button', { name: 'Refresh search index' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Show removed PSTs' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Remove PST' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Restore PST' })).not.toBeInTheDocument()
   })
 
   it('shows the message list and preview details', async () => {
@@ -443,7 +469,6 @@ describe('shell and preview', () => {
           onPrevPage={vi.fn()}
           onNextPage={vi.fn()}
           onOpenBundle={vi.fn()}
-          onRefreshSearchIndex={vi.fn()}
           onCreateHiddenFilter={vi.fn()}
           selectedMessageId="message-1"
           sessionId="session-1"

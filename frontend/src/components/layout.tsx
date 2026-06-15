@@ -12,9 +12,9 @@ import {
   Maximize2,
   LogOut,
   Plus,
+  RefreshCw,
   Search,
   User,
-  RotateCcw,
   Tag as TagIcon
 } from 'lucide-react'
 import type {
@@ -162,7 +162,6 @@ export function AppShell({
 }
 
 interface SidebarProps {
-  isRemovedCatalog: boolean
   catalogMessage?: string
   caseOptions: Array<{ label: string; value: string; count: number }>
   selectedCasePath: string
@@ -172,11 +171,8 @@ interface SidebarProps {
   selectedPstFileName: string
   onCaseChange: (value: string) => void
   onScopeChange: (value: string) => void
-  onCatalogModeToggle: () => void
-  onRefreshCatalog: () => void
+  onRefreshSearchIndex: () => void
   onOpenMailbox: (fileName: string, scopePath: string) => void
-  onRemoveMailbox: (fileName: string, scopePath: string) => void
-  onRestoreMailbox: (fileName: string, scopePath: string) => void
   folderTree: FolderNode | null
   currentFolderId: string
   onSelectFolder: (folderId: string) => void
@@ -184,7 +180,6 @@ interface SidebarProps {
 }
 
 export function Sidebar({
-  isRemovedCatalog,
   catalogMessage,
   caseOptions,
   selectedCasePath,
@@ -194,11 +189,8 @@ export function Sidebar({
   selectedPstFileName,
   onCaseChange,
   onScopeChange,
-  onCatalogModeToggle,
-  onRefreshCatalog,
+  onRefreshSearchIndex,
   onOpenMailbox,
-  onRemoveMailbox,
-  onRestoreMailbox,
   folderTree,
   currentFolderId,
   onSelectFolder
@@ -213,15 +205,12 @@ export function Sidebar({
           <div className="panel-title">Case / Search</div>
           <div className="text-sm text-[color:var(--muted)]">Browse and open a mailbox</div>
         </div>
-        <IconButton
-          label={isRemovedCatalog ? 'Show active PSTs' : 'Show removed PSTs'}
-          onClick={onCatalogModeToggle}
-        >
-          <RotateCcw className="h-4 w-4" />
+        <IconButton label="Refresh search index" onClick={onRefreshSearchIndex}>
+          <RefreshCw className="h-4 w-4" />
         </IconButton>
       </div>
 
-        <div className="space-y-3 border-t border-[color:var(--line)] px-4 py-4">
+      <div className="space-y-3 border-t border-[color:var(--line)] px-4 py-4">
         <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
           Case
           <select
@@ -259,12 +248,6 @@ export function Sidebar({
             )}
           </select>
         </label>
-
-        <div className="flex items-center gap-2">
-          <Button variant="secondary" onClick={onRefreshCatalog} className="flex-1">
-            Refresh
-          </Button>
-        </div>
         {catalogMessage ? <div className="text-xs leading-5 text-[color:var(--muted)]">{catalogMessage}</div> : null}
       </div>
 
@@ -295,29 +278,6 @@ export function Sidebar({
                   </option>
                 ))}
               </select>
-              {selectedMailbox ? (
-                isRemovedCatalog ? (
-                  <IconButton
-                    label="Restore PST"
-                    className="h-10 w-10"
-                    onClick={() => {
-                      onRestoreMailbox(selectedMailbox.fileName, selectedMailbox.scopePath || '')
-                    }}
-                  >
-                    <Plus className="h-4 w-4 rotate-45" />
-                  </IconButton>
-                ) : (
-                  <IconButton
-                    label="Remove PST"
-                    className="h-10 w-10"
-                    onClick={() => {
-                      onRemoveMailbox(selectedMailbox.fileName, selectedMailbox.scopePath || '')
-                    }}
-                  >
-                    <Eraser className="h-4 w-4" />
-                  </IconButton>
-                )
-              ) : null}
             </div>
           ) : (
             <div className="mt-2 empty-state min-h-[112px]">No PST files are available in the current scope.</div>
@@ -427,7 +387,6 @@ interface MessageListProps {
   onPrevPage: () => void
   onNextPage: () => void
   onOpenBundle: () => void
-  onRefreshSearchIndex: () => void
   onCreateHiddenFilter: (kind: 'address' | 'subject', value: string, label?: string) => void
   onPageChange?: (page: number) => void
   selectedMessageId: string
@@ -459,7 +418,6 @@ export function MessageList({
   onPrevPage,
   onNextPage,
   onOpenBundle,
-  onRefreshSearchIndex,
   onCreateHiddenFilter,
   selectedMessageId,
   sessionId
@@ -488,9 +446,6 @@ export function MessageList({
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <IconButton label="Refresh search index" onClick={onRefreshSearchIndex}>
-            <Search className="h-4 w-4" />
-          </IconButton>
           <IconButton label="Download flagged bundle" onClick={onOpenBundle}>
             <Download className="h-4 w-4" />
           </IconButton>

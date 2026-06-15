@@ -68,6 +68,16 @@ body {
     linear-gradient(180deg, #edf2f7 0%, #e8edf5 100%);
 }
 
+@keyframes search-index-progress-indeterminate {
+  0% {
+    transform: translateX(-120%);
+  }
+
+  100% {
+    transform: translateX(420%);
+  }
+}
+
 [data-theme='dark'] body {
   background:
     radial-gradient(circle at top left, rgba(59, 130, 246, 0.14), transparent 28%),
@@ -165,5 +175,9 @@ body {
 
   .empty-state {
     @apply flex h-full min-h-[220px] flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[color:var(--line)] bg-[color:var(--surface-soft)] px-6 py-8 text-center text-sm text-[color:var(--muted)];
+  }
+
+  .search-index-progress-bar {
+    animation: search-index-progress-indeterminate 1.2s ease-in-out infinite;
   }
 }
