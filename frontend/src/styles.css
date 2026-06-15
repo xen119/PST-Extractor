@@ -1,0 +1,169 @@
+@config "../tailwind.config.cjs";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #eef2f6;
+  --surface: rgba(255, 255, 255, 0.9);
+  --surface-strong: #ffffff;
+  --surface-soft: #f6f8fb;
+  --line: rgba(148, 163, 184, 0.24);
+  --line-strong: rgba(148, 163, 184, 0.36);
+  --text: #132033;
+  --muted: #5f6f85;
+  --soft: #7a8ca5;
+  --accent: #2563eb;
+  --accent-strong: #1d4ed8;
+  --accent-soft: rgba(37, 99, 235, 0.1);
+  --accent-tint: rgba(37, 99, 235, 0.08);
+  --focus-ring: rgba(37, 99, 235, 0.28);
+  --success: #15803d;
+  --danger: #dc2626;
+  --warning: #b45309;
+  --warning-bg: rgba(245, 158, 11, 0.12);
+  --shadow: 0 18px 48px rgba(15, 23, 42, 0.08);
+}
+
+[data-theme='dark'] {
+  --bg: #0c1320;
+  --surface: rgba(13, 20, 33, 0.92);
+  --surface-strong: #111a2a;
+  --surface-soft: #172233;
+  --line: rgba(148, 163, 184, 0.18);
+  --line-strong: rgba(148, 163, 184, 0.3);
+  --text: #e5edf7;
+  --muted: #9eabc0;
+  --soft: #7f8da5;
+  --accent: #60a5fa;
+  --accent-strong: #3b82f6;
+  --accent-soft: rgba(96, 165, 250, 0.14);
+  --accent-tint: rgba(96, 165, 250, 0.1);
+  --focus-ring: rgba(96, 165, 250, 0.32);
+  --success: #4ade80;
+  --danger: #f87171;
+  --warning: #fbbf24;
+  --warning-bg: rgba(251, 191, 36, 0.12);
+  --shadow: 0 20px 56px rgba(0, 0, 0, 0.28);
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family:
+    'Segoe UI',
+    'Segoe UI Variable',
+    Tahoma,
+    Arial,
+    sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(circle at top left, rgba(59, 130, 246, 0.14), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(20, 184, 166, 0.08), transparent 22%),
+    linear-gradient(180deg, #edf2f7 0%, #e8edf5 100%);
+}
+
+[data-theme='dark'] body {
+  background:
+    radial-gradient(circle at top left, rgba(59, 130, 246, 0.14), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(20, 184, 166, 0.1), transparent 22%),
+    linear-gradient(180deg, #08111e 0%, #0d1727 100%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.35);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@layer components {
+  .panel-surface {
+    @apply rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface)] shadow-soft backdrop-blur;
+  }
+
+  .panel-surface-strong {
+    @apply rounded-2xl border border-[color:var(--line-strong)] bg-[color:var(--surface-strong)] shadow-soft;
+  }
+
+  .glass-bar {
+    @apply border-b border-[color:var(--line)] backdrop-blur-md;
+    background-color: color-mix(in srgb, var(--surface) 90%, transparent);
+  }
+
+  .muted-text {
+    color: var(--muted);
+  }
+
+  .icon-button {
+    @apply inline-flex h-10 w-10 items-center justify-center rounded-full border border-[color:var(--line)] bg-[color:var(--surface-strong)] text-[color:var(--text)] transition hover:border-[color:var(--line-strong)] hover:bg-[color:var(--surface-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--focus-ring)];
+  }
+
+  .icon-button-primary {
+    @apply border-[color:var(--accent)] bg-[color:var(--accent)] text-white hover:bg-[color:var(--accent-strong)] hover:text-white;
+  }
+
+  .icon-button-danger {
+    @apply border-[color:rgba(220,38,38,0.2)] bg-[color:rgba(220,38,38,0.08)] text-[color:var(--danger)] hover:bg-[color:rgba(220,38,38,0.14)];
+  }
+
+  .button {
+    @apply inline-flex items-center justify-center gap-2 rounded-full border border-[color:var(--line)] bg-[color:var(--surface-strong)] px-4 py-2 text-sm font-medium text-[color:var(--text)] transition hover:border-[color:var(--line-strong)] hover:bg-[color:var(--surface-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--focus-ring)] disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .button-primary {
+    @apply border-[color:var(--accent)] bg-[color:var(--accent)] text-white hover:bg-[color:var(--accent-strong)] hover:text-white;
+  }
+
+  .button-ghost {
+    @apply bg-transparent;
+  }
+
+  .input,
+  .select,
+  .textarea {
+    @apply w-full rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-strong)] px-3 py-2 text-sm text-[color:var(--text)] outline-none transition placeholder:text-[color:var(--soft)] focus:border-[color:var(--accent)] focus:ring-2 focus:ring-[color:var(--focus-ring)];
+  }
+
+  .badge {
+    @apply inline-flex items-center rounded-full border border-[color:var(--line)] bg-[color:var(--surface-strong)] px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-[color:var(--muted)];
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full border border-[color:var(--line)] bg-[color:var(--surface-strong)] px-2.5 py-1 text-xs font-medium text-[color:var(--muted)];
+  }
+
+  .chip-active {
+    @apply border-[color:var(--accent)] bg-[color:var(--accent-soft)] text-[color:var(--accent-strong)];
+  }
+
+  .panel-heading {
+    @apply flex items-center justify-between gap-3 px-4 py-3;
+  }
+
+  .panel-title {
+    @apply text-[0.92rem] font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)];
+  }
+
+  .empty-state {
+    @apply flex h-full min-h-[220px] flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[color:var(--line)] bg-[color:var(--surface-soft)] px-6 py-8 text-center text-sm text-[color:var(--muted)];
+  }
+}

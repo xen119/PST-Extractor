@@ -2,7 +2,25 @@
 
 [![npm](https://img.shields.io/npm/v/pst-extractor.svg)](https://www.npmjs.com/package/pst-extractor) ![github-issues](https://img.shields.io/github/issues/epfromer/pst-extractor.svg) ![stars](https://img.shields.io/github/stars/epfromer/pst-extractor.svg) ![forks](https://img.shields.io/github/forks/epfromer/pst-extractor.svg) ![](https://david-dm.org/epfromer/pst-extractor/status.svg) ![](https://david-dm.org/epfromer/pst-extractor/dev-status.svg) [![codecov](https://codecov.io/gh/epfromer/pst-extractor/branch/master/graph/badge.svg)](https://codecov.io/gh/epfromer/pst-extractor)
 
-Extract objects from MS Outlook/Exchange PST files
+## Project Overview
+
+`pst-extractor` is a TypeScript library for reading Microsoft Outlook and Exchange PST/OST files, plus a local web viewer for reviewing mailbox content in a browser.
+
+The repo has two main parts:
+
+- The root package exports the parsing and mailbox traversal APIs you use from Node.js or other TypeScript projects.
+- The `example/` app runs a local PST mail explorer backed by the same library and serves the browser UI used for review, search, tagging, downloads, and audit activity.
+
+The browser app is intentionally local-first:
+
+- Mailboxes live under the project `PST/` folder in a case/search layout such as `PST/Case 1/Search 1/mailbox.pst`.
+- Removed mailboxes are moved into `PST/_removed`.
+- Auth is local username/password with optional MFA, invite-based onboarding, SMTP sender settings, and an activity log.
+- Persistent app data such as users, SMTP settings, review state, and the search index can use MongoDB when configured.
+- The audit log stays file-based at `example/logs/activity.log`.
+- If the app is exposed behind a reverse proxy, set `PUBLIC_BASE_URL` so invite links point at the public URL.
+
+The library parses PST and OST mailbox data without modifying the source files.
 
 ## Features
 
@@ -26,6 +44,15 @@ or
 
 Start with the example app to browse the mailbox files in the project `PST/` folder. Most of the major objects still have Jest test specs which show how the object attributes can be accessed.
 
+For the current browser experience, build the frontend and then run the example server:
+
+```bash
+npm install
+npm run build:frontend
+cd example
+npm start
+```
+
 ```bash
 cd example
 npm start
@@ -38,7 +65,7 @@ cd example
 yarn start
 ```
 
-The viewer reads whichever `.pst` or `.ost` files you place under the project `PST/` folder.
+Open the address printed by the server, sign in, and then pick a case/search scope from the left pane. The viewer reads whichever `.pst` or `.ost` files you place under the project `PST/` folder.
 
 ### Web viewer
 

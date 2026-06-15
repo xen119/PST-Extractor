@@ -324,14 +324,14 @@ function moveFileSafely(sourcePath: string, destinationPath: string): void {
     fs.renameSync(sourcePath, destinationPath)
     return
   } catch (error) {
-    const code = error && typeof error === 'object' ? String((error as NodeJS.ErrnoException).code || '') : ''
-    if (code !== 'EXDEV') {
-      throw error
+    try {
+      fs.copyFileSync(sourcePath, destinationPath)
+      fs.unlinkSync(sourcePath)
+      return
+    } catch (copyError) {
+      throw copyError
     }
   }
-
-  fs.copyFileSync(sourcePath, destinationPath)
-  fs.unlinkSync(sourcePath)
 }
 
 export function movePstMailboxToRemoved(
