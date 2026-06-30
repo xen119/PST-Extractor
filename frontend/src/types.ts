@@ -1,5 +1,6 @@
 export interface AuthUser {
   username: string
+  assignedCasePaths: string[]
 }
 
 export interface AuthStatus {
@@ -257,6 +258,7 @@ export interface UserInvite {
   mfaEnabled: boolean
   mfaEnforced: boolean
   mfaEnrolledAt: string
+  assignedCasePaths: string[]
   inviteUrl?: string
 }
 

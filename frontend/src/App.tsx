@@ -5,6 +5,7 @@ import {
   ChevronRight,
   Download,
   Flag,
+  FolderCog,
   KeyRound,
   Link2,
   LogOut,
@@ -347,6 +348,8 @@ export function App() {
   const [inviteUsername, setInviteUsername] = React.useState('')
   const [inviteEmail, setInviteEmail] = React.useState('')
   const [selectedAdminUser, setSelectedAdminUser] = React.useState('')
+  const [caseAccessDialogUser, setCaseAccessDialogUser] = React.useState('')
+  const [caseAccessDraftPaths, setCaseAccessDraftPaths] = React.useState<string[]>([])
   const [userActivity, setUserActivity] = React.useState<ActivityLogEntry[]>([])
   const [userActivityLoading, setUserActivityLoading] = React.useState(false)
   const [userActivityError, setUserActivityError] = React.useState('')
@@ -380,6 +383,7 @@ export function App() {
   const mfaEnabled = Boolean(authStatus?.mfaEnabled)
   const inviteFlowActive = Boolean(inviteToken)
   const mfaEnforced = Boolean(authStatus?.mfaEnforced)
+  const assignedCasePathsKey = (authStatus?.user?.assignedCasePaths || []).join('|')
   const showReminder =
     authenticated &&
     !mfaEnabled &&
@@ -511,7 +515,8 @@ export function App() {
     setCurrentFolderId(readWorkspaceStorageItem('folderId', true, username, ''))
     setSelectedMessageId(readWorkspaceStorageItem('messageId', true, username, ''))
     setSearchQuery(readWorkspaceStorageItem('query', true, username, ''))
-    setSearchScope((readWorkspaceStorageItem('searchScope', true, username, 'pst') as SearchScope) || 'pst')
+    const rememberedSearchScope = (readWorkspaceStorageItem('searchScope', true, username, 'all') as SearchScope) || 'all'
+    setSearchScope(rememberedSearchScope === 'pst' ? 'all' : rememberedSearchScope)
     setMailOnly(readWorkspaceStorageBool('mailOnly', true, username, false))
     setSort(readWorkspaceStorageItem('sort', true, username, 'date-desc'))
     setReviewFlaggedOnly(readWorkspaceStorageBool('reviewFlaggedOnly', true, username, false))
@@ -557,14 +562,14 @@ export function App() {
   ])
 
   React.useEffect(() => {
-    if (!workspaceReady || !authenticated) {
+    if (!authenticated || !username) {
       return
     }
 
     let cancelled = false
 
     async function loadCatalog(): Promise<void> {
-      const loadKey = 'root|active'
+      const loadKey = `${username}|${assignedCasePathsKey}`
       if (catalogLoadKeyRef.current === loadKey) {
         return
       }
@@ -575,6 +580,7 @@ export function App() {
         if (cancelled) {
           return
         }
+        setCatalogMessage(response.message || '')
         const nextCasePath = (() => {
           const caseOptions = getTopLevelCaseOptions(response.scopes || [])
           if (selectedCasePath && caseOptions.some((option) => option.value === selectedCasePath)) {
@@ -617,7 +623,7 @@ export function App() {
     return () => {
       cancelled = true
     }
-  }, [authenticated, selectedCasePath, selectedScopePath, username, workspaceReady])
+  }, [assignedCasePathsKey, authenticated, selectedCasePath, selectedScopePath, username])
 
   React.useEffect(() => {
     if (!workspaceReady || !authenticated || !catalog?.scopes?.length || !activeCatalogScope) {
@@ -652,7 +658,7 @@ export function App() {
   React.useEffect(() => {
     const activeSessionId = sessionId
     const activeFolderId = currentFolderId
-    if (!workspaceReady || !activeSessionId || !activeFolderId) {
+    if (!workspaceReady || (workspaceMode !== 'search' && (!activeSessionId || !activeFolderId))) {
       return
     }
     const sessionToken = activeSessionId
@@ -665,7 +671,7 @@ export function App() {
         const queryParams =
           workspaceMode === 'search'
             ? {
-                scope: searchScope,
+                scope: searchScope === 'pst' && !activeSessionId ? 'all' : searchScope,
                 query: searchQuery,
                 mode: deriveSearchMode(searchQuery, 'and'),
                 page: pageIndex,
@@ -675,7 +681,7 @@ export function App() {
                 reviewFlagged: reviewFlaggedOnly,
                 reviewTagged: reviewTaggedOnly,
                 scopePath: selectedScopePath || selectedCasePath,
-                sessionId: searchScope === 'pst' ? sessionToken : undefined
+                sessionId: searchScope === 'pst' && activeSessionId ? sessionToken : undefined
               }
             : null
 
@@ -864,6 +870,14 @@ export function App() {
     void loadUserActivity(selectedAdminUser)
   }, [selectedAdminUser, usersDialogOpen])
 
+  React.useEffect(() => {
+    if (!caseAccessDialogUser) {
+      return
+    }
+    const record = users.find((user) => user.username === caseAccessDialogUser) || null
+    setCaseAccessDraftPaths([...(record?.assignedCasePaths || [])])
+  }, [caseAccessDialogUser, users])
+
   async function handleLogin(usernameInput: string, password: string): Promise<void> {
     setAuthBusy(true)
     setAuthError('')
@@ -953,6 +967,8 @@ export function App() {
       setUsers([])
       setUsersError('')
       setUsersMessage('')
+      setCaseAccessDialogUser('')
+      setCaseAccessDraftPaths([])
       setUserActivity([])
       setUserActivityError('')
       setSmtpError('')
@@ -1216,6 +1232,47 @@ export function App() {
     }
   }
 
+  function openCaseAccessDialog(usernameToOpen: string): void {
+    const current = users.find((user) => user.username === usernameToOpen) || null
+    setCaseAccessDialogUser(usernameToOpen)
+    setCaseAccessDraftPaths([...(current?.assignedCasePaths || [])])
+  }
+
+  async function saveUserCaseAccess(usernameToUpdate: string, assignedCasePaths: string[]): Promise<void> {
+    setUsersLoading(true)
+    setUsersError('')
+    setUsersMessage('')
+    try {
+      const response = await api.auth.setUserAccess(usernameToUpdate, assignedCasePaths)
+      setUsers((currentUsers) =>
+        currentUsers.map((user) => (user.username === usernameToUpdate ? response.user : user))
+      )
+      if (usernameToUpdate === username && authStatus?.user) {
+        setAuthStatus((currentStatus) =>
+          currentStatus && currentStatus.user
+            ? {
+                ...currentStatus,
+                user: {
+                  ...currentStatus.user,
+                  assignedCasePaths: [...response.user.assignedCasePaths]
+                }
+              }
+            : currentStatus
+        )
+      }
+      setUsersMessage(`Case access updated for ${usernameToUpdate}.`)
+      setCaseAccessDialogUser('')
+      setCaseAccessDraftPaths([])
+      if (selectedAdminUser === usernameToUpdate) {
+        await loadUserActivity(usernameToUpdate)
+      }
+    } catch (error) {
+      setUsersError(error instanceof Error ? error.message : 'Unable to update case access')
+    } finally {
+      setUsersLoading(false)
+    }
+  }
+
   async function loadUserActivity(usernameToLoad: string): Promise<void> {
     setUserActivityLoading(true)
     setUserActivityError('')
@@ -1316,11 +1373,12 @@ export function App() {
   }
 
   async function refreshCurrentPage(): Promise<void> {
-    if (!sessionId || !currentFolderId) {
-      return
-    }
     if (workspaceMode === 'search') {
       await loadSearchPage(pageIndex)
+      return
+    }
+    if (!sessionId || !currentFolderId) {
+      return
     } else {
       await loadFolderPage(currentFolderId, pageIndex)
     }
@@ -1352,14 +1410,15 @@ export function App() {
   }
 
   async function loadSearchPage(nextPage = 1): Promise<void> {
-    if (!sessionId) {
-      return
-    }
     setMessagesLoading(true)
     try {
       setPageIndex(nextPage)
+      const effectiveSearchScope = searchScope === 'pst' && !sessionId ? 'all' : searchScope
+      if (effectiveSearchScope !== searchScope) {
+        setSearchScope(effectiveSearchScope)
+      }
       const response = await api.search({
-        scope: searchScope,
+        scope: effectiveSearchScope,
         query: searchQuery,
         mode: deriveSearchMode(searchQuery, 'and'),
         page: nextPage,
@@ -1369,7 +1428,7 @@ export function App() {
         reviewFlagged: reviewFlaggedOnly,
         reviewTagged: reviewTaggedOnly,
         scopePath: selectedScopePath || selectedCasePath,
-        sessionId: searchScope === 'pst' && sessionId ? sessionId : undefined
+        sessionId: effectiveSearchScope === 'pst' && sessionId ? sessionId : undefined
       })
       setCurrentPage(normalizeSearchResultsPage(response.page))
       setWorkspaceMode('search')
@@ -2054,6 +2113,8 @@ export function App() {
         onInvite={inviteUser}
         onClose={() => {
           setUsersDialogOpen(false)
+          setCaseAccessDialogUser('')
+          setCaseAccessDraftPaths([])
         }}
         onRefresh={() => {
           void loadUsers()
@@ -2077,11 +2138,33 @@ export function App() {
         onToggleMfaEnforcement={(value, enforced) => {
           void toggleMfaEnforcement(value, enforced)
         }}
+        onOpenCaseAccess={(value) => {
+          openCaseAccessDialog(value)
+        }}
         onCopyInvite={(value) => {
           const selected = users.find((item) => item.username === value)
           if (selected?.inviteUrl) {
             navigator.clipboard?.writeText(selected.inviteUrl).catch(() => undefined)
           }
+        }}
+      />
+
+      <CaseAccessDialog
+        open={Boolean(caseAccessDialogUser)}
+        loading={usersLoading}
+        user={users.find((item) => item.username === caseAccessDialogUser) || null}
+        caseOptions={caseSelectorOptions}
+        assignedCasePaths={caseAccessDraftPaths}
+        onClose={() => {
+          setCaseAccessDialogUser('')
+          setCaseAccessDraftPaths([])
+        }}
+        onAssignedCasePathsChange={setCaseAccessDraftPaths}
+        onSave={() => {
+          if (!caseAccessDialogUser) {
+            return
+          }
+          void saveUserCaseAccess(caseAccessDialogUser, caseAccessDraftPaths)
         }}
       />
 
@@ -2215,6 +2298,7 @@ function UserManagementDialog({
   onRevokeInvite,
   onResetMfa,
   onToggleMfaEnforcement,
+  onOpenCaseAccess,
   onCopyInvite
 }: {
   open: boolean
@@ -2239,6 +2323,7 @@ function UserManagementDialog({
   onRevokeInvite: (username: string) => void
   onResetMfa: (username: string) => void
   onToggleMfaEnforcement: (username: string, enforced: boolean) => void
+  onOpenCaseAccess: (username: string) => void
   onCopyInvite: (username: string) => void
 }) {
   return (
@@ -2347,8 +2432,21 @@ function UserManagementDialog({
                               <div className="mt-1 text-xs text-[color:var(--soft)]">
                                 {user.inviteStatus === 'pending' ? 'Pending invite' : user.inviteStatus === 'active' ? 'Active account' : user.inviteStatus}
                               </div>
+                              <div className="mt-1 text-xs text-[color:var(--muted)]">
+                                {user.assignedCasePaths.length ? `${user.assignedCasePaths.length} assigned case${user.assignedCasePaths.length === 1 ? '' : 's'}` : 'No cases assigned'}
+                              </div>
                             </div>
                             <div className="flex shrink-0 items-center gap-1">
+                              <IconButton
+                                label={`Manage case access for ${user.username}`}
+                                className="h-9 w-9"
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  onOpenCaseAccess(user.username)
+                                }}
+                              >
+                                <FolderCog className="h-4 w-4" />
+                              </IconButton>
                               {user.inviteUrl ? (
                                 <IconButton
                                   label="Copy invite link"
@@ -2480,6 +2578,101 @@ function UserManagementDialog({
               </div>
             </div>
           </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function CaseAccessDialog({
+  open,
+  loading,
+  user,
+  caseOptions,
+  assignedCasePaths,
+  onClose,
+  onAssignedCasePathsChange,
+  onSave
+}: {
+  open: boolean
+  loading: boolean
+  user: UserInvite | null
+  caseOptions: Array<{ label: string; value: string; count: number }>
+  assignedCasePaths: string[]
+  onClose: () => void
+  onAssignedCasePathsChange: (value: string[]) => void
+  onSave: () => void
+}) {
+  const assignedCaseSet = React.useMemo(() => new Set(assignedCasePaths), [assignedCasePaths])
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) {
+          onClose()
+        }
+      }}
+    >
+      <DialogContent className="w-[min(92vw,760px)]">
+        <div className="flex items-start justify-between gap-4 border-b border-[color:var(--line)] px-6 py-5">
+          <div>
+            <div className="text-xs font-semibold tracking-[0.18em] text-[color:var(--muted)] uppercase">Settings</div>
+            <DialogTitle className="mt-1 text-2xl">Case access</DialogTitle>
+            <DialogDescription>
+              {user ? `Assign top-level cases for ${user.username}.` : 'Assign top-level cases for the selected user.'}
+            </DialogDescription>
+          </div>
+          <Badge>{assignedCasePaths.length}</Badge>
+        </div>
+
+        <div className="space-y-4 px-6 py-5">
+          <div className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-4 py-3 text-sm text-[color:var(--muted)]">
+            Users start with no cases assigned. Leave everything unchecked for no access.
+          </div>
+
+          <ScrollArea className="max-h-[48vh] pr-2">
+            <div className="space-y-2">
+              {caseOptions.length ? (
+                caseOptions.map((option) => {
+                  const checked = assignedCaseSet.has(option.value)
+                  return (
+                    <label
+                      key={option.value || 'pst-root'}
+                      className="flex cursor-pointer items-center justify-between gap-3 rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-4 py-3 text-sm text-[color:var(--text)] transition hover:border-[color:var(--accent-soft)]"
+                    >
+                      <span className="min-w-0 truncate">{option.label}</span>
+                      <span className="flex items-center gap-2">
+                        {option.count ? <Badge>{option.count}</Badge> : null}
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={!user || loading}
+                          onChange={(event) => {
+                            const nextPaths = event.target.checked
+                              ? Array.from(new Set([...assignedCasePaths, option.value]))
+                              : assignedCasePaths.filter((path) => path !== option.value)
+                            onAssignedCasePathsChange(nextPaths)
+                          }}
+                        />
+                      </span>
+                    </label>
+                  )
+                })
+              ) : (
+                <div className="empty-state">No cases available.</div>
+              )}
+            </div>
+          </ScrollArea>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-[color:var(--line)] px-6 py-5">
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button onClick={onSave} disabled={loading || !user}>
+            {loading ? 'Saving...' : 'Save access'}
+          </Button>
         </div>
       </DialogContent>
     </Dialog>

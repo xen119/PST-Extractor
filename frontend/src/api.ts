@@ -131,6 +131,12 @@ export const api = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enforced })
+      }),
+    setUserAccess: (username: string, assignedCasePaths: string[]) =>
+      requestJson<{ user: UserInvite }>(`/api/auth/users/${encodeURIComponent(username)}/access`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ assignedCasePaths })
       })
   },
   settings: {

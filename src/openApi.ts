@@ -244,9 +244,13 @@ function authUserSchema(): Record<string, unknown> {
   return {
     type: 'object',
     additionalProperties: false,
-    required: ['username'],
+    required: ['username', 'assignedCasePaths'],
     properties: {
-      username: { type: 'string' }
+      username: { type: 'string' },
+      assignedCasePaths: {
+        type: 'array',
+        items: { type: 'string' }
+      }
     }
   }
 }
@@ -266,7 +270,8 @@ function authManagedUserSchema(): Record<string, unknown> {
       'inviteRevokedAt',
       'mfaEnabled',
       'mfaEnforced',
-      'mfaEnrolledAt'
+      'mfaEnrolledAt',
+      'assignedCasePaths'
     ],
     properties: {
       username: { type: 'string' },
@@ -279,7 +284,11 @@ function authManagedUserSchema(): Record<string, unknown> {
       inviteRevokedAt: { type: 'string' },
       mfaEnabled: { type: 'boolean' },
       mfaEnforced: { type: 'boolean' },
-      mfaEnrolledAt: { type: 'string' }
+      mfaEnrolledAt: { type: 'string' },
+      assignedCasePaths: {
+        type: 'array',
+        items: { type: 'string' }
+      }
     }
   }
 }
@@ -330,6 +339,20 @@ function authMfaEnforceRequestSchema(): Record<string, unknown> {
     required: ['enforced'],
     properties: {
       enforced: { type: 'boolean' }
+    }
+  }
+}
+
+function authUserAccessRequestSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['assignedCasePaths'],
+    properties: {
+      assignedCasePaths: {
+        type: 'array',
+        items: { type: 'string' }
+      }
     }
   }
 }
@@ -941,6 +964,30 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
             content: {
               'application/json': {
                 schema: authMfaEnforceRequestSchema()
+              }
+            }
+          },
+          responses: {
+            200: jsonResponse(authUserDeleteResponseSchema()),
+            ...errorResponse(400, 'Authentication is disabled or username is required'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Admin access required'),
+            ...errorResponse(404, 'User not found')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authUserAccess)]: {
+        put: {
+          tags: ['Auth'],
+          summary: 'Set the case access assignment for a local viewer user',
+          parameters: [
+            { name: 'username', in: 'path', required: true, schema: { type: 'string' } }
+          ],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: authUserAccessRequestSchema()
               }
             }
           },

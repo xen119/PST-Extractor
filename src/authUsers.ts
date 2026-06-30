@@ -30,6 +30,7 @@ export interface AuthUserListItem {
   mfaEnabled: boolean
   mfaEnforced: boolean
   mfaEnrolledAt: string
+  assignedCasePaths: string[]
 }
 
 export interface AuthInviteResult {
@@ -68,6 +69,7 @@ export interface AuthUserStore {
   verifyMfaChallenge(username: string, code: string): Promise<AuthUserListItem | null>
   resetMfa(username: string): Promise<AuthUserListItem | null>
   setMfaEnforced(username: string, enforced: boolean): Promise<AuthUserListItem | null>
+  setAssignedCasePaths(username: string, assignedCasePaths: string[]): Promise<AuthUserListItem | null>
   deleteUser(username: string): Promise<AuthUserListItem | null>
   close(): Promise<void>
 }
@@ -85,6 +87,7 @@ interface StoredAuthUserRecord extends AuthUserListItem {
   mfaPendingSecretNonce: string
   mfaPendingSecretIssuedAt: string
   mfaRecoveryCodes: RecoveryCodeRecord[]
+  assignedCasePaths: string[]
 }
 
 interface AuthMetaRecord {
@@ -122,6 +125,30 @@ function normalizeUsernameKey(value: unknown): string {
 
 function normalizeEmail(value: unknown): string {
   return normalizeText(value).toLowerCase()
+}
+
+function normalizeCasePath(value: unknown): string {
+  return normalizeText(value)
+    .replace(/\\/g, '/')
+    .replace(/^\/+|\/+$/g, '')
+    .replace(/\/+/g, '/')
+}
+
+function normalizeAssignedCasePath(value: unknown): string {
+  const normalized = normalizeCasePath(value)
+  if (!normalized) {
+    return ''
+  }
+
+  return normalized.split('/').map((segment) => segment.trim()).filter(Boolean)[0] || ''
+}
+
+function normalizeAssignedCasePaths(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return [...new Set(value.map((entry) => normalizeAssignedCasePath(entry)).filter(Boolean))]
 }
 
 function normalizeToken(value: unknown): string {
@@ -184,6 +211,7 @@ function buildStoredAuthUserRecord(input: {
   mfaPendingSecretNonce?: string
   mfaPendingSecretIssuedAt?: string
   mfaRecoveryCodes?: RecoveryCodeRecord[]
+  assignedCasePaths?: string[]
 }): StoredAuthUserRecord {
   const username = normalizeUsername(input.username)
   const createdAt = normalizeText(input.createdAt) || new Date().toISOString()
@@ -212,7 +240,8 @@ function buildStoredAuthUserRecord(input: {
     mfaPendingSecretEncrypted: normalizeText(input.mfaPendingSecretEncrypted),
     mfaPendingSecretNonce: normalizeText(input.mfaPendingSecretNonce),
     mfaPendingSecretIssuedAt: normalizeText(input.mfaPendingSecretIssuedAt),
-    mfaRecoveryCodes: Array.isArray(input.mfaRecoveryCodes) ? input.mfaRecoveryCodes : []
+    mfaRecoveryCodes: Array.isArray(input.mfaRecoveryCodes) ? input.mfaRecoveryCodes : [],
+    assignedCasePaths: normalizeAssignedCasePaths(input.assignedCasePaths)
   }
 }
 
@@ -252,7 +281,8 @@ function normalizeStoredAuthUserRecord(value: unknown): StoredAuthUserRecord | n
     mfaPendingSecretEncrypted: normalizeText(source.mfaPendingSecretEncrypted),
     mfaPendingSecretNonce: normalizeText(source.mfaPendingSecretNonce),
     mfaPendingSecretIssuedAt: normalizeText(source.mfaPendingSecretIssuedAt),
-    mfaRecoveryCodes: normalizeRecoveryCodeRecords(source.mfaRecoveryCodes)
+    mfaRecoveryCodes: normalizeRecoveryCodeRecords(source.mfaRecoveryCodes),
+    assignedCasePaths: normalizeAssignedCasePaths(source.assignedCasePaths)
   }
 }
 
@@ -282,7 +312,8 @@ function toAuthUserListItem(record: StoredAuthUserRecord): AuthUserListItem {
     inviteRevokedAt: record.inviteRevokedAt,
     mfaEnabled: Boolean(record.mfaEnabled),
     mfaEnforced: Boolean(record.mfaEnforced),
-    mfaEnrolledAt: record.mfaEnrolledAt
+    mfaEnrolledAt: record.mfaEnrolledAt,
+    assignedCasePaths: [...record.assignedCasePaths]
   }
 }
 
@@ -310,7 +341,8 @@ function buildLegacyUserRecord(username: string, password: string, createdAt = n
     inviteTokenHash: '',
     mfaEnabled: false,
     mfaEnforced: false,
-    mfaRecoveryCodes: []
+    mfaRecoveryCodes: [],
+    assignedCasePaths: []
   })
 }
 
@@ -346,7 +378,8 @@ function buildInviteRecord(
     mfaPendingSecretEncrypted: '',
     mfaPendingSecretNonce: '',
     mfaPendingSecretIssuedAt: '',
-    mfaRecoveryCodes: []
+    mfaRecoveryCodes: [],
+    assignedCasePaths: existing?.assignedCasePaths || []
   })
 
   return {
@@ -767,6 +800,21 @@ class MemoryAuthUserStore implements AuthUserStore {
       ...record,
       updatedAt: new Date().toISOString(),
       mfaEnforced: Boolean(enforced)
+    })
+    this.setRecord(updated)
+    return toAuthUserListItem(updated)
+  }
+
+  async setAssignedCasePaths(username: string, assignedCasePaths: string[]): Promise<AuthUserListItem | null> {
+    const record = this.getRecord(username)
+    if (!record) {
+      return null
+    }
+
+    const updated = buildStoredAuthUserRecord({
+      ...record,
+      updatedAt: new Date().toISOString(),
+      assignedCasePaths
     })
     this.setRecord(updated)
     return toAuthUserListItem(updated)
@@ -1216,6 +1264,21 @@ export class MongoAuthUserStore implements AuthUserStore {
       ...record,
       updatedAt: new Date().toISOString(),
       mfaEnforced: Boolean(enforced)
+    })
+    await this.setRecord(updated)
+    return toAuthUserListItem(updated)
+  }
+
+  async setAssignedCasePaths(username: string, assignedCasePaths: string[]): Promise<AuthUserListItem | null> {
+    const record = await this.getRecord(username)
+    if (!record) {
+      return null
+    }
+
+    const updated = buildStoredAuthUserRecord({
+      ...record,
+      updatedAt: new Date().toISOString(),
+      assignedCasePaths
     })
     await this.setRecord(updated)
     return toAuthUserListItem(updated)

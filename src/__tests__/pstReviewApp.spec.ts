@@ -603,6 +603,7 @@ describe('pst review api', () => {
     expect(openApi.paths['/api/sessions/{sessionId}/messages/{messageId}/review']).toBeDefined()
     expect(openApi.paths['/api/exports/flagged.zip']).toBeDefined()
     expect(openApi.paths['/api/auth/users/{username}/mfa/enforce']).toBeDefined()
+    expect(openApi.paths['/api/auth/users/{username}/access']).toBeDefined()
 
     const docsResponse = await fetch(`${started.baseUrl}/api/docs`)
     const docsHtml = await docsResponse.text()
@@ -1185,6 +1186,17 @@ describe('pst review api', () => {
     const adminCookie = await login('admin', 'pst-extractor')
     const bobCookie = await login('bob', 'bob-password')
 
+    await requestJson(`${started.baseUrl}/api/auth/users/bob/access`, {
+      method: 'PUT',
+      headers: {
+        Cookie: adminCookie,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        assignedCasePaths: ['Case1']
+      })
+    })
+
     const opened = await requestJson(`${started.baseUrl}/api/psts/open`, {
       method: 'POST',
       headers: {
@@ -1706,7 +1718,8 @@ describe('pst review api', () => {
       close: async () => undefined
     })
     fs.mkdirSync(pstDir)
-    stageFixture(enronPath, path.join(pstDir, 'sample.pst'))
+    fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
+    stageFixture(enronPath, path.join(pstDir, 'Case1', 'Search1', 'sample.pst'))
 
     const started = await startApp(pstDir, undefined, {
       username: 'admin',
@@ -1761,6 +1774,17 @@ describe('pst review api', () => {
     expect(sentMessages.length).toBe(1)
     expect(String(sentMessages[0].html || '')).toContain('Click here to setup your access to DV PST Mail Explorer')
     expect(String(sentMessages[0].text || '')).toContain('Click here to setup your access to DV PST Mail Explorer')
+
+    await requestJson(`${started.baseUrl}/api/auth/users/alice/access`, {
+      method: 'PUT',
+      headers: {
+        Cookie: cookiePair,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        assignedCasePaths: ['Case1']
+      })
+    })
 
     const enforceResponse = await fetch(`${started.baseUrl}/api/auth/users/alice/mfa/enforce`, {
       method: 'POST',
@@ -1985,7 +2009,7 @@ describe('pst review api', () => {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        scopePath: '',
+        scopePath: 'Case1/Search1',
         fileName: 'sample.pst'
       })
     })
@@ -2277,6 +2301,127 @@ describe('pst review api', () => {
     expect(bobChallengeResponse.status).toBe(200)
     expect(bobChallengePayload.authenticated).toBe(true)
     expect(bobChallengePayload.mfaEnabled).toBe(true)
+  })
+
+  it('restricts catalog and search access to assigned cases before any mailbox is opened', async () => {
+    rootDir = makeTempDir('pst-review-api-case-access-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
+    fs.mkdirSync(path.join(pstDir, 'Case2', 'Search1'), { recursive: true })
+    stageFixture(enronPath, path.join(pstDir, 'Case1', 'Search1', 'case1.pst'))
+    stageFixture(enronPath, path.join(pstDir, 'Case2', 'Search1', 'case2.pst'))
+
+    const authUserStore = createMemoryAuthUserStore([
+      { username: 'admin', password: 'pst-extractor' },
+      { username: 'bob', password: 'password123' }
+    ])
+
+    const started = await startApp(pstDir, undefined, {
+      username: 'admin',
+      password: 'pst-extractor',
+      sessionTtlMinutes: 180
+    }, authUserStore)
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const adminLoginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'admin',
+        password: 'pst-extractor'
+      })
+    })
+    const adminCookie = getCookiePair(getSetCookieHeader(adminLoginResponse))
+    expect(adminLoginResponse.status).toBe(200)
+
+    const bobLoginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'bob',
+        password: 'password123'
+      })
+    })
+    const bobCookie = getCookiePair(getSetCookieHeader(bobLoginResponse))
+    expect(bobLoginResponse.status).toBe(200)
+
+    const emptyCatalogResponse = await requestJson(`${started.baseUrl}/api/psts`, {
+      headers: {
+        Cookie: bobCookie
+      }
+    })
+    expect(emptyCatalogResponse.scopes).toEqual([])
+    expect(emptyCatalogResponse.files).toEqual([])
+    expect(emptyCatalogResponse.message).toBe('No cases assigned.')
+
+    const accessResponse = await fetch(`${started.baseUrl}/api/auth/users/bob/access`, {
+      method: 'PUT',
+      headers: {
+        Cookie: adminCookie,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        assignedCasePaths: ['Case1']
+      })
+    })
+    const accessPayload = await readJson(accessResponse)
+    expect(accessResponse.status).toBe(200)
+    expect(accessPayload.user.assignedCasePaths).toEqual(['Case1'])
+
+    const catalogResponse = await requestJson(`${started.baseUrl}/api/psts`, {
+      headers: {
+        Cookie: bobCookie
+      }
+    })
+    expect(catalogResponse.scopes.map((scope: { scopePath: string }) => scope.scopePath)).toEqual([
+      'Case1/Search1'
+    ])
+    expect(catalogResponse.files.map((file: { fileName: string }) => file.fileName)).toEqual([
+      'case1.pst'
+    ])
+
+    const disallowedCatalogResponse = await fetch(
+      `${started.baseUrl}/api/psts?scopePath=${encodeURIComponent('Case2/Search1')}`,
+      {
+        headers: {
+          Cookie: bobCookie
+        }
+      }
+    )
+    const disallowedCatalogPayload = await readJson(disallowedCatalogResponse)
+    expect(disallowedCatalogResponse.status).toBe(403)
+    expect(disallowedCatalogPayload.error).toBe('Case access required')
+
+    const searchBeforeOpenResponse = await requestJson(
+      `${started.baseUrl}/api/search?scope=all&query=sample&pageSize=5`,
+      {
+        headers: {
+          Cookie: bobCookie
+        }
+      }
+    )
+    expect(searchBeforeOpenResponse.scope).toBe('all')
+    expect(searchBeforeOpenResponse.page).toBeTruthy()
+
+    const disallowedSearchResponse = await fetch(
+      `${started.baseUrl}/api/search?scope=search&scopePath=${encodeURIComponent(
+        'Case2/Search1'
+      )}&query=sample&pageSize=5`,
+      {
+        headers: {
+          Cookie: bobCookie
+        }
+      }
+    )
+    const disallowedSearchPayload = await readJson(disallowedSearchResponse)
+    expect(disallowedSearchResponse.status).toBe(403)
+    expect(disallowedSearchPayload.error).toBe('Case access required')
   })
 
   it('builds invite links from the request origin when no public base url is configured', async () => {

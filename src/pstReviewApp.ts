@@ -156,6 +156,7 @@ interface AuthStatusResponse {
   mfaChallengeExpiresAt: string | null
   user: {
     username: string
+    assignedCasePaths: string[]
   } | null
   expiresAt: string | null
 }
@@ -858,6 +859,46 @@ function normalizeScopePath(value: unknown): string {
   return segments.join('/')
 }
 
+function normalizeAssignedCasePath(value: unknown): string {
+  const normalized = normalizeScopePath(value)
+  if (!normalized) {
+    return ''
+  }
+
+  return normalized.split('/').filter(Boolean)[0] || ''
+}
+
+function normalizeAssignedCasePaths(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return [...new Set(value.map((entry) => normalizeAssignedCasePath(entry)).filter(Boolean))]
+}
+
+function isScopePathAllowed(scopePath: string, allowedCasePaths: string[], allowAll = false): boolean {
+  if (allowAll) {
+    return true
+  }
+  if (!allowedCasePaths.length) {
+    return false
+  }
+
+  const normalizedScopePath = normalizeScopePath(scopePath)
+  if (!normalizedScopePath) {
+    return false
+  }
+
+  return allowedCasePaths.some(
+    (allowedCasePath) =>
+      normalizedScopePath === allowedCasePath || normalizedScopePath.startsWith(`${allowedCasePath}/`)
+  )
+}
+
+function getAccessibleCasePaths(user: AuthUserListItem | null): string[] {
+  return normalizeAssignedCasePaths(user?.assignedCasePaths || [])
+}
+
 function parseSearchScope(value: unknown): 'all' | 'search' | 'pst' {
   const normalized = normalizeText(value).toLowerCase()
   if (normalized === 'all' || normalized === 'search' || normalized === 'pst') {
@@ -887,6 +928,60 @@ function resolveCatalogScopeSelection(
   }
 
   return catalog
+}
+
+function resolveAccessibleCatalogSelection(
+  rootPath: string,
+  requestedScopePath: string,
+  allowedCasePaths: string[],
+  loader: (rootPath: string, scopePath?: string) => ReturnType<typeof listPstMailboxFiles> = listPstMailboxFiles,
+  allowAll = false
+): ReturnType<typeof listPstMailboxFiles> {
+  const normalizedRequestedScopePath = normalizeScopePath(requestedScopePath)
+  if (normalizedRequestedScopePath && !isScopePathAllowed(normalizedRequestedScopePath, allowedCasePaths, allowAll)) {
+    throw createAppError(403, 'Case access required')
+  }
+
+  if (!allowAll && !allowedCasePaths.length) {
+    return {
+      rootPath,
+      rootExists: fs.existsSync(rootPath),
+      scopes: [],
+      scopePath: '',
+      scopeLabel: '',
+      files: [],
+      message: 'No cases assigned.'
+    }
+  }
+
+  const effectiveScopePath = normalizedRequestedScopePath || (allowAll ? '' : allowedCasePaths[0] || '')
+  const catalog = loader(rootPath, effectiveScopePath)
+  if (allowAll) {
+    return catalog
+  }
+
+  const scopes = catalog.scopes.filter((scope) => isScopePathAllowed(scope.scopePath, allowedCasePaths, allowAll))
+  if (!scopes.length) {
+    return {
+      ...catalog,
+      scopes: [],
+      scopePath: '',
+      scopeLabel: '',
+      files: [],
+      message: catalog.message
+    }
+  }
+
+  const selectedScope =
+    scopes.find((scope) => scope.scopePath === catalog.scopePath) || scopes[0] || null
+
+  return {
+    ...catalog,
+    scopes,
+    scopePath: selectedScope?.scopePath || '',
+    scopeLabel: selectedScope?.scopeLabel || '',
+    files: selectedScope?.files || []
+  }
 }
 
 function parseFlaggedBundleScope(value: unknown): 'all' | 'search' | 'pst' {
@@ -938,11 +1033,16 @@ function buildBundleMailboxes(
   rootPath: string,
   scope: 'all' | 'search' | 'pst',
   scopePath: string,
-  session: SessionRecord | null
+  session: SessionRecord | null,
+  allowedCasePaths: string[],
+  allowAll = false
 ): BundleMailboxDescriptor[] {
   if (scope === 'pst') {
     if (!session) {
       throw createAppError(400, 'Session id is required for selected PST exports')
+    }
+    if (!isScopePathAllowed(session.scopePath, allowedCasePaths, allowAll)) {
+      throw createAppError(403, 'Case access required')
     }
     return [
       {
@@ -956,9 +1056,9 @@ function buildBundleMailboxes(
   }
 
   const catalog =
-    scope === 'search'
-      ? resolveCatalogScopeSelection(rootPath, scopePath)
-      : listPstMailboxFiles(rootPath)
+      scope === 'search'
+      ? resolveAccessibleCatalogSelection(rootPath, scopePath, allowedCasePaths, listPstMailboxFiles, allowAll)
+      : resolveAccessibleCatalogSelection(rootPath, '', allowedCasePaths, listPstMailboxFiles, allowAll)
   const scopes = scope === 'search' ? [catalog] : catalog.scopes
 
   const mailboxes: BundleMailboxDescriptor[] = []
@@ -1593,10 +1693,17 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   function buildAuthStatus(
     session: AuthSessionRecord | null,
     challenge: AuthMfaChallengeRecord | null = null,
+    user: AuthUserListItem | null = null,
     mfaEnabled = false,
     mfaEnforced = false
   ): AuthStatusResponse {
     const canManageUsers = isAdminAuthSession(session, authConfig)
+    const authUser = user
+      ? {
+          username: user.username,
+          assignedCasePaths: [...(user.assignedCasePaths || [])]
+        }
+      : null
     if (!authConfig.enabled) {
       return {
         authenticated: true,
@@ -1606,7 +1713,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         mfaEnforced: false,
         mfaRequired: false,
         mfaChallengeExpiresAt: null,
-        user: null,
+        user: authUser,
         expiresAt: null
       }
     }
@@ -1621,8 +1728,9 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           mfaEnforced: Boolean(mfaEnforced),
           mfaRequired: true,
           mfaChallengeExpiresAt: new Date(challenge.expiresAt).toISOString(),
-          user: {
-            username: challenge.username
+          user: authUser || {
+            username: challenge.username,
+            assignedCasePaths: []
           },
           expiresAt: null
         }
@@ -1649,8 +1757,9 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       mfaEnforced: Boolean(mfaEnforced),
       mfaRequired: false,
       mfaChallengeExpiresAt: null,
-      user: {
-        username: session.username
+      user: authUser || {
+        username: session.username,
+        assignedCasePaths: []
       },
       expiresAt: new Date(session.expiresAt).toISOString()
     }
@@ -2090,6 +2199,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         buildAuthStatus(
           session,
           challenge,
+          currentUser,
           session?.mfaEnabled ?? Boolean(currentUser?.mfaEnabled),
           Boolean(currentUser?.mfaEnforced)
         )
@@ -2147,7 +2257,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
             mfaEnforced: Boolean(user.mfaEnforced)
           }
         })
-        responseJson(res, 200, buildAuthStatus(null, challenge, false, Boolean(user.mfaEnforced)))
+        responseJson(res, 200, buildAuthStatus(null, challenge, user, false, Boolean(user.mfaEnforced)))
         return
       }
 
@@ -2163,7 +2273,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           mfaEnforced: Boolean(user.mfaEnforced)
         }
       })
-      responseJson(res, 200, buildAuthStatus(session, null, Boolean(user.mfaEnabled), Boolean(user.mfaEnforced)))
+      responseJson(res, 200, buildAuthStatus(session, null, user, Boolean(user.mfaEnabled), Boolean(user.mfaEnforced)))
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
@@ -2755,6 +2865,84 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     }
   })
 
+  app.put(API_ROUTES.authUserAccess, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        throw createAppError(400, 'Authentication is disabled')
+      }
+
+      const session = getAuthSessionFromRequest(req)
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      if (!isAdminAuthSession(session, authConfig)) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.access.update',
+          target: normalizeAuthUsername(req.params.username) || 'local users',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Admin access required'
+        })
+        return
+      }
+
+      const targetUsername = normalizeAuthUsername(req.params.username)
+      if (!targetUsername) {
+        responseJson(res, 400, {
+          error: 'Username is required'
+        })
+        return
+      }
+
+      const body = (req.body || {}) as { assignedCasePaths?: unknown }
+      const assignedCasePaths = normalizeAssignedCasePaths(body.assignedCasePaths)
+      const user = await authUserStore.setAssignedCasePaths(targetUsername, assignedCasePaths)
+      if (!user) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.access.update',
+          target: targetUsername,
+          outcome: 'denied',
+          metadata: {
+            reason: 'User not found'
+          }
+        })
+        responseJson(res, 404, {
+          error: 'User not found'
+        })
+        return
+      }
+
+      recordAuditEvent({
+        req,
+        session,
+        action: 'auth.users.access.update',
+        target: user.username,
+        outcome: 'success',
+        metadata: {
+          assignedCasePaths: [...user.assignedCasePaths]
+        }
+      })
+      responseJson(res, 200, {
+        user
+      } satisfies AuthUserDeleteResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
   app.get(API_ROUTES.authInviteLookup, async (req, res) => {
     try {
       res.set('Cache-Control', 'no-store')
@@ -2888,7 +3076,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         target: user.username,
         outcome: 'success'
       })
-      responseJson(res, 200, buildAuthStatus(session, null, Boolean(user.mfaEnabled), Boolean(user.mfaEnforced)))
+      responseJson(res, 200, buildAuthStatus(session, null, user, Boolean(user.mfaEnabled), Boolean(user.mfaEnforced)))
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
@@ -3326,21 +3514,55 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     }
   })
 
-  app.get(API_ROUTES.pstCatalog, (req, res) => {
+  app.get(API_ROUTES.pstCatalog, async (req, res) => {
     try {
+      const session = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+      const currentUser = session ? await authUserStore.getUser(session.username) : null
+      const allowAllCases = !authConfig.enabled || isAdminAuthSession(session, authConfig)
       const scopePath =
         typeof req.query.scopePath === 'string' ? normalizeText(req.query.scopePath) : ''
-      responseJson(res, 200, listPstMailboxFiles(pstRootDir, scopePath))
+      const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
+      const catalog = resolveAccessibleCatalogSelection(
+        pstRootDir,
+        scopePath,
+        allowedCasePaths,
+        listPstMailboxFiles,
+        allowAllCases
+      )
+      responseJson(res, 200, catalog)
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
   })
 
-  app.get(API_ROUTES.pstRemovedCatalog, (req, res) => {
+  app.get(API_ROUTES.pstRemovedCatalog, async (req, res) => {
     try {
+      const session = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+      const currentUser = session ? await authUserStore.getUser(session.username) : null
+      const allowAllCases = !authConfig.enabled || isAdminAuthSession(session, authConfig)
       const scopePath =
         typeof req.query.scopePath === 'string' ? normalizeText(req.query.scopePath) : ''
-      responseJson(res, 200, listRemovedPstMailboxFiles(pstRootDir, scopePath))
+      const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
+      const catalog = resolveAccessibleCatalogSelection(
+        pstRootDir,
+        scopePath,
+        allowedCasePaths,
+        listRemovedPstMailboxFiles,
+        allowAllCases
+      )
+      responseJson(res, 200, catalog)
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
@@ -3349,11 +3571,39 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.post(API_ROUTES.pstOpen, async (req, res) => {
     try {
       const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+      const currentUser = authSession ? await authUserStore.getUser(authSession.username) : null
+      const allowAllCases = !authConfig.enabled || isAdminAuthSession(authSession, authConfig)
       const body = (req.body || {}) as OpenMailboxRequestBody
       const scopePath = normalizeText(body.scopePath)
       const fileName = normalizeText(body.fileName)
       if (!fileName) {
         throw createAppError(400, 'Mailbox file name is required')
+      }
+
+      if (!isScopePathAllowed(scopePath, allowAllCases ? [] : getAccessibleCasePaths(currentUser), allowAllCases)) {
+        recordAuditEvent({
+          req,
+          session: authSession,
+          action: 'mailbox.open',
+          target: `${scopePath ? `${scopePath}/` : ''}${fileName}`,
+          outcome: 'denied',
+          metadata: {
+            scopePath,
+            scopeLabel: getScopeLabel(scopePath),
+            fileName,
+            reason: 'Case access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Case access required'
+        })
+        return
       }
 
       const index = openPstMailbox(pstRootDir, scopePath, fileName)
@@ -3400,11 +3650,39 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.post(API_ROUTES.pstRemove, async (req, res) => {
     try {
       const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+      const currentUser = authSession ? await authUserStore.getUser(authSession.username) : null
+      const allowAllCases = !authConfig.enabled || isAdminAuthSession(authSession, authConfig)
       const body = (req.body || {}) as MoveMailboxRequestBody
       const scopePath = normalizeText(body.scopePath)
       const fileName = normalizeText(body.fileName)
       if (!fileName) {
         throw createAppError(400, 'Mailbox file name is required')
+      }
+
+      if (!isScopePathAllowed(scopePath, allowAllCases ? [] : getAccessibleCasePaths(currentUser), allowAllCases)) {
+        recordAuditEvent({
+          req,
+          session: authSession,
+          action: 'mailbox.remove',
+          target: `${scopePath ? `${scopePath}/` : ''}${fileName}`,
+          outcome: 'denied',
+          metadata: {
+            scopePath,
+            scopeLabel: getScopeLabel(scopePath),
+            fileName,
+            reason: 'Case access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Case access required'
+        })
+        return
       }
 
       const removal = movePstMailboxToRemoved(pstRootDir, scopePath, fileName)
@@ -3442,11 +3720,39 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.post(API_ROUTES.pstRestore, async (req, res) => {
     try {
       const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+      const currentUser = authSession ? await authUserStore.getUser(authSession.username) : null
+      const allowAllCases = !authConfig.enabled || isAdminAuthSession(authSession, authConfig)
       const body = (req.body || {}) as MoveMailboxRequestBody
       const scopePath = normalizeText(body.scopePath)
       const fileName = normalizeText(body.fileName)
       if (!fileName) {
         throw createAppError(400, 'Mailbox file name is required')
+      }
+
+      if (!isScopePathAllowed(scopePath, allowAllCases ? [] : getAccessibleCasePaths(currentUser), allowAllCases)) {
+        recordAuditEvent({
+          req,
+          session: authSession,
+          action: 'mailbox.restore',
+          target: `${scopePath ? `${scopePath}/` : ''}${fileName}`,
+          outcome: 'denied',
+          metadata: {
+            scopePath,
+            scopeLabel: getScopeLabel(scopePath),
+            fileName,
+            reason: 'Case access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Case access required'
+        })
+        return
       }
 
       const restore = restorePstMailboxFromRemoved(pstRootDir, scopePath, fileName)
@@ -3480,6 +3786,15 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.get(API_ROUTES.search, async (req, res) => {
     try {
       const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+      const currentUser = authSession ? await authUserStore.getUser(authSession.username) : null
+      const allowAllCases = !authConfig.enabled || isAdminAuthSession(authSession, authConfig)
+      const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
       const reviewerUsername = getReviewOwnerUsername(authSession)
       const filters = parseReviewFilters(req.query as Record<string, string | string[] | undefined>)
       const scope = parseSearchScope(req.query.scope) as SearchScope
@@ -3491,20 +3806,61 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       let allowedMailboxKeys: string[] = []
 
       if (scope === 'pst') {
+        if (!sessionId) {
+          throw createAppError(400, 'Session id is required for selected PST search')
+        }
         const session = getSessionOrThrow(sessions, sessionId)
+        if (!isScopePathAllowed(session.scopePath, allowedCasePaths, allowAllCases)) {
+          recordAuditEvent({
+            req,
+            session: authSession,
+            action: 'search.execute',
+            target: session.scopeLabel || session.fileName,
+            outcome: 'denied',
+            metadata: {
+              reason: 'Case access required',
+              scope: 'pst',
+              scopePath: session.scopePath
+            }
+          })
+          responseJson(res, 403, {
+            error: 'Case access required'
+          })
+          return
+        }
         scopePath = session.scopePath
         scopeLabel = session.scopeLabel || getScopeLabel(scopePath)
         mailboxKey = session.filePath
         allowedMailboxKeys = [mailboxKey]
       } else if (scope === 'search') {
-        const catalog = resolveCatalogScopeSelection(pstRootDir, requestedScopePath)
+        const catalog = resolveAccessibleCatalogSelection(
+          pstRootDir,
+          requestedScopePath,
+          allowedCasePaths,
+          listPstMailboxFiles,
+          allowAllCases
+        )
         scopePath = catalog.scopePath
         scopeLabel = catalog.scopeLabel
-        const selectedCatalog = listPstMailboxFiles(pstRootDir, scopePath)
+        const selectedCatalog = scopePath
+          ? resolveAccessibleCatalogSelection(
+              pstRootDir,
+              scopePath,
+              allowedCasePaths,
+              listPstMailboxFiles,
+              allowAllCases
+            )
+          : resolveAccessibleCatalogSelection(pstRootDir, '', allowedCasePaths, listPstMailboxFiles, allowAllCases)
         allowedMailboxKeys = selectedCatalog.files
           .map((file) => resolvePstMailboxPath(pstRootDir, selectedCatalog.scopePath, file.fileName))
       } else {
-        const activeCatalog = listPstMailboxFiles(pstRootDir)
+        const activeCatalog = resolveAccessibleCatalogSelection(
+          pstRootDir,
+          '',
+          allowedCasePaths,
+          listPstMailboxFiles,
+          allowAllCases
+        )
         allowedMailboxKeys = activeCatalog.scopes.flatMap((entry) =>
           entry.files.map((file) => resolvePstMailboxPath(pstRootDir, entry.scopePath, file.fileName))
         )
@@ -3980,6 +4336,15 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.get(API_ROUTES.flaggedBundleExport, async (req, res) => {
     try {
       const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+      const currentUser = authSession ? await authUserStore.getUser(authSession.username) : null
+      const allowAllCases = !authConfig.enabled || isAdminAuthSession(authSession, authConfig)
+      const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
       const reviewerUsername = getReviewOwnerUsername(authSession)
       const query = req.query as FlaggedBundleQuery
       const scope = parseFlaggedBundleScope(query.scope)
@@ -3988,9 +4353,21 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       const session = scope === 'pst' ? getSessionOrThrow(sessions, sessionId) : null
       const bundleScope =
         scope === 'search'
-          ? resolveCatalogScopeSelection(pstRootDir, scopePath)
+          ? resolveAccessibleCatalogSelection(
+              pstRootDir,
+              scopePath,
+              allowedCasePaths,
+              listPstMailboxFiles,
+              allowAllCases
+            )
           : scope === 'all'
-            ? listPstMailboxFiles(pstRootDir)
+            ? resolveAccessibleCatalogSelection(
+                pstRootDir,
+                '',
+                allowedCasePaths,
+                listPstMailboxFiles,
+                allowAllCases
+              )
             : null
       const scopeLabel =
         scope === 'all'
@@ -4010,7 +4387,9 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         pstRootDir,
         scope,
         scope === 'search' ? normalizeText(bundleScope?.scopePath || scopePath) : scopePath,
-        session
+        session,
+        allowedCasePaths,
+        allowAllCases
       )
 
       res.status(200)

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
+import { createJSONStorage, persist } from 'zustand/middleware'
 
 type Theme = 'light' | 'dark'
 
@@ -20,6 +20,41 @@ interface UiState {
 }
 
 const normalizeTheme = (value: unknown): Theme => (value === 'dark' ? 'dark' : 'light')
+
+const memoryStorage = (() => {
+  const data = new Map<string, string>()
+  return {
+    get length() {
+      return data.size
+    },
+    clear() {
+      data.clear()
+    },
+    getItem(key: string) {
+      return data.has(key) ? data.get(key)! : null
+    },
+    key(index: number) {
+      return Array.from(data.keys())[index] ?? null
+    },
+    removeItem(key: string) {
+      data.delete(key)
+    },
+    setItem(key: string, value: string) {
+      data.set(key, value)
+    }
+  } as Storage
+})()
+
+function getUiStorage(): Storage {
+  try {
+    if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') {
+      return memoryStorage
+    }
+    return window.localStorage
+  } catch {
+    return memoryStorage
+  }
+}
 
 export const useUiStore = create<UiState>()(
   persist(
@@ -49,6 +84,7 @@ export const useUiStore = create<UiState>()(
     }),
     {
       name: 'pst-mail-explorer.ui',
+      storage: createJSONStorage(() => getUiStorage()),
       partialize: (state) => ({
         theme: state.theme,
         sidebarCollapsed: state.sidebarCollapsed,

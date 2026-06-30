@@ -23,6 +23,17 @@ const STORAGE_KEYS = {
 
 export type WorkspaceStorageKey = keyof typeof STORAGE_KEYS
 
+function getWorkspaceStorage(): Storage | null {
+  try {
+    if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') {
+      return null
+    }
+    return window.localStorage
+  } catch {
+    return null
+  }
+}
+
 export function normalizeStorageNamespace(value: unknown): string {
   const text = normalizeText(value).toLowerCase()
   if (!text) {
@@ -55,16 +66,21 @@ export function readWorkspaceStorageItem(
   fallback = ''
 ): string {
   const scopedKey = getWorkspaceStorageKey(key, authenticated, authUser)
-  const stored = localStorage.getItem(scopedKey)
+  const storage = getWorkspaceStorage()
+  if (!storage) {
+    return fallback
+  }
+
+  const stored = storage.getItem(scopedKey)
   if (stored != null) {
     return stored
   }
 
   const legacyKey = STORAGE_KEYS[key]
-  const legacy = localStorage.getItem(legacyKey)
+  const legacy = storage.getItem(legacyKey)
   if (legacy != null) {
     try {
-      localStorage.setItem(scopedKey, legacy)
+      storage.setItem(scopedKey, legacy)
     } catch {
       // Ignore storage migration errors in restricted browser contexts.
     }
@@ -94,13 +110,18 @@ export function writeWorkspaceStorageItem(
   authUser: string,
   value: string | number | boolean | null | undefined
 ): void {
-  const scopedKey = getWorkspaceStorageKey(key, authenticated, authUser)
-  if (value == null || value === '') {
-    localStorage.removeItem(scopedKey)
+  const storage = getWorkspaceStorage()
+  if (!storage) {
     return
   }
 
-  localStorage.setItem(scopedKey, String(value))
+  const scopedKey = getWorkspaceStorageKey(key, authenticated, authUser)
+  if (value == null || value === '') {
+    storage.removeItem(scopedKey)
+    return
+  }
+
+  storage.setItem(scopedKey, String(value))
 }
 
 export function removeWorkspaceStorageItem(
@@ -108,5 +129,10 @@ export function removeWorkspaceStorageItem(
   authenticated: boolean,
   authUser: string
 ): void {
-  localStorage.removeItem(getWorkspaceStorageKey(key, authenticated, authUser))
+  const storage = getWorkspaceStorage()
+  if (!storage) {
+    return
+  }
+
+  storage.removeItem(getWorkspaceStorageKey(key, authenticated, authUser))
 }

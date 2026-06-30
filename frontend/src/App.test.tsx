@@ -7,6 +7,7 @@ import { api } from '@/api'
 import { AppShell, EmailPreview, MessageList, Sidebar, TagManagerDialog } from '@/components/layout'
 import { AuthScreen, MfaReminderDialog } from '@/components/auth'
 import type {
+  ActivityLogResponse,
   AttachmentDetail,
   AuthStatus,
   FolderNode,
@@ -15,7 +16,8 @@ import type {
   MessageDetail,
   MessageSummary,
   PageResponse,
-  PstCatalogResponse
+  PstCatalogResponse,
+  UsersResponse
 } from '@/types'
 
 afterEach(() => {
@@ -194,7 +196,7 @@ describe('auth shell', () => {
       canManageUsers: true,
       mfaEnabled: true,
       mfaEnforced: false,
-      user: { username: 'admin' },
+      user: { username: 'admin', assignedCasePaths: [] },
       expiresAt: null
     }
     const emptyCatalog: PstCatalogResponse = {
@@ -235,7 +237,7 @@ describe('auth shell', () => {
       canManageUsers: true,
       mfaEnabled: true,
       mfaEnforced: false,
-      user: { username: 'admin' },
+      user: { username: 'admin', assignedCasePaths: [] },
       expiresAt: null
     }
     const emptyCatalog: PstCatalogResponse = {
@@ -269,6 +271,82 @@ describe('auth shell', () => {
 
     await screen.findByRole('button', { name: 'Refresh search index' })
     expect(screen.queryByRole('heading', { name: 'Reindex failed' })).not.toBeInTheDocument()
+  })
+
+  it('opens case access in a per-user modal and defaults to no cases', async () => {
+    const user = userEvent.setup()
+    const now = new Date().toISOString()
+    const authenticatedStatus: AuthStatus = {
+      authenticated: true,
+      enabled: true,
+      canManageUsers: true,
+      mfaEnabled: true,
+      mfaEnforced: false,
+      user: { username: 'admin', assignedCasePaths: [] },
+      expiresAt: null
+    }
+    const emptyCatalog: PstCatalogResponse = {
+      rootPath: '',
+      rootExists: true,
+      message: '',
+      scopePath: '',
+      scopeLabel: 'PST root',
+      scopes: [],
+      files: []
+    }
+    const hiddenRulesResponse: HiddenRulesResponse = { items: [] }
+    const usersResponse: UsersResponse = {
+      users: [
+        {
+          username: 'admin',
+          createdAt: now,
+          recipientEmail: 'admin@example.com',
+          inviteStatus: 'active',
+          inviteSentAt: now,
+          inviteExpiresAt: '',
+          inviteAcceptedAt: now,
+          inviteRevokedAt: '',
+          mfaEnabled: true,
+          mfaEnforced: false,
+          mfaEnrolledAt: now,
+          assignedCasePaths: ['Case1']
+        },
+        {
+          username: 'bob',
+          createdAt: now,
+          recipientEmail: 'bob@example.com',
+          inviteStatus: 'active',
+          inviteSentAt: now,
+          inviteExpiresAt: '',
+          inviteAcceptedAt: now,
+          inviteRevokedAt: '',
+          mfaEnabled: false,
+          mfaEnforced: false,
+          mfaEnrolledAt: '',
+          assignedCasePaths: []
+        }
+      ]
+    }
+    const activityResponse: ActivityLogResponse = { entries: [] }
+
+    vi.spyOn(api.auth, 'me').mockResolvedValueOnce(authenticatedStatus)
+    vi.spyOn(api.pst, 'catalog').mockResolvedValueOnce(emptyCatalog)
+    vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue(hiddenRulesResponse)
+    vi.spyOn(api.auth, 'users').mockResolvedValue(usersResponse)
+    vi.spyOn(api.activityLog, 'list').mockResolvedValue(activityResponse)
+
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'admin' }))
+    await user.click(await screen.findByRole('button', { name: 'Manage users' }))
+
+    expect(await screen.findByRole('heading', { name: 'User management' })).toBeInTheDocument()
+    expect(screen.getByText('No cases assigned')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Manage case access for bob' }))
+
+    expect(await screen.findByRole('heading', { name: 'Case access' })).toBeInTheDocument()
+    expect(screen.getByText('Users start with no cases assigned. Leave everything unchecked for no access.')).toBeInTheDocument()
   })
 
   it('shows a blocking MFA reminder without a close button', () => {
@@ -583,7 +661,7 @@ describe('shell and preview', () => {
       canManageUsers: true,
       mfaEnabled: true,
       mfaEnforced: false,
-      user: { username: 'admin' },
+      user: { username: 'admin', assignedCasePaths: [] },
       expiresAt: null
     }
     const catalog: PstCatalogResponse = {

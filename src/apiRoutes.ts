@@ -9,6 +9,7 @@ export const API_ROUTES = {
   authMfaEnrollmentComplete: '/api/auth/mfa/enrollment/complete',
   authUsers: '/api/auth/users',
   authUser: '/api/auth/users/:username',
+  authUserAccess: '/api/auth/users/:username/access',
   authUserInviteResend: '/api/auth/users/:username/invite/resend',
   authUserInvite: '/api/auth/users/:username/invite',
   authUserMfaReset: '/api/auth/users/:username/mfa/reset',
