@@ -1111,7 +1111,7 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
       [openApiPath(API_ROUTES.pstCatalog)]: {
         get: {
           tags: ['PST catalog'],
-          summary: 'List case/search scopes and PST/OST files from the project PST folder',
+          summary: 'List case/search scopes and PST/OST files from the configured PST folder',
           parameters: [
             {
               name: 'scopePath',

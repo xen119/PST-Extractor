@@ -6,6 +6,7 @@ import {
   listRemovedPstMailboxFiles,
   movePstMailboxToRemoved,
   openPstMailbox,
+  resolvePstRootDirectory,
   resolvePstMailboxPath,
   restorePstMailboxFromRemoved
 } from '../pstCatalog'
@@ -87,6 +88,12 @@ describe('pst catalog helpers', () => {
     expect(missingResult.scopes).toHaveLength(0)
     expect(missingResult.files).toHaveLength(0)
     expect(missingResult.message).toContain('Create a PST folder')
+  })
+
+  it('resolves a configured PST root directory with a project folder fallback', () => {
+    const configuredRoot = path.resolve('custom-pst-root')
+    expect(resolvePstRootDirectory(configuredRoot)).toBe(configuredRoot)
+    expect(resolvePstRootDirectory('')).toBe(path.resolve(__dirname, '..', '..', 'PST'))
   })
 
   it('rejects traversal attempts and opens mailbox files within a selected scope', () => {

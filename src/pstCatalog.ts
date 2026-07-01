@@ -179,6 +179,15 @@ export function getDefaultPstRootDirectory(): string {
   return path.resolve(__dirname, '..', 'PST')
 }
 
+export function resolvePstRootDirectory(rootPath?: string, baseDir = process.cwd()): string {
+  const candidate = String(rootPath ?? '').trim()
+  if (!candidate) {
+    return getDefaultPstRootDirectory()
+  }
+
+  return path.isAbsolute(candidate) ? path.resolve(candidate) : path.resolve(baseDir, candidate)
+}
+
 export function getRemovedPstRootDirectory(rootPath = getDefaultPstRootDirectory()): string {
   return path.resolve(rootPath, '_removed')
 }
@@ -238,7 +247,7 @@ export function listPstMailboxFiles(
       scopePath: '',
       scopeLabel: '',
       files: [],
-      message: 'Create a PST folder at the project root and place .pst or .ost files in it.'
+      message: `Create a PST folder at ${resolvedRoot} and place .pst or .ost files in it.`
     }
   }
 
@@ -258,8 +267,8 @@ export function listPstMailboxFiles(
         ? `Found ${selectedScope?.fileCount || 0} mailbox file${
             selectedScope && selectedScope.fileCount === 1 ? '' : 's'
           } in ${selectedScope?.scopeLabel || 'PST root'}.`
-        : 'No PST or OST files were found anywhere under the PST folder.'
-  }
+        : `No PST or OST files were found anywhere under ${resolvedRoot}.`
+}
 }
 
 export function listRemovedPstMailboxFiles(
@@ -276,7 +285,7 @@ export function listRemovedPstMailboxFiles(
       scopePath: '',
       scopeLabel: '',
       files: [],
-      message: 'Create a PST/_removed folder to store removed PST or OST files.'
+      message: `Create a PST/_removed folder under ${resolvedRoot} to store removed PST or OST files.`
     }
   }
 
@@ -296,8 +305,8 @@ export function listRemovedPstMailboxFiles(
         ? `Found ${selectedScope?.fileCount || 0} removed mailbox file${
             selectedScope && selectedScope.fileCount === 1 ? '' : 's'
           } in ${selectedScope?.scopeLabel || 'PST root'}.`
-        : 'No removed PST or OST files were found anywhere under PST/_removed.'
-  }
+        : `No removed PST or OST files were found anywhere under ${removedRoot}.`
+}
 }
 
 function resolveRemovedMailboxPath(rootPath: string, scopePath: string, fileName: string): string {

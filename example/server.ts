@@ -8,7 +8,7 @@ import { createAppSettingsStoreFromEnv, type AppSettingsStore } from '../src/app
 import { createPstReviewApp, type ApiSecurityConfig, type AppAuthConfig } from '../src/pstReviewApp'
 import { createReviewStoreFromEnv } from '../src/reviewStore'
 import { createSearchIndexStoreFromEnv } from '../src/searchIndex'
-import { getDefaultPstRootDirectory } from '../src/pstCatalog'
+import { resolvePstRootDirectory } from '../src/pstCatalog'
 import type { SearchIndexRefreshCoordinator } from '../src/searchIndexRefresh'
 
 interface PackageJson {
@@ -72,6 +72,7 @@ loadEnvFile(path.join(__dirname, '..', '.env'))
 const host = process.env.HOST || '127.0.0.1'
 const port = Number(process.env.PORT || 3030)
 const auditLogDir = path.join(__dirname, 'logs')
+const pstRootDir = resolvePstRootDirectory(process.env.PST_ROOT_DIR, __dirname)
 const webChecks = loadOptionalModule(
   'C:\\Coding\\NodeFunctions\\httpSecurity.js',
   {
@@ -193,7 +194,7 @@ async function main(): Promise<void> {
 
   const app = createPstReviewApp({
     publicDir,
-    pstRootDir: getDefaultPstRootDirectory(),
+    pstRootDir,
     reviewStore,
     searchIndexStore,
     openApiSpec,
