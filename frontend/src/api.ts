@@ -12,6 +12,8 @@ import type {
   FolderMessagesResponse,
   MessageDetailResponse,
   ReviewUpdateResponse,
+  SearchIndexRefreshResponse,
+  SearchIndexRefreshStatus,
   SmtpSettingsResponse,
   SmtpTestResponse,
   UserInviteResponse,
@@ -192,8 +194,12 @@ export const api = {
         body: JSON.stringify({ scopePath, fileName })
       }),
     refreshSearchIndex: () =>
-      requestJson('/api/search/index/refresh', {
+      requestJson<SearchIndexRefreshResponse>('/api/search/index/refresh', {
         method: 'POST'
+      }),
+    refreshSearchIndexStatus: () =>
+      requestJson<SearchIndexRefreshResponse>('/api/search/index/refresh/status', {
+        cache: 'no-store'
       })
   },
   hiddenFilters: {

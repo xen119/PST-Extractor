@@ -9,7 +9,7 @@ import { createMemoryAppSettingsStore, type AppSettingsStore } from '../appSetti
 import { buildOpenApiDocument } from '../openApi'
 import { createPstReviewApp, type ApiSecurityConfig, type AppAuthConfig } from '../pstReviewApp'
 import { MemoryReviewStore } from '../reviewStore'
-import { MemorySearchIndexStore, refreshSearchIndexFromCatalog } from '../searchIndex'
+import { MemorySearchIndexStore } from '../searchIndex'
 
 const resolve = path.resolve
 
@@ -22,6 +22,7 @@ jest.setTimeout(30000)
 interface StartAppOptions {
   searchIndexStore?: MemorySearchIndexStore
   skipInitialRefresh?: boolean
+  backgroundInitialRefresh?: boolean
 }
 
 function makeTempDir(prefix: string): string {
@@ -187,9 +188,6 @@ async function startApp(
   const auditLogDir = path.join(path.dirname(pstRootDir), 'logs')
   const reviewStore = new MemoryReviewStore()
   const searchIndexStore = options?.searchIndexStore || new MemorySearchIndexStore()
-  if (!options?.skipInitialRefresh) {
-    await refreshSearchIndexFromCatalog(pstRootDir, reviewStore, searchIndexStore)
-  }
   const app = createPstReviewApp({
     publicDir,
     pstRootDir,
@@ -212,6 +210,19 @@ async function startApp(
     server.once('listening', resolveListening)
   })
 
+  const searchIndexRefreshCoordinator = app.get('searchIndexRefreshCoordinator') as
+    | { start(trigger: 'startup' | 'manual'): Promise<{ status: string }>; getStatus(): { status: string } }
+    | undefined
+  if (!options?.skipInitialRefresh && searchIndexRefreshCoordinator) {
+    const startPromise = searchIndexRefreshCoordinator.start('startup')
+    if (!options?.backgroundInitialRefresh) {
+      const started = await startPromise
+      if (started.status === 'running') {
+        await waitForSearchIndexRefreshCompletion(searchIndexRefreshCoordinator)
+      }
+    }
+  }
+
   const address = server.address() as AddressInfo
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
@@ -222,6 +233,34 @@ async function startApp(
     auditLogPath: path.join(auditLogDir, 'activity.log'),
     server
   }
+}
+
+async function waitForSearchIndexRefreshCompletion(
+  coordinator: { getStatus(): { status: string } }
+): Promise<void> {
+  for (;;) {
+    const status = coordinator.getStatus()
+    if (status.status !== 'running') {
+      return
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+}
+
+async function waitForRefreshStatus(baseUrl: string, cookie: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const response = await fetch(`${baseUrl}/api/search/index/refresh/status`, {
+      headers: {
+        Cookie: cookie
+      }
+    })
+    const payload = await readJson(response)
+    if (response.ok && payload?.status?.status !== 'running') {
+      return
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  throw new Error('Search index refresh did not finish in time')
 }
 
 describe('pst review api', () => {
@@ -436,11 +475,12 @@ describe('pst review api', () => {
     expect(searchMailbox.scope).toBe('pst')
     expect(searchMailbox.page.total).toBeGreaterThan(0)
 
-    const refreshedIndex = await requestJson(`${started.baseUrl}/api/search/index/refresh`, {
+    const refreshedIndexResponse = await fetch(`${started.baseUrl}/api/search/index/refresh`, {
       method: 'POST'
     })
-    expect(refreshedIndex.summary.mailboxCount).toBe(2)
-    expect(Array.isArray(refreshedIndex.hiddenRules)).toBe(true)
+    const refreshedIndex = await readJson(refreshedIndexResponse)
+    expect(refreshedIndexResponse.status).toBe(202)
+    expect(refreshedIndex.status.status).toBe('running')
 
     const searchAnd = await requestJson(
       `${started.baseUrl}/api/search?scope=pst&sessionId=${opened.sessionId}&query=${encodeURIComponent(
@@ -808,11 +848,11 @@ describe('pst review api', () => {
     releaseRefresh.resolve()
     const firstRefreshResponse = await firstRefreshResponsePromise
     const firstRefreshPayload = await readJson(firstRefreshResponse)
-    expect(firstRefreshResponse.status).toBe(200)
-    expect(firstRefreshPayload.summary.mailboxCount).toBe(1)
+    expect(firstRefreshResponse.status).toBe(202)
+    expect(firstRefreshPayload.status.status).toBe('running')
   })
 
-  it('waits for the initial search index refresh before listening', async () => {
+  it('starts listening before the initial search index refresh finishes', async () => {
     rootDir = makeTempDir('pst-review-index-startup-')
     const pstDir = path.join(rootDir, 'PST')
     fs.mkdirSync(pstDir)
@@ -849,7 +889,8 @@ describe('pst review api', () => {
       undefined,
       undefined,
       {
-        searchIndexStore: blockingSearchIndexStore
+        searchIndexStore: blockingSearchIndexStore,
+        backgroundInitialRefresh: true
       }
     )
 
@@ -860,7 +901,7 @@ describe('pst review api', () => {
 
     await firstReplaceStarted.promise
     await new Promise((resolve) => setTimeout(resolve, 50))
-    expect(started).toBe(false)
+    expect(started).toBe(true)
 
     releaseRefresh.resolve()
     const app = await startPromise
@@ -2865,13 +2906,17 @@ describe('pst review api', () => {
     )
     expect(reviewResponse.review.flagged).toBe(true)
 
-    const refreshResponse = await requestJson(`${started.baseUrl}/api/search/index/refresh`, {
+    const refreshResponse = await fetch(`${started.baseUrl}/api/search/index/refresh`, {
       method: 'POST',
       headers: {
         Cookie: adminCookie
       }
     })
-    expect(refreshResponse.summary).toBeTruthy()
+    const refreshPayload = await readJson(refreshResponse)
+    expect(refreshResponse.status).toBe(202)
+    expect(refreshPayload.status.status).toBe('running')
+
+    await waitForRefreshStatus(started.baseUrl, adminCookie)
 
     const activityLogResponse = await requestJson(
       `${started.baseUrl}/api/activity-log?limit=20`,

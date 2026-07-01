@@ -65,6 +65,7 @@ import type {
   SessionOpenResponse,
   SmtpSettings,
   SmtpSettingsResponse,
+  SearchIndexRefreshStatus,
   UserInvite,
   UsersResponse
 } from '@/types'
@@ -368,12 +369,13 @@ export function App() {
   const [activityMessage, setActivityMessage] = React.useState('')
   const [activityEntries, setActivityEntries] = React.useState<ActivityLogEntry[]>([])
   const [activityFilterUser, setActivityFilterUser] = React.useState('')
-  const [searchIndexRefreshOpen, setSearchIndexRefreshOpen] = React.useState(false)
-  const [searchIndexRefreshBusy, setSearchIndexRefreshBusy] = React.useState(false)
-  const [searchIndexRefreshError, setSearchIndexRefreshError] = React.useState('')
+  const [searchIndexRefreshStatus, setSearchIndexRefreshStatus] =
+    React.useState<SearchIndexRefreshStatus | null>(null)
+  const [searchIndexRefreshActionBusy, setSearchIndexRefreshActionBusy] = React.useState(false)
   const [mfaReminderDismissed, setMfaReminderDismissed] = React.useState(false)
   const [tagsDialogOpen, setTagsDialogOpen] = React.useState(false)
   const [fullViewOpen, setFullViewOpen] = React.useState(false)
+  const refreshCurrentPageRef = React.useRef<() => Promise<void>>(async () => undefined)
 
   const catalogLoadKeyRef = React.useRef('')
 
@@ -384,6 +386,7 @@ export function App() {
   const inviteFlowActive = Boolean(inviteToken)
   const mfaEnforced = Boolean(authStatus?.mfaEnforced)
   const assignedCasePathsKey = (authStatus?.user?.assignedCasePaths || []).join('|')
+  const searchIndexRefreshRunning = searchIndexRefreshStatus?.status === 'running'
   const showReminder =
     authenticated &&
     !mfaEnabled &&
@@ -524,6 +527,37 @@ export function App() {
     setActivityFilterUser(readWorkspaceStorageItem('activityFilterUser', true, username, ''))
     setHiddenFiltersOpen(readWorkspaceStorageBool('hiddenFiltersOpen', true, username, hiddenFiltersOpen))
   }, [authenticated, hiddenFiltersOpen, mfaEnforced, setHiddenFiltersOpen, username])
+
+  React.useEffect(() => {
+    if (!authenticated || !canManageUsers) {
+      setSearchIndexRefreshStatus(null)
+      return
+    }
+
+    let cancelled = false
+
+    async function loadRefreshStatus(): Promise<void> {
+      try {
+        const response = await api.pst.refreshSearchIndexStatus()
+        if (cancelled) {
+          return
+        }
+        setSearchIndexRefreshStatus(
+          response.status.status === 'running' || response.status.status === 'failed' ? response.status : null
+        )
+      } catch {
+        if (!cancelled) {
+          setSearchIndexRefreshStatus(null)
+        }
+      }
+    }
+
+    void loadRefreshStatus()
+
+    return () => {
+      cancelled = true
+    }
+  }, [authenticated, canManageUsers])
 
   React.useEffect(() => {
     if (!authenticated || !username) {
@@ -978,9 +1012,8 @@ export function App() {
       setAuthView('login')
       setAuthMessage('')
       setAuthError('')
-      setSearchIndexRefreshOpen(false)
-      setSearchIndexRefreshBusy(false)
-      setSearchIndexRefreshError('')
+      setSearchIndexRefreshStatus(null)
+      setSearchIndexRefreshActionBusy(false)
     }
   }
 
@@ -1384,6 +1417,10 @@ export function App() {
     }
   }
 
+  React.useEffect(() => {
+    refreshCurrentPageRef.current = refreshCurrentPage
+  }, [refreshCurrentPage])
+
   async function loadFolderPage(folderId: string, nextPage = 1): Promise<void> {
     if (!sessionId) {
       return
@@ -1585,39 +1622,102 @@ export function App() {
     await openMessage(selectedMessageId)
   }
 
-  async function refreshSearchIndex(): Promise<void> {
-    await api.pst.refreshSearchIndex()
-    await api.hiddenFilters.list().then((result) => setHiddenRules(result.items || []))
-    await refreshCurrentPage()
+  async function refreshSearchIndex(): Promise<SearchIndexRefreshStatus> {
+    const response = await api.pst.refreshSearchIndex()
+    return response.status
   }
 
   async function handleRefreshSearchIndex(): Promise<void> {
-    if (searchIndexRefreshBusy) {
+    if (searchIndexRefreshActionBusy || searchIndexRefreshRunning) {
       return
     }
 
-    setSearchIndexRefreshOpen(true)
-    setSearchIndexRefreshBusy(true)
-    setSearchIndexRefreshError('')
+    setSearchIndexRefreshActionBusy(true)
     try {
-      await refreshSearchIndex()
-      setSearchIndexRefreshBusy(false)
-      setSearchIndexRefreshError('')
-      setSearchIndexRefreshOpen(false)
+      const status = await refreshSearchIndex()
+      setSearchIndexRefreshStatus(status)
+      if (status.status === 'succeeded') {
+        await api.hiddenFilters.list().then((result) => setHiddenRules(result.items || []))
+        await refreshCurrentPage()
+        setSearchIndexRefreshStatus(null)
+      }
     } catch (error) {
-      setSearchIndexRefreshBusy(false)
-      setSearchIndexRefreshError(error instanceof Error ? error.message : 'Unable to refresh search index')
+      setSearchIndexRefreshStatus({
+        jobId: null,
+        status: 'failed',
+        trigger: 'manual',
+        startedAt: null,
+        completedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        summary: null,
+        error: error instanceof Error ? error.message : 'Unable to refresh search index'
+      })
+    } finally {
+      setSearchIndexRefreshActionBusy(false)
     }
   }
 
-  function dismissRefreshModal(): void {
-    if (searchIndexRefreshBusy) {
+  React.useEffect(() => {
+    if (!authenticated || !canManageUsers || searchIndexRefreshStatus?.status !== 'running') {
       return
     }
 
-    setSearchIndexRefreshOpen(false)
-    setSearchIndexRefreshError('')
-  }
+    let cancelled = false
+    let timer: number | null = null
+
+    async function pollStatus(): Promise<void> {
+      try {
+        const response = await api.pst.refreshSearchIndexStatus()
+        if (cancelled) {
+          return
+        }
+
+        const nextStatus = response.status
+        setSearchIndexRefreshStatus(nextStatus.status === 'running' || nextStatus.status === 'failed' ? nextStatus : null)
+
+        if (nextStatus.status === 'running') {
+          timer = window.setTimeout(() => {
+            void pollStatus()
+          }, 500)
+          return
+        }
+
+        if (nextStatus.status === 'succeeded') {
+          const hiddenRulesResponse = await api.hiddenFilters.list()
+          if (cancelled) {
+            return
+          }
+          setHiddenRules(hiddenRulesResponse.items || [])
+          await refreshCurrentPageRef.current()
+          if (!cancelled) {
+            setSearchIndexRefreshStatus(null)
+          }
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setSearchIndexRefreshStatus({
+            jobId: searchIndexRefreshStatus.jobId,
+            status: 'failed',
+            trigger: searchIndexRefreshStatus.trigger,
+            startedAt: searchIndexRefreshStatus.startedAt,
+            completedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            summary: null,
+            error: error instanceof Error ? error.message : 'Unable to refresh search index'
+          })
+        }
+      }
+    }
+
+    void pollStatus()
+
+    return () => {
+      cancelled = true
+      if (timer !== null) {
+        window.clearTimeout(timer)
+      }
+    }
+  }, [authenticated, canManageUsers, searchIndexRefreshStatus?.jobId, searchIndexRefreshStatus?.startedAt, searchIndexRefreshStatus?.status, searchIndexRefreshStatus?.trigger])
 
   async function createHiddenFilter(kind: 'address' | 'subject', value: string, label?: string): Promise<void> {
     await api.hiddenFilters.create(kind, value, label)
@@ -1738,6 +1838,8 @@ export function App() {
         writeWorkspaceStorageItem('scopePath', true, username, nextScopePath)
       }}
       canRefreshSearchIndex={canManageUsers}
+      searchIndexRefreshStatus={searchIndexRefreshStatus}
+      searchIndexRefreshBusy={searchIndexRefreshActionBusy}
       onRefreshSearchIndex={() => {
         void handleRefreshSearchIndex()
       }}
@@ -1860,85 +1962,6 @@ export function App() {
     </div>
   )
 
-  const refreshIndexDialog =
-    searchIndexRefreshOpen || searchIndexRefreshBusy || Boolean(searchIndexRefreshError) ? (
-      <Dialog
-        open={searchIndexRefreshOpen || searchIndexRefreshBusy || Boolean(searchIndexRefreshError)}
-        onOpenChange={(open) => {
-          if (!open && !searchIndexRefreshBusy) {
-            dismissRefreshModal()
-          }
-        }}
-      >
-        <DialogContent
-          showCloseButton={false}
-          className="w-[min(92vw,520px)]"
-          onPointerDownOutside={(event) => event.preventDefault()}
-          onEscapeKeyDown={(event) => event.preventDefault()}
-        >
-          <div className="space-y-5 p-6">
-            <div className="flex items-start gap-4">
-              <div
-                className={cn(
-                  'flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border',
-                  searchIndexRefreshError
-                    ? 'border-[color:rgba(220,38,38,0.2)] bg-[color:rgba(220,38,38,0.08)] text-[color:var(--danger)]'
-                    : 'border-[color:var(--line)] bg-[color:var(--surface-soft)] text-[color:var(--accent)]'
-                )}
-              >
-                {searchIndexRefreshError ? (
-                  <ShieldAlert className="h-6 w-6" aria-hidden="true" />
-                ) : (
-                  <RefreshCw className="h-6 w-6 animate-spin" aria-hidden="true" />
-                )}
-              </div>
-              <div className="min-w-0">
-                <DialogTitle className="text-2xl">
-                  {searchIndexRefreshError ? 'Reindex failed' : 'Rebuilding search index'}
-                </DialogTitle>
-                <DialogDescription className="mt-2">
-                  {searchIndexRefreshError
-                    ? 'The workspace stayed locked while the refresh ran.'
-                    : 'Please wait while PST files and search data are rebuilt.'}
-                </DialogDescription>
-              </div>
-            </div>
-
-            {!searchIndexRefreshError ? (
-              <div
-                className="h-2 overflow-hidden rounded-full bg-[color:var(--surface-soft)]"
-                role="progressbar"
-                aria-label="Search index refresh progress"
-                aria-valuetext="Rebuilding search index"
-              >
-                <div className="search-index-progress-bar h-full w-1/3 rounded-full bg-[color:var(--accent)]" />
-              </div>
-            ) : (
-              <div className="rounded-2xl border border-[color:rgba(220,38,38,0.2)] bg-[color:rgba(220,38,38,0.08)] px-4 py-3 text-sm text-[color:var(--danger)]">
-                {searchIndexRefreshError}
-              </div>
-            )}
-
-            {searchIndexRefreshError ? (
-              <div className="flex items-center justify-end gap-2">
-                <Button variant="ghost" onClick={dismissRefreshModal} disabled={searchIndexRefreshBusy}>
-                  Dismiss
-                </Button>
-                <Button
-                  onClick={() => {
-                    void handleRefreshSearchIndex()
-                  }}
-                  disabled={searchIndexRefreshBusy}
-                >
-                  Retry
-                </Button>
-              </div>
-            ) : null}
-          </div>
-        </DialogContent>
-      </Dialog>
-    ) : null
-
   const appContent = authenticated ? (
     <>
       <AppShell
@@ -1955,7 +1978,6 @@ export function App() {
         messagePanel={messageNode}
         preview={previewNode}
       />
-      {refreshIndexDialog}
 
       <Dialog
         open={fullViewOpen && Boolean(selectedMessage)}

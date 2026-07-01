@@ -318,6 +318,26 @@ export interface SmtpTestResponse {
   rejected: string[]
 }
 
+export interface SearchIndexRefreshSummary {
+  mailboxCount: number
+  messageCount: number
+}
+
+export interface SearchIndexRefreshStatus {
+  jobId: string | null
+  status: 'idle' | 'running' | 'succeeded' | 'failed'
+  trigger: 'startup' | 'manual' | null
+  startedAt: string | null
+  completedAt: string | null
+  updatedAt: string
+  summary: SearchIndexRefreshSummary | null
+  error: string | null
+}
+
+export interface SearchIndexRefreshResponse {
+  status: SearchIndexRefreshStatus
+}
+
 export interface ActivityLogActor {
   username: string
   authenticated: boolean

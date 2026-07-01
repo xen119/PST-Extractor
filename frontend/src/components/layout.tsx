@@ -13,6 +13,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  ShieldAlert,
   User,
   Tag as TagIcon
 } from 'lucide-react'
@@ -22,6 +23,7 @@ import type {
   FolderNode,
   MessageDetail,
   MessageSummary,
+  SearchIndexRefreshStatus,
   ReviewState
 } from '@/types'
 import { buildHtmlFrameSrcDoc, cn, escapeHtml, formatBytes, formatDate, getInitials } from '@/lib/utils'
@@ -171,6 +173,8 @@ interface SidebarProps {
   onCaseChange: (value: string) => void
   onScopeChange: (value: string) => void
   canRefreshSearchIndex: boolean
+  searchIndexRefreshStatus: SearchIndexRefreshStatus | null
+  searchIndexRefreshBusy: boolean
   onRefreshSearchIndex: () => void
   onOpenMailbox: (fileName: string, scopePath: string) => void
   folderTree: FolderNode | null
@@ -190,6 +194,8 @@ export function Sidebar({
   onCaseChange,
   onScopeChange,
   canRefreshSearchIndex,
+  searchIndexRefreshStatus,
+  searchIndexRefreshBusy,
   onRefreshSearchIndex,
   onOpenMailbox,
   folderTree,
@@ -207,11 +213,33 @@ export function Sidebar({
           <div className="text-sm text-[color:var(--muted)]">Browse and open a mailbox</div>
         </div>
         {canRefreshSearchIndex ? (
-          <IconButton label="Refresh search index" onClick={onRefreshSearchIndex}>
-            <RefreshCw className="h-4 w-4" />
-          </IconButton>
+          <div className="flex items-center gap-2">
+            {searchIndexRefreshStatus?.status === 'running' ? (
+              <span className="inline-flex items-center gap-2 rounded-full border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-3 py-1 text-xs font-medium text-[color:var(--muted)]">
+                <RefreshCw className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                Reindexing
+              </span>
+            ) : searchIndexRefreshStatus?.status === 'failed' ? (
+              <span className="inline-flex items-center gap-2 rounded-full border border-[color:rgba(220,38,38,0.2)] bg-[color:rgba(220,38,38,0.08)] px-3 py-1 text-xs font-medium text-[color:var(--danger)]">
+                <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />
+                Reindex failed
+              </span>
+            ) : null}
+            <IconButton
+              label="Refresh search index"
+              onClick={onRefreshSearchIndex}
+              disabled={searchIndexRefreshBusy || searchIndexRefreshStatus?.status === 'running'}
+            >
+              <RefreshCw className="h-4 w-4" />
+            </IconButton>
+          </div>
         ) : null}
       </div>
+      {searchIndexRefreshStatus?.status === 'failed' && searchIndexRefreshStatus.error ? (
+        <div className="border-t border-[color:var(--line)] px-4 py-3 text-xs leading-5 text-[color:var(--danger)]">
+          {searchIndexRefreshStatus.error}
+        </div>
+      ) : null}
 
       <div className="space-y-3 border-t border-[color:var(--line)] px-4 py-4">
         <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">

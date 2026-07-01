@@ -42,13 +42,17 @@ import {
 } from './reviewStore'
 import type { ReviewState } from './reviewTypes'
 import {
-  refreshSearchIndexFromCatalog,
   type HiddenRuleRecord,
   type SearchIndexDocument,
   type SearchIndexPage,
   type SearchIndexStore,
   type SearchScope
 } from './searchIndex'
+import {
+  createSearchIndexRefreshCoordinator,
+  type SearchIndexRefreshCoordinator,
+  type SearchIndexRefreshStatus
+} from './searchIndexRefresh'
 import {
   buildEmptyMessageDetail,
   collectFolderMessages,
@@ -95,6 +99,7 @@ export interface CreatePstReviewAppOptions {
   auditLogDir?: string
   apiSecurity?: ApiSecurityConfig
   smtpTransportFactory?: SmtpTransportFactory
+  searchIndexRefreshCoordinator?: SearchIndexRefreshCoordinator
 }
 
 export interface AppAuthConfig {
@@ -1479,7 +1484,6 @@ function createDefaultSmtpTransport(settings: SmtpSettingsRecord): SmtpTransport
 export function createPstReviewApp(options: CreatePstReviewAppOptions): express.Express {
   const app = express()
   const sessions = new Map<string, SessionRecord>()
-  let searchIndexRefreshInProgress = false
   const publicDir = options.publicDir
   const pstRootDir = options.pstRootDir || getDefaultPstRootDirectory()
   const reviewStore = options.reviewStore
@@ -1619,6 +1623,41 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     const safeSegment = normalized.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
     return `activity-log-${safeSegment || 'user'}.csv`
   }
+
+  const searchIndexRefreshCoordinator =
+    options.searchIndexRefreshCoordinator ||
+    createSearchIndexRefreshCoordinator({
+      pstRootDir,
+      reviewStore,
+      searchIndexStore,
+      onJobComplete: (refreshStatus: SearchIndexRefreshStatus) => {
+        recordAuditEvent({
+          req: {
+            headers: {},
+            method: 'POST',
+            originalUrl: API_ROUTES.searchIndexRefresh,
+            url: API_ROUTES.searchIndexRefresh,
+            ip: '',
+            socket: { remoteAddress: '' }
+          } as express.Request,
+          session: null,
+          action: 'search.index.refresh',
+          target: 'PST catalog',
+          outcome: refreshStatus.status === 'failed' ? 'failure' : 'success',
+          metadata: {
+            jobId: refreshStatus.jobId,
+            trigger: refreshStatus.trigger,
+            startedAt: refreshStatus.startedAt,
+            completedAt: refreshStatus.completedAt,
+            mailboxCount: refreshStatus.summary?.mailboxCount || 0,
+            messageCount: refreshStatus.summary?.messageCount || 0,
+            error: refreshStatus.error || undefined
+          }
+        })
+      }
+    })
+
+  app.set('searchIndexRefreshCoordinator', searchIndexRefreshCoordinator)
 
   function getAuthMfaChallengeCookieName(): string {
     return `${authConfig.cookieName}${DEFAULT_AUTH_MFA_CHALLENGE_COOKIE_SUFFIX}`
@@ -3939,44 +3978,40 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         return
       }
 
-      if (searchIndexRefreshInProgress) {
-        recordAuditEvent({
-          req,
-          session: authSession,
-          action: 'search.index.refresh',
-          target: 'PST catalog',
-          outcome: 'denied',
-          metadata: {
-            reason: 'Search index refresh already in progress'
-          }
-        })
-        responseJson(res, 409, {
-          error: 'Search index refresh already in progress'
+      const status = await searchIndexRefreshCoordinator.start('manual')
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'search.index.refresh',
+        target: 'PST catalog',
+        outcome: 'success',
+        metadata: {
+          jobId: status.jobId,
+          trigger: status.trigger,
+          status: status.status
+        }
+      })
+      responseJson(res, 202, {
+        status
+      })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.searchIndexRefreshStatus, async (req, res) => {
+    try {
+      const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !isAdminAuthSession(authSession, authConfig)) {
+        responseJson(res, 403, {
+          error: 'Admin access required'
         })
         return
       }
 
-      searchIndexRefreshInProgress = true
-      try {
-        const summary = await refreshSearchIndexFromCatalog(pstRootDir, reviewStore, searchIndexStore)
-        recordAuditEvent({
-          req,
-          session: authSession,
-          action: 'search.index.refresh',
-          target: 'PST catalog',
-          outcome: 'success',
-          metadata: {
-            mailboxCount: summary.mailboxCount,
-            messageCount: summary.messageCount
-          }
-        })
-        responseJson(res, 200, {
-          summary,
-          hiddenRules: await searchIndexStore.listHiddenRules()
-        })
-      } finally {
-        searchIndexRefreshInProgress = false
-      }
+      responseJson(res, 200, {
+        status: searchIndexRefreshCoordinator.getStatus()
+      })
     } catch (error) {
       createRouteErrorHandler(res, error)
     }

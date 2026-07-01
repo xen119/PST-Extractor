@@ -7,11 +7,9 @@ import { MongoAuthUserStore } from '../src/authUsers'
 import { createAppSettingsStoreFromEnv, type AppSettingsStore } from '../src/appSettings'
 import { createPstReviewApp, type ApiSecurityConfig, type AppAuthConfig } from '../src/pstReviewApp'
 import { createReviewStoreFromEnv } from '../src/reviewStore'
-import {
-  createSearchIndexStoreFromEnv,
-  refreshSearchIndexFromCatalog
-} from '../src/searchIndex'
+import { createSearchIndexStoreFromEnv } from '../src/searchIndex'
 import { getDefaultPstRootDirectory } from '../src/pstCatalog'
+import type { SearchIndexRefreshCoordinator } from '../src/searchIndexRefresh'
 
 interface PackageJson {
   version: string
@@ -207,13 +205,22 @@ async function main(): Promise<void> {
     auth,
     auditLogDir,
     appSettingsStore,
-    authUserStore: authUserStore || undefined,
-    apiSecurity
+      authUserStore: authUserStore || undefined,
+      apiSecurity
   })
 
   server = app.listen(port, host, () => {
     console.log(`PST Mail Explorer running at http://${host}:${port}`)
   })
+
+  const searchIndexRefreshCoordinator = app.get(
+    'searchIndexRefreshCoordinator'
+  ) as SearchIndexRefreshCoordinator | undefined
+  if (searchIndexRefreshCoordinator) {
+    void searchIndexRefreshCoordinator.start('startup').catch((error) => {
+      console.error('Unable to start background search index refresh:', error)
+    })
+  }
 
   process.once('SIGINT', () => {
     void shutdown(0)

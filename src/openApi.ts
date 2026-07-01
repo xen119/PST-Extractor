@@ -1338,22 +1338,56 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
       [openApiPath(API_ROUTES.searchIndexRefresh)]: {
         post: {
           tags: ['Extraction'],
-          summary: 'Rebuild the cached search index from the PST catalog (admin only)',
+          summary: 'Schedule a background rebuild of the cached search index (admin only)',
           responses: {
             ...errorResponse(403, 'Admin access required'),
             ...errorResponse(409, 'Search index refresh already in progress'),
+            202: jsonResponse({
+              type: 'object',
+              additionalProperties: true,
+              required: ['status'],
+              properties: {
+                status: {
+                  type: 'object',
+                  additionalProperties: true
+                }
+              }
+            })
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.searchIndexRefreshStatus)]: {
+        get: {
+          tags: ['Extraction'],
+          summary: 'Get the current search index refresh status (admin only)',
+          responses: {
+            ...errorResponse(403, 'Admin access required'),
             200: jsonResponse({
               type: 'object',
               additionalProperties: true,
-              required: ['summary', 'hiddenRules'],
+              required: ['status'],
               properties: {
-                summary: {
+                status: {
                   type: 'object',
-                  additionalProperties: true
-                },
-                hiddenRules: {
-                  type: 'array',
-                  items: hiddenRuleSchema()
+                  additionalProperties: true,
+                  required: ['jobId', 'status', 'trigger', 'startedAt', 'completedAt', 'updatedAt', 'summary', 'error'],
+                  properties: {
+                    jobId: { type: ['string', 'null'] },
+                    status: { type: 'string', enum: ['idle', 'running', 'succeeded', 'failed'] },
+                    trigger: { type: ['string', 'null'], enum: ['startup', 'manual', null] },
+                    startedAt: { type: ['string', 'null'] },
+                    completedAt: { type: ['string', 'null'] },
+                    updatedAt: { type: 'string' },
+                    summary: {
+                      type: ['object', 'null'],
+                      additionalProperties: true,
+                      properties: {
+                        mailboxCount: { type: 'integer' },
+                        messageCount: { type: 'integer' }
+                      }
+                    },
+                    error: { type: ['string', 'null'] }
+                  }
                 }
               }
             })

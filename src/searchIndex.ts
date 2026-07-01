@@ -123,6 +123,7 @@ export interface SearchIndexStore {
   }): Promise<HiddenRuleRecord>
   deleteHiddenRule(filterId: string): Promise<boolean>
   search(options: SearchIndexSearchOptions): Promise<SearchIndexPage>
+  promoteStagedDocuments?(stagingDocumentsCollectionName: string): Promise<void>
   close(): Promise<void>
 }
 
@@ -167,6 +168,11 @@ interface HiddenRuleCollectionLike {
 
 const DEFAULT_INDEX_COLLECTION = 'pst_search_documents'
 const DEFAULT_RULE_COLLECTION = 'pst_search_hidden_rules'
+
+export interface MongoSearchIndexStoreConnectOptions {
+  documentsCollectionName?: string
+  rulesCollectionName?: string
+}
 
 function normalizeText(value: unknown): string {
   return String(value ?? '')
@@ -1031,15 +1037,24 @@ export class MongoSearchIndexStore implements SearchIndexStore {
   constructor(
     private readonly documents: SearchIndexCollectionLike,
     private readonly rules: HiddenRuleCollectionLike,
-    private readonly client?: MongoClient
+    private readonly client?: MongoClient,
+    private readonly dbName = 'pst-extractor',
+    private readonly documentsCollectionName = DEFAULT_INDEX_COLLECTION,
+    private readonly rulesCollectionName = DEFAULT_RULE_COLLECTION
   ) {}
 
-  static async connect(uri: string, dbName = 'pst-extractor'): Promise<MongoSearchIndexStore> {
+  static async connect(
+    uri: string,
+    dbName = 'pst-extractor',
+    options: MongoSearchIndexStoreConnectOptions = {}
+  ): Promise<MongoSearchIndexStore> {
     const client = new MongoClient(uri)
     await client.connect()
     const db = client.db(dbName)
-    const documents = db.collection<SearchIndexDocument>(DEFAULT_INDEX_COLLECTION)
-    const rules = db.collection<HiddenRuleRecord>(DEFAULT_RULE_COLLECTION)
+    const documents = db.collection<SearchIndexDocument>(
+      options.documentsCollectionName || DEFAULT_INDEX_COLLECTION
+    )
+    const rules = db.collection<HiddenRuleRecord>(options.rulesCollectionName || DEFAULT_RULE_COLLECTION)
     await documents.createIndex?.({ mailboxKey: 1, messageId: 1 }, { unique: true })
     await documents.createIndex?.({ mailboxKey: 1, scopePath: 1 })
     await documents.createIndex?.({ scopePath: 1, searchTokens: 1 })
@@ -1054,7 +1069,10 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     return new MongoSearchIndexStore(
       documents as unknown as SearchIndexCollectionLike,
       rules as unknown as HiddenRuleCollectionLike,
-      client
+      client,
+      dbName,
+      options.documentsCollectionName || DEFAULT_INDEX_COLLECTION,
+      options.rulesCollectionName || DEFAULT_RULE_COLLECTION
     )
   }
 
@@ -1150,6 +1168,23 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     return Boolean(result.deletedCount && result.deletedCount > 0)
   }
 
+  async promoteStagedDocuments(stagingDocumentsCollectionName: string): Promise<void> {
+    if (!this.client) {
+      throw new Error('Mongo client is not available')
+    }
+
+    const stagingName = normalizeText(stagingDocumentsCollectionName)
+    if (!stagingName || stagingName === this.documentsCollectionName) {
+      return
+    }
+
+    await this.client.db('admin').command({
+      renameCollection: `${this.dbName}.${stagingName}`,
+      to: `${this.dbName}.${this.documentsCollectionName}`,
+      dropTarget: true
+    })
+  }
+
   async search(options: SearchIndexSearchOptions): Promise<SearchIndexPage> {
     const hiddenRules = await this.listHiddenRules()
     const filter = buildFilterMatch(options, hiddenRules)
@@ -1203,14 +1238,15 @@ export class MongoSearchIndexStore implements SearchIndexStore {
 }
 
 export async function createSearchIndexStoreFromEnv(
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  options: MongoSearchIndexStoreConnectOptions = {}
 ): Promise<SearchIndexStore> {
   const uri = normalizeText(env.MONGODB_URI)
   if (!uri) {
     return new MemorySearchIndexStore()
   }
   const dbName = normalizeText(env.MONGODB_DB) || 'pst-extractor'
-  return MongoSearchIndexStore.connect(uri, dbName)
+  return MongoSearchIndexStore.connect(uri, dbName, options)
 }
 
 export async function refreshSearchIndexFromCatalog(
@@ -1227,6 +1263,17 @@ export async function refreshSearchIndexFromCatalog(
 
   let mailboxCount = 0
   let messageCount = 0
+  const warnedMessages = new Set<string>()
+
+  function warnOnce(scopeLabel: string, fileName: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error)
+    const key = `${scopeLabel}/${fileName}::${message}`
+    if (warnedMessages.has(key)) {
+      return
+    }
+    warnedMessages.add(key)
+    console.warn(`Unable to refresh search index for ${scopeLabel}/${fileName}:`, message)
+  }
 
   for (const scope of catalog.scopes) {
     for (const file of scope.files) {
@@ -1249,10 +1296,7 @@ export async function refreshSearchIndexFromCatalog(
         mailboxCount += 1
         messageCount += documents.length
       } catch (error) {
-        console.warn(
-          `Unable to refresh search index for ${scope.scopeLabel}/${file.fileName}:`,
-          error instanceof Error ? error.message : error
-        )
+        warnOnce(scope.scopeLabel, file.fileName, error)
       }
     }
   }

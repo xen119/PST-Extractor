@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App, getCasePathFromScopePath } from '@/App'
@@ -17,6 +17,7 @@ import type {
   MessageSummary,
   PageResponse,
   PstCatalogResponse,
+  SearchIndexRefreshStatus,
   UsersResponse
 } from '@/types'
 
@@ -187,9 +188,8 @@ describe('auth shell', () => {
     expect(screen.getByRole('button', { name: 'Set password' })).toBeEnabled()
   })
 
-  it('blocks the workspace while the search index refresh runs', async () => {
+  it('shows a background refresh status without blocking the workspace', async () => {
     const user = userEvent.setup()
-    const refreshDeferred = createDeferred<unknown>()
     const authenticatedStatus: AuthStatus = {
       authenticated: true,
       enabled: true,
@@ -209,27 +209,61 @@ describe('auth shell', () => {
       files: []
     }
     const hiddenRulesResponse: HiddenRulesResponse = { items: [] }
+    const idleStatus: SearchIndexRefreshStatus = {
+      jobId: null,
+      status: 'idle',
+      trigger: null,
+      startedAt: null,
+      completedAt: null,
+      updatedAt: new Date().toISOString(),
+      summary: null,
+      error: null
+    }
+    const runningStatus: SearchIndexRefreshStatus = {
+      jobId: 'job-1',
+      status: 'running',
+      trigger: 'manual',
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+      updatedAt: new Date().toISOString(),
+      summary: null,
+      error: null
+    }
+    const succeededStatus: SearchIndexRefreshStatus = {
+      jobId: 'job-1',
+      status: 'succeeded',
+      trigger: 'manual',
+      startedAt: runningStatus.startedAt,
+      completedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      summary: { mailboxCount: 1, messageCount: 1 },
+      error: null
+    }
 
     vi.spyOn(api.auth, 'me').mockResolvedValueOnce(authenticatedStatus)
     vi.spyOn(api.pst, 'catalog').mockResolvedValueOnce(emptyCatalog)
     vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue(hiddenRulesResponse)
-    vi.spyOn(api.pst, 'refreshSearchIndex').mockReturnValueOnce(refreshDeferred.promise)
+    vi.spyOn(api.pst, 'refreshSearchIndexStatus')
+      .mockResolvedValueOnce({ status: idleStatus })
+      .mockResolvedValueOnce({ status: runningStatus })
+      .mockResolvedValueOnce({ status: succeededStatus })
+    vi.spyOn(api.pst, 'refreshSearchIndex').mockResolvedValue({ status: runningStatus })
 
     render(<App />)
 
     const refreshButton = await screen.findByRole('button', { name: 'Refresh search index' })
     await user.click(refreshButton)
 
-    expect(await screen.findByRole('heading', { name: 'Rebuilding search index' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Refresh search index' })).not.toBeInTheDocument()
+    expect(await screen.findByText('Reindexing')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Refresh search index' })).toBeDisabled()
 
-    refreshDeferred.resolve({})
-
-    await screen.findByRole('button', { name: 'Refresh search index' })
-    expect(screen.queryByRole('heading', { name: 'Rebuilding search index' })).not.toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.queryByText('Reindexing')).not.toBeInTheDocument()
+    })
+    expect(screen.getByRole('button', { name: 'Refresh search index' })).toBeEnabled()
   })
 
-  it('shows an error state when search index refresh fails and allows dismissal', async () => {
+  it('shows an error state when search index refresh fails and keeps the workspace usable', async () => {
     const user = userEvent.setup()
     const authenticatedStatus: AuthStatus = {
       authenticated: true,
@@ -250,27 +284,56 @@ describe('auth shell', () => {
       files: []
     }
     const hiddenRulesResponse: HiddenRulesResponse = { items: [] }
-    const refreshError = new Error('Refresh failed')
+    const idleStatus: SearchIndexRefreshStatus = {
+      jobId: null,
+      status: 'idle',
+      trigger: null,
+      startedAt: null,
+      completedAt: null,
+      updatedAt: new Date().toISOString(),
+      summary: null,
+      error: null
+    }
+    const runningStatus: SearchIndexRefreshStatus = {
+      jobId: 'job-2',
+      status: 'running',
+      trigger: 'manual',
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+      updatedAt: new Date().toISOString(),
+      summary: null,
+      error: null
+    }
+    const failedStatus: SearchIndexRefreshStatus = {
+      jobId: 'job-2',
+      status: 'failed',
+      trigger: 'manual',
+      startedAt: runningStatus.startedAt,
+      completedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      summary: null,
+      error: 'Refresh failed'
+    }
 
     vi.spyOn(api.auth, 'me').mockResolvedValueOnce(authenticatedStatus)
     vi.spyOn(api.pst, 'catalog').mockResolvedValueOnce(emptyCatalog)
     vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue(hiddenRulesResponse)
-    vi.spyOn(api.pst, 'refreshSearchIndex').mockRejectedValueOnce(refreshError)
+    vi.spyOn(api.pst, 'refreshSearchIndexStatus')
+      .mockResolvedValueOnce({ status: idleStatus })
+      .mockResolvedValueOnce({ status: runningStatus })
+      .mockResolvedValueOnce({ status: failedStatus })
+    vi.spyOn(api.pst, 'refreshSearchIndex').mockResolvedValue({ status: runningStatus })
 
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: 'Refresh search index' }))
 
-    expect(await screen.findByRole('heading', { name: 'Reindex failed' })).toBeInTheDocument()
+    expect(await screen.findByText('Reindexing')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByText('Reindex failed')).toBeInTheDocument()
+    })
     expect(screen.getByText('Refresh failed')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Dismiss' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Refresh search index' })).not.toBeInTheDocument()
-
-    await user.click(screen.getByRole('button', { name: 'Dismiss' }))
-
-    await screen.findByRole('button', { name: 'Refresh search index' })
-    expect(screen.queryByRole('heading', { name: 'Reindex failed' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Refresh search index' })).toBeEnabled()
   })
 
   it('opens case access in a per-user modal and defaults to no cases', async () => {

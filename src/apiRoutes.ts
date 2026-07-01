@@ -24,6 +24,7 @@ export const API_ROUTES = {
   pstRemove: '/api/psts/remove',
   pstRestore: '/api/psts/restore',
   searchIndexRefresh: '/api/search/index/refresh',
+  searchIndexRefreshStatus: '/api/search/index/refresh/status',
   searchFilters: '/api/search/filters',
   searchFilter: '/api/search/filters/:filterId',
   search: '/api/search',
