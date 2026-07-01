@@ -1702,6 +1702,55 @@ describe('pst review api', () => {
     expect(mePayload.mfaEnforced).toBe(false)
     expect(mePayload.user.username).toBe('admin')
 
+    const emailInviteResponse = await fetch(`${started.baseUrl}/api/auth/users`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookiePair,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'jane.doe',
+        recipientEmail: 'jane.doe@example.com'
+      })
+    })
+    const emailInvitePayload = await readJson(emailInviteResponse)
+    expect(emailInviteResponse.status).toBe(200)
+    const emailInviteToken = String(new URL(emailInvitePayload.inviteUrl).pathname.split('/').pop() || '')
+
+    const acceptEmailInviteResponse = await fetch(
+      `${started.baseUrl}/api/auth/invites/${encodeURIComponent(emailInviteToken)}/accept`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          password: 'jane-password',
+          confirmPassword: 'jane-password'
+        })
+      }
+    )
+    const acceptEmailInvitePayload = await readJson(acceptEmailInviteResponse)
+    expect(acceptEmailInviteResponse.status).toBe(200)
+    expect(acceptEmailInvitePayload.user.username).toBe('jane.doe')
+
+    const emailLoginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'jane.doe@example.com',
+        password: 'jane-password'
+      })
+    })
+    const emailLoginPayload = await readJson(emailLoginResponse)
+    const emailLoginCookiePair = getCookiePair(getSetCookieHeader(emailLoginResponse))
+    expect(emailLoginResponse.status).toBe(200)
+    expect(emailLoginPayload.authenticated).toBe(true)
+    expect(emailLoginPayload.user.username).toBe('jane.doe')
+    expect(emailLoginCookiePair).toContain('pst-review-session=')
+
     const catalog = await requestJson(`${started.baseUrl}/api/psts`, {
       headers: {
         Cookie: cookiePair

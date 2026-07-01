@@ -50,7 +50,7 @@ export function AuthScreen({
   onInviteFinish,
   onOpenLogin
 }: AuthScreenProps) {
-  const [username, setUsername] = React.useState('admin')
+  const [username, setUsername] = React.useState('')
   const [password, setPassword] = React.useState('')
   const [mfaCode, setMfaCode] = React.useState('')
   const [invitePassword, setInvitePassword] = React.useState('')
@@ -59,6 +59,7 @@ export function AuthScreen({
 
   React.useEffect(() => {
     if (view === 'login') {
+      setUsername('')
       setPassword('')
       setMfaCode('')
     }
@@ -110,6 +111,7 @@ export function AuthScreen({
                     value={username}
                     onChange={(event) => setUsername(event.target.value)}
                     autoComplete="username"
+                    placeholder="Username or email"
                     autoFocus
                   />
                 </label>

@@ -186,11 +186,6 @@ async function main(): Promise<void> {
       [{ username: auth.username, password: auth.password }]
     )
   }
-  await refreshSearchIndexFromCatalog(
-    getDefaultPstRootDirectory(),
-    reviewStore,
-    searchIndexStore
-  )
   const openApiSpec = buildOpenApiDocument({
     version: packageJson.version,
     reviewStorageMode: reviewStore.kind
@@ -205,8 +200,8 @@ async function main(): Promise<void> {
     auth,
     auditLogDir,
     appSettingsStore,
-      authUserStore: authUserStore || undefined,
-      apiSecurity
+    authUserStore: authUserStore || undefined,
+    apiSecurity
   })
 
   server = app.listen(port, host, () => {

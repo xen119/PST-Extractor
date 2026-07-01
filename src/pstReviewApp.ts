@@ -2256,8 +2256,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         return
       }
 
-      const body = (req.body || {}) as { username?: string; password?: string }
-      const username = normalizeAuthUsername(body.username)
+      const body = (req.body || {}) as { username?: string; email?: string; password?: string }
+      const username = normalizeAuthUsername(body.username || body.email)
       const password = String(body.password ?? '')
       const user = await authUserStore.authenticate(username, password)
       if (!user) {

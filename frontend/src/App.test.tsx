@@ -64,6 +64,7 @@ describe('auth shell', () => {
 
     expect(screen.getByRole('heading', { name: 'Sign in to continue' })).toBeInTheDocument()
     expect(screen.getByLabelText('Username')).toBeInTheDocument()
+    expect(screen.getByLabelText('Username')).toHaveValue('')
     expect(screen.getByLabelText('Password')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument()
     expect(screen.getByText('PST Mail Explorer')).toBeInTheDocument()

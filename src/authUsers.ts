@@ -127,6 +127,10 @@ function normalizeEmail(value: unknown): string {
   return normalizeText(value).toLowerCase()
 }
 
+function normalizeLoginIdentifier(value: unknown): string {
+  return normalizeText(value).toLowerCase()
+}
+
 function normalizeCasePath(value: unknown): string {
   return normalizeText(value)
     .replace(/\\/g, '/')
@@ -439,6 +443,15 @@ function buildMfaSetupRecord(record: StoredAuthUserRecord, secret: string, maste
   })
 }
 
+function matchesLoginIdentifier(record: StoredAuthUserRecord, identifier: string): boolean {
+  const normalizedIdentifier = normalizeLoginIdentifier(identifier)
+  if (!normalizedIdentifier) {
+    return false
+  }
+
+  return record.usernameKey === normalizedIdentifier || record.recipientEmail === normalizedIdentifier
+}
+
 class MemoryAuthUserStore implements AuthUserStore {
   private readonly users = new Map<string, StoredAuthUserRecord>()
   private readonly masterSecret = createAuthMasterSecret()
@@ -474,6 +487,26 @@ class MemoryAuthUserStore implements AuthUserStore {
 
   private getRecord(username: string): StoredAuthUserRecord | null {
     return this.users.get(normalizeUsernameKey(username)) || null
+  }
+
+  private getRecordByLoginIdentifier(identifier: string): StoredAuthUserRecord | null {
+    const normalizedIdentifier = normalizeLoginIdentifier(identifier)
+    if (!normalizedIdentifier) {
+      return null
+    }
+
+    const byUsername = this.users.get(normalizedIdentifier) || null
+    if (byUsername) {
+      return byUsername
+    }
+
+    for (const record of this.users.values()) {
+      if (matchesLoginIdentifier(record, normalizedIdentifier)) {
+        return record
+      }
+    }
+
+    return null
   }
 
   private setRecord(record: StoredAuthUserRecord): void {
@@ -545,7 +578,7 @@ class MemoryAuthUserStore implements AuthUserStore {
   }
 
   async authenticate(username: string, password: string): Promise<AuthUserListItem | null> {
-    const record = this.getRecord(username)
+    const record = this.getRecordByLoginIdentifier(username)
     if (!record || getInviteStatus(record) !== 'active') {
       return null
     }
@@ -856,6 +889,7 @@ export class MongoAuthUserStore implements AuthUserStore {
     const collection = client.db(dbName).collection<StoredAuthUserRecord>(collectionName)
     const metaCollection = client.db(dbName).collection<AuthMetaRecord>(metaCollectionName)
     await collection.createIndex({ usernameKey: 1 }, { unique: true })
+    await collection.createIndex({ recipientEmail: 1 })
     await collection.createIndex({ inviteTokenHash: 1 })
     await collection.createIndex({ createdAt: 1 })
     await metaCollection.createIndex({ key: 1 }, { unique: true })
@@ -927,6 +961,22 @@ export class MongoAuthUserStore implements AuthUserStore {
 
   private async getRecordByKey(key: string): Promise<StoredAuthUserRecord | null> {
     return normalizeStoredAuthUserRecord(await this.collection.findOne({ usernameKey: key }))
+  }
+
+  private async getRecordByLoginIdentifier(identifier: string): Promise<StoredAuthUserRecord | null> {
+    const normalizedIdentifier = normalizeLoginIdentifier(identifier)
+    if (!normalizedIdentifier) {
+      return null
+    }
+
+    const byUsername = await this.getRecordByKey(normalizedIdentifier)
+    if (byUsername) {
+      return byUsername
+    }
+
+    return normalizeStoredAuthUserRecord(
+      await this.collection.findOne({ recipientEmail: normalizedIdentifier })
+    )
   }
 
   private async getRecord(username: string): Promise<StoredAuthUserRecord | null> {
@@ -1009,7 +1059,7 @@ export class MongoAuthUserStore implements AuthUserStore {
   }
 
   async authenticate(username: string, password: string): Promise<AuthUserListItem | null> {
-    const record = await this.getRecord(username)
+    const record = await this.getRecordByLoginIdentifier(username)
     if (!record || getInviteStatus(record) !== 'active') {
       return null
     }

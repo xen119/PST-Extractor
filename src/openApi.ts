@@ -628,7 +628,10 @@ function authLoginRequestSchema(): Record<string, unknown> {
     additionalProperties: false,
     required: ['username', 'password'],
     properties: {
-      username: { type: 'string' },
+      username: {
+        type: 'string',
+        description: 'Username or email address'
+      },
       password: { type: 'string' }
     }
   }
