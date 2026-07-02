@@ -246,25 +246,26 @@ describe('auth shell', () => {
     vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue(hiddenRulesResponse)
     vi.spyOn(api.pst, 'refreshSearchIndexStatus')
       .mockResolvedValueOnce({ status: idleStatus })
+      .mockResolvedValueOnce({ status: idleStatus })
       .mockResolvedValueOnce({ status: runningStatus })
       .mockResolvedValueOnce({ status: succeededStatus })
     vi.spyOn(api.pst, 'refreshSearchIndex').mockResolvedValue({ status: runningStatus })
 
     render(<App />)
 
-    const refreshButton = await screen.findByRole('button', { name: 'Refresh search index' })
+    const refreshButton = await screen.findByRole('button', { name: 'Reindex mailboxes' })
     await user.click(refreshButton)
 
-    expect(await screen.findByText('Reindexing')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Refresh search index' })).toBeDisabled()
+    expect(await screen.findByText('Reindexing mailboxes')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Reindex mailboxes' })).toBeDisabled()
 
     await waitFor(
       () => {
-        expect(screen.queryByText('Reindexing')).not.toBeInTheDocument()
+        expect(screen.queryByText('Reindexing mailboxes')).not.toBeInTheDocument()
       },
       { timeout: 5000 }
     )
-    expect(screen.getByRole('button', { name: 'Refresh search index' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Reindex mailboxes' })).toBeEnabled()
   })
 
   it('shows an error state when search index refresh fails and keeps the workspace usable', async () => {
@@ -324,23 +325,24 @@ describe('auth shell', () => {
     vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue(hiddenRulesResponse)
     vi.spyOn(api.pst, 'refreshSearchIndexStatus')
       .mockResolvedValueOnce({ status: idleStatus })
+      .mockResolvedValueOnce({ status: idleStatus })
       .mockResolvedValueOnce({ status: runningStatus })
       .mockResolvedValueOnce({ status: failedStatus })
     vi.spyOn(api.pst, 'refreshSearchIndex').mockResolvedValue({ status: runningStatus })
 
     render(<App />)
 
-    await user.click(await screen.findByRole('button', { name: 'Refresh search index' }))
+    await user.click(await screen.findByRole('button', { name: 'Reindex mailboxes' }))
 
-    expect(await screen.findByText('Reindexing')).toBeInTheDocument()
+    expect(await screen.findByText('Reindexing mailboxes')).toBeInTheDocument()
     await waitFor(
       () => {
-        expect(screen.getByText('Reindex failed')).toBeInTheDocument()
+        expect(screen.getByText('Mailboxes reindex failed')).toBeInTheDocument()
       },
       { timeout: 5000 }
     )
     expect(screen.getByText('Refresh failed')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Refresh search index' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Reindex mailboxes' })).toBeEnabled()
   })
 
   it('opens case access in a per-user modal and defaults to no cases', async () => {
@@ -548,8 +550,8 @@ describe('shell and preview', () => {
           onCaseChange={vi.fn()}
           onScopeChange={vi.fn()}
           canRefreshSearchIndex
-          searchIndexRefreshStatus={null}
-          searchIndexRefreshBusy={false}
+          searchIndexRefreshStatuses={{ mailboxes: null, items: null }}
+          searchIndexRefreshBusyBySource={{ mailboxes: false, items: false }}
           onRefreshSearchIndex={vi.fn()}
           onOpenMailbox={vi.fn()}
           onSourceTypeChange={vi.fn()}
@@ -565,7 +567,7 @@ describe('shell and preview', () => {
     expect(screen.queryByText('Case Alpha (3)')).not.toBeInTheDocument()
     expect(screen.queryByText('Search One (2)')).not.toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: 'Mailbox selector' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Refresh search index' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Reindex mailboxes' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'mailbox-a.pst' })).toBeInTheDocument()
     expect(screen.queryByText('Found 2 mailbox files in Case Alpha / Search One.')).not.toBeInTheDocument()
   })
@@ -585,8 +587,8 @@ describe('shell and preview', () => {
           onCaseChange={vi.fn()}
           onScopeChange={vi.fn()}
           canRefreshSearchIndex={false}
-          searchIndexRefreshStatus={null}
-          searchIndexRefreshBusy={false}
+          searchIndexRefreshStatuses={{ mailboxes: null, items: null }}
+          searchIndexRefreshBusyBySource={{ mailboxes: false, items: false }}
           onRefreshSearchIndex={vi.fn()}
           onOpenMailbox={vi.fn()}
           onSourceTypeChange={vi.fn()}
@@ -597,7 +599,7 @@ describe('shell and preview', () => {
       </div>
     )
 
-    expect(screen.queryByRole('button', { name: 'Refresh search index' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reindex mailboxes' })).not.toBeInTheDocument()
   })
 
   it('hides empty folders and keeps the mailbox selector compact', () => {
@@ -649,8 +651,8 @@ describe('shell and preview', () => {
           onCaseChange={vi.fn()}
           onScopeChange={vi.fn()}
           canRefreshSearchIndex
-          searchIndexRefreshStatus={null}
-          searchIndexRefreshBusy={false}
+          searchIndexRefreshStatuses={{ mailboxes: null, items: null }}
+          searchIndexRefreshBusyBySource={{ mailboxes: false, items: false }}
           onRefreshSearchIndex={vi.fn()}
           onOpenMailbox={vi.fn()}
           onSourceTypeChange={vi.fn()}
@@ -668,7 +670,7 @@ describe('shell and preview', () => {
     expect(screen.queryByText('Empty')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Inbox - 2/ })).toBeInTheDocument()
     expect(screen.queryByText(/- 0/)).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Refresh search index' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Reindex mailboxes' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Show removed PSTs' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Remove PST' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Restore PST' })).not.toBeInTheDocument()

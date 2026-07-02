@@ -66,6 +66,7 @@ import type {
   SessionOpenResponse,
   SmtpSettings,
   SmtpSettingsResponse,
+  SearchIndexRefreshSource,
   SearchIndexRefreshStatus,
   UserInvite,
   UsersResponse
@@ -102,6 +103,7 @@ const DEFAULT_SMTP_FORM: SmtpFormState = {
 }
 
 const SEARCH_INDEX_REFRESH_POLL_INTERVAL_MS = 2000
+const SEARCH_INDEX_REFRESH_SOURCES: SearchIndexRefreshSource[] = ['mailboxes', 'items']
 
 function getInviteToken(pathname = window.location.pathname): string | null {
   const match = pathname.match(/^\/invite\/([^/?#]+)/i)
@@ -380,16 +382,34 @@ export function App() {
   const [clearFlagsDialogOpen, setClearFlagsDialogOpen] = React.useState(false)
   const [clearFlagsLoading, setClearFlagsLoading] = React.useState(false)
   const [clearFlagsError, setClearFlagsError] = React.useState('')
-  const [searchIndexRefreshStatus, setSearchIndexRefreshStatus] =
-    React.useState<SearchIndexRefreshStatus | null>(null)
-  const [searchIndexRefreshActionBusy, setSearchIndexRefreshActionBusy] = React.useState(false)
+  const [searchIndexRefreshStatuses, setSearchIndexRefreshStatuses] = React.useState<
+    Record<SearchIndexRefreshSource, SearchIndexRefreshStatus | null>
+  >({
+    mailboxes: null,
+    items: null
+  })
+  const [searchIndexRefreshActionBusyBySource, setSearchIndexRefreshActionBusyBySource] = React.useState<
+    Record<SearchIndexRefreshSource, boolean>
+  >({
+    mailboxes: false,
+    items: false
+  })
   const [mfaReminderDismissed, setMfaReminderDismissed] = React.useState(false)
   const [tagsDialogOpen, setTagsDialogOpen] = React.useState(false)
   const [fullViewOpen, setFullViewOpen] = React.useState(false)
   const refreshCurrentPageRef = React.useRef<() => Promise<void>>(async () => undefined)
-  const searchIndexRefreshPollTimeoutRef = React.useRef<number | null>(null)
-  const searchIndexRefreshPollInFlightRef = React.useRef(false)
-  const searchIndexRefreshPollJobIdRef = React.useRef<string | null>(null)
+  const searchIndexRefreshPollTimeoutRef = React.useRef<Record<SearchIndexRefreshSource, number | null>>({
+    mailboxes: null,
+    items: null
+  })
+  const searchIndexRefreshPollInFlightRef = React.useRef<Record<SearchIndexRefreshSource, boolean>>({
+    mailboxes: false,
+    items: false
+  })
+  const searchIndexRefreshPollJobIdRef = React.useRef<Record<SearchIndexRefreshSource, string | null>>({
+    mailboxes: null,
+    items: null
+  })
 
   const catalogLoadKeyRef = React.useRef('')
 
@@ -400,7 +420,6 @@ export function App() {
   const inviteFlowActive = Boolean(inviteToken)
   const mfaEnforced = Boolean(authStatus?.mfaEnforced)
   const assignedCasePathsKey = (authStatus?.user?.assignedCasePaths || []).join('|')
-  const searchIndexRefreshRunning = searchIndexRefreshStatus?.status === 'running'
   const selectedPageItem = React.useMemo(
     () => currentPage?.items?.find((item) => item.id === selectedMessageId) || null,
     [currentPage, selectedMessageId]
@@ -552,7 +571,9 @@ export function App() {
 
   React.useEffect(() => {
     if (!authenticated || !canManageUsers) {
-      setSearchIndexRefreshStatus(null)
+      setSearchIndexRefreshStatuses({ mailboxes: null, items: null })
+      stopSearchIndexRefreshPolling('mailboxes')
+      stopSearchIndexRefreshPolling('items')
       return
     }
 
@@ -560,16 +581,39 @@ export function App() {
 
     async function loadRefreshStatus(): Promise<void> {
       try {
-        const response = await api.pst.refreshSearchIndexStatus()
+        const responses = await Promise.all(
+          SEARCH_INDEX_REFRESH_SOURCES.map(async (source) => ({
+            source,
+            response: await api.pst.refreshSearchIndexStatus(source)
+          }))
+        )
         if (cancelled) {
           return
         }
-        setSearchIndexRefreshStatus(
-          response.status.status === 'running' || response.status.status === 'failed' ? response.status : null
-        )
+
+        const nextStatuses = { mailboxes: null, items: null } as Record<
+          SearchIndexRefreshSource,
+          SearchIndexRefreshStatus | null
+        >
+
+        for (const { source, response } of responses) {
+          const nextStatus = response.status
+          if (nextStatus.status === 'running') {
+            nextStatuses[source] = nextStatus
+            startSearchIndexRefreshPolling(source, nextStatus.jobId)
+            continue
+          }
+          if (nextStatus.status === 'failed') {
+            nextStatuses[source] = nextStatus
+          } else {
+            stopSearchIndexRefreshPolling(source)
+          }
+        }
+
+        setSearchIndexRefreshStatuses(nextStatuses)
       } catch {
         if (!cancelled) {
-          setSearchIndexRefreshStatus(null)
+          setSearchIndexRefreshStatuses({ mailboxes: null, items: null })
         }
       }
     }
@@ -1066,8 +1110,10 @@ export function App() {
       setAuthView('login')
       setAuthMessage('')
       setAuthError('')
-      setSearchIndexRefreshStatus(null)
-      setSearchIndexRefreshActionBusy(false)
+      setSearchIndexRefreshStatuses({ mailboxes: null, items: null })
+      setSearchIndexRefreshActionBusyBySource({ mailboxes: false, items: false })
+      stopSearchIndexRefreshPolling('mailboxes')
+      stopSearchIndexRefreshPolling('items')
     }
   }
 
@@ -1732,149 +1778,143 @@ export function App() {
     await openMessage(selectedMessageId)
   }
 
-  async function refreshSearchIndex(): Promise<SearchIndexRefreshStatus> {
-    const response = await api.pst.refreshSearchIndex()
-    return response.status
-  }
-
-  function stopSearchIndexRefreshPolling(): void {
-    if (searchIndexRefreshPollTimeoutRef.current !== null) {
-      window.clearTimeout(searchIndexRefreshPollTimeoutRef.current)
-      searchIndexRefreshPollTimeoutRef.current = null
+  function stopSearchIndexRefreshPolling(source: SearchIndexRefreshSource): void {
+    const timeout = searchIndexRefreshPollTimeoutRef.current[source]
+    if (timeout !== null) {
+      window.clearTimeout(timeout)
     }
-    searchIndexRefreshPollInFlightRef.current = false
-    searchIndexRefreshPollJobIdRef.current = null
+    searchIndexRefreshPollTimeoutRef.current[source] = null
+    searchIndexRefreshPollInFlightRef.current[source] = false
+    searchIndexRefreshPollJobIdRef.current[source] = null
   }
 
-  function scheduleSearchIndexRefreshPolling(jobId: string): void {
-    if (searchIndexRefreshPollJobIdRef.current !== jobId) {
+  function scheduleSearchIndexRefreshPolling(source: SearchIndexRefreshSource, jobId: string): void {
+    if (searchIndexRefreshPollJobIdRef.current[source] !== jobId) {
       return
     }
-    if (searchIndexRefreshPollTimeoutRef.current !== null) {
-      window.clearTimeout(searchIndexRefreshPollTimeoutRef.current)
+    const timeout = searchIndexRefreshPollTimeoutRef.current[source]
+    if (timeout !== null) {
+      window.clearTimeout(timeout)
     }
-    searchIndexRefreshPollTimeoutRef.current = window.setTimeout(() => {
-      searchIndexRefreshPollTimeoutRef.current = null
-      void pollSearchIndexRefreshStatus(jobId)
+    searchIndexRefreshPollTimeoutRef.current[source] = window.setTimeout(() => {
+      searchIndexRefreshPollTimeoutRef.current[source] = null
+      void pollSearchIndexRefreshStatus(source, jobId)
     }, SEARCH_INDEX_REFRESH_POLL_INTERVAL_MS)
   }
 
-  async function pollSearchIndexRefreshStatus(jobId: string): Promise<void> {
-    if (searchIndexRefreshPollInFlightRef.current || searchIndexRefreshPollJobIdRef.current !== jobId) {
+  function startSearchIndexRefreshPolling(source: SearchIndexRefreshSource, jobId: string): void {
+    searchIndexRefreshPollJobIdRef.current[source] = jobId
+    void pollSearchIndexRefreshStatus(source, jobId)
+  }
+
+  async function pollSearchIndexRefreshStatus(
+    source: SearchIndexRefreshSource,
+    jobId: string
+  ): Promise<void> {
+    if (searchIndexRefreshPollInFlightRef.current[source] || searchIndexRefreshPollJobIdRef.current[source] !== jobId) {
       return
     }
 
-    searchIndexRefreshPollInFlightRef.current = true
+    searchIndexRefreshPollInFlightRef.current[source] = true
     try {
-      const response = await api.pst.refreshSearchIndexStatus()
-      if (searchIndexRefreshPollJobIdRef.current !== jobId) {
+      const response = await api.pst.refreshSearchIndexStatus(source)
+      if (searchIndexRefreshPollJobIdRef.current[source] !== jobId) {
         return
       }
 
       const nextStatus = response.status
+      setSearchIndexRefreshStatuses((current) => ({ ...current, [source]: nextStatus }))
       if (nextStatus.status === 'running') {
-        setSearchIndexRefreshStatus(nextStatus)
-        scheduleSearchIndexRefreshPolling(jobId)
+        scheduleSearchIndexRefreshPolling(source, jobId)
         return
       }
 
       if (nextStatus.status === 'succeeded') {
         const hiddenRulesResponse = await api.hiddenFilters.list()
-        if (searchIndexRefreshPollJobIdRef.current !== jobId) {
+        if (searchIndexRefreshPollJobIdRef.current[source] !== jobId) {
           return
         }
         setHiddenRules(hiddenRulesResponse.items || [])
         await refreshCurrentPageRef.current()
-        if (searchIndexRefreshPollJobIdRef.current !== jobId) {
+        if (searchIndexRefreshPollJobIdRef.current[source] !== jobId) {
           return
         }
-        stopSearchIndexRefreshPolling()
-        setSearchIndexRefreshStatus(null)
+        stopSearchIndexRefreshPolling(source)
+        setSearchIndexRefreshStatuses((current) => ({ ...current, [source]: null }))
         return
       }
 
-      stopSearchIndexRefreshPolling()
-      setSearchIndexRefreshStatus(nextStatus.status === 'failed' ? nextStatus : null)
+      stopSearchIndexRefreshPolling(source)
+      setSearchIndexRefreshStatuses((current) => ({
+        ...current,
+        [source]: nextStatus.status === 'failed' ? nextStatus : null
+      }))
     } catch (error) {
-      if (searchIndexRefreshPollJobIdRef.current !== jobId) {
+      if (searchIndexRefreshPollJobIdRef.current[source] !== jobId) {
         return
       }
-      stopSearchIndexRefreshPolling()
-      setSearchIndexRefreshStatus({
-        jobId,
-        status: 'failed',
-        trigger: searchIndexRefreshStatus?.trigger || 'manual',
-        startedAt: searchIndexRefreshStatus?.startedAt || null,
-        completedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        summary: null,
-        error: error instanceof Error ? error.message : 'Unable to refresh search index'
-      })
+      stopSearchIndexRefreshPolling(source)
+      setSearchIndexRefreshStatuses((current) => ({
+        ...current,
+        [source]: {
+          source,
+          jobId,
+          status: 'failed',
+          trigger: current[source]?.trigger || 'manual',
+          startedAt: current[source]?.startedAt || null,
+          completedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          summary: null,
+          error: error instanceof Error ? error.message : 'Unable to refresh search index'
+        }
+      }))
     } finally {
-      searchIndexRefreshPollInFlightRef.current = false
+      searchIndexRefreshPollInFlightRef.current[source] = false
     }
   }
 
-  async function handleRefreshSearchIndex(): Promise<void> {
-    if (searchIndexRefreshActionBusy || searchIndexRefreshRunning) {
+  async function refreshSearchIndex(source: SearchIndexRefreshSource): Promise<SearchIndexRefreshStatus> {
+    const response = await api.pst.refreshSearchIndex(source)
+    return response.status
+  }
+
+  async function handleRefreshSearchIndex(source: SearchIndexRefreshSource): Promise<void> {
+    if (searchIndexRefreshActionBusyBySource[source] || searchIndexRefreshStatuses[source]?.status === 'running') {
       return
     }
 
-    setSearchIndexRefreshActionBusy(true)
+    setSearchIndexRefreshActionBusyBySource((current) => ({ ...current, [source]: true }))
     try {
-      const status = await refreshSearchIndex()
-      setSearchIndexRefreshStatus(status)
+      const status = await refreshSearchIndex(source)
+      setSearchIndexRefreshStatuses((current) => ({ ...current, [source]: status }))
       if (status.status === 'running') {
-        searchIndexRefreshPollJobIdRef.current = status.jobId
-        void pollSearchIndexRefreshStatus(status.jobId)
+        startSearchIndexRefreshPolling(source, status.jobId)
         return
       }
       if (status.status === 'succeeded') {
         await api.hiddenFilters.list().then((result) => setHiddenRules(result.items || []))
         await refreshCurrentPage()
-        setSearchIndexRefreshStatus(null)
+        setSearchIndexRefreshStatuses((current) => ({ ...current, [source]: null }))
       }
     } catch (error) {
-      setSearchIndexRefreshStatus({
-        jobId: null,
-        status: 'failed',
-        trigger: 'manual',
-        startedAt: null,
-        completedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        summary: null,
-        error: error instanceof Error ? error.message : 'Unable to refresh search index'
-      })
+      setSearchIndexRefreshStatuses((current) => ({
+        ...current,
+        [source]: {
+          source,
+          jobId: null,
+          status: 'failed',
+          trigger: 'manual',
+          startedAt: null,
+          completedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          summary: null,
+          error: error instanceof Error ? error.message : 'Unable to refresh search index'
+        }
+      }))
     } finally {
-      setSearchIndexRefreshActionBusy(false)
+      setSearchIndexRefreshActionBusyBySource((current) => ({ ...current, [source]: false }))
     }
   }
-
-  React.useEffect(() => {
-    if (!authenticated || !canManageUsers || searchIndexRefreshStatus?.status !== 'running') {
-      stopSearchIndexRefreshPolling()
-      return
-    }
-
-    const jobId = searchIndexRefreshStatus.jobId
-    if (!jobId) {
-      stopSearchIndexRefreshPolling()
-      return
-    }
-
-    if (searchIndexRefreshPollJobIdRef.current === jobId) {
-      return
-    }
-
-    searchIndexRefreshPollJobIdRef.current = jobId
-    void pollSearchIndexRefreshStatus(jobId)
-
-    return () => {
-      if (searchIndexRefreshPollJobIdRef.current === jobId) {
-        stopSearchIndexRefreshPolling()
-      }
-    }
-  }, [authenticated, canManageUsers, searchIndexRefreshStatus?.jobId, searchIndexRefreshStatus?.status])
 
   async function createHiddenFilter(kind: 'address' | 'subject', value: string, label?: string): Promise<void> {
     await api.hiddenFilters.create(kind, value, label)
@@ -2077,10 +2117,10 @@ export function App() {
         writeWorkspaceStorageItem('sourceType', true, username, value)
       }}
       canRefreshSearchIndex={canManageUsers}
-      searchIndexRefreshStatus={searchIndexRefreshStatus}
-      searchIndexRefreshBusy={searchIndexRefreshActionBusy}
-      onRefreshSearchIndex={() => {
-        void handleRefreshSearchIndex()
+      searchIndexRefreshStatuses={searchIndexRefreshStatuses}
+      searchIndexRefreshBusyBySource={searchIndexRefreshActionBusyBySource}
+      onRefreshSearchIndex={(source) => {
+        void handleRefreshSearchIndex(source)
       }}
       onOpenMailbox={(fileName, scopePath) => {
         void openMailbox(fileName, scopePath)

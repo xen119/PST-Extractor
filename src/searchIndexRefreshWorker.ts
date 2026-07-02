@@ -1,5 +1,13 @@
 import { createReviewStoreFromEnv } from './reviewStore'
-import { createSearchIndexStoreFromEnv, refreshSearchIndexFromCatalog } from './searchIndex'
+import {
+  createSearchIndexStoreFromEnv,
+  refreshSearchIndexSourceFromCatalog,
+  type SearchIndexRefreshSource
+} from './searchIndex'
+
+function normalizeRefreshSource(value: unknown): SearchIndexRefreshSource {
+  return String(value ?? '').trim().toLowerCase() === 'items' ? 'items' : 'mailboxes'
+}
 
 function normalizeText(value: unknown): string {
   return String(value ?? '').trim()
@@ -11,6 +19,7 @@ async function main(): Promise<void> {
     const stagingDocumentsCollectionName = normalizeText(
       process.env.PST_SEARCH_INDEX_STAGING_DOCUMENTS_COLLECTION
     )
+    const source = normalizeRefreshSource(process.env.PST_SEARCH_INDEX_REFRESH_SOURCE)
 
     if (!pstRootDir) {
       throw new Error('PST root directory is required')
@@ -24,11 +33,21 @@ async function main(): Promise<void> {
       documentsCollectionName: stagingDocumentsCollectionName
     })
 
-    const summary = await refreshSearchIndexFromCatalog(pstRootDir, reviewStore, searchIndexStore)
+    const plan = await refreshSearchIndexSourceFromCatalog(
+      pstRootDir,
+      source,
+      reviewStore,
+      searchIndexStore,
+      {
+        pruneRemovedFiles: false,
+        updateFingerprints: false
+      }
+    )
+
     if (typeof process.send === 'function') {
       process.send({
         type: 'success',
-        summary
+        plan
       })
     }
     await searchIndexStore.close()

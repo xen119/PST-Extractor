@@ -46,6 +46,7 @@ import {
   type SearchIndexDocument,
   type SearchIndexPage,
   type SearchIndexSearchOptions,
+  type SearchIndexRefreshSource,
   type SearchIndexStore,
   type SearchScope
 } from './searchIndex'
@@ -972,6 +973,10 @@ function parseSearchSourceType(value: unknown): 'mailbox' | 'teams' | 'sharepoin
     return normalized
   }
   return 'mailbox'
+}
+
+function parseRefreshSource(value: unknown): SearchIndexRefreshSource {
+  return normalizeText(value).toLowerCase() === 'items' ? 'items' : 'mailboxes'
 }
 
 function collectCatalogMailboxKeys(
@@ -2274,14 +2279,15 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
             socket: { remoteAddress: '' }
           } as express.Request,
           session: null,
-          action: 'search.index.refresh',
-          target: 'PST catalog',
+          action: `search.index.refresh.${refreshStatus.source}`,
+          target: refreshStatus.source === 'items' ? 'Items index' : 'Mailbox index',
           outcome: refreshStatus.status === 'failed' ? 'failure' : 'success',
           metadata: {
             jobId: refreshStatus.jobId,
             trigger: refreshStatus.trigger,
             startedAt: refreshStatus.startedAt,
             completedAt: refreshStatus.completedAt,
+            source: refreshStatus.source,
             mailboxCount: refreshStatus.summary?.mailboxCount || 0,
             messageCount: refreshStatus.summary?.messageCount || 0,
             error: refreshStatus.error || undefined
@@ -5172,15 +5178,17 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.post(API_ROUTES.searchIndexRefresh, async (req, res) => {
     try {
       const authSession = getAuthSessionFromRequest(req)
+      const source = parseRefreshSource(req.query.source)
       if (authConfig.enabled && !isAdminAuthSession(authSession, authConfig)) {
         recordAuditEvent({
           req,
           session: authSession,
-          action: 'search.index.refresh',
-          target: 'PST catalog',
+          action: `search.index.refresh.${source}`,
+          target: source === 'items' ? 'Items index' : 'Mailbox index',
           outcome: 'denied',
           metadata: {
-            reason: 'Admin access required'
+            reason: 'Admin access required',
+            source
           }
         })
         responseJson(res, 403, {
@@ -5189,17 +5197,18 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         return
       }
 
-      const status = await searchIndexRefreshCoordinator.start('manual')
+      const status = await searchIndexRefreshCoordinator.start(source, 'manual')
       recordAuditEvent({
         req,
         session: authSession,
-        action: 'search.index.refresh',
-        target: 'PST catalog',
+        action: `search.index.refresh.${source}`,
+        target: source === 'items' ? 'Items index' : 'Mailbox index',
         outcome: 'success',
         metadata: {
           jobId: status.jobId,
           trigger: status.trigger,
-          status: status.status
+          status: status.status,
+          source
         }
       })
       responseJson(res, 202, {
@@ -5213,6 +5222,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.get(API_ROUTES.searchIndexRefreshStatus, async (req, res) => {
     try {
       const authSession = getAuthSessionFromRequest(req)
+      const source = parseRefreshSource(req.query.source)
       if (authConfig.enabled && !isAdminAuthSession(authSession, authConfig)) {
         responseJson(res, 403, {
           error: 'Admin access required'
@@ -5221,7 +5231,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       }
 
       responseJson(res, 200, {
-        status: searchIndexRefreshCoordinator.getStatus()
+        status: searchIndexRefreshCoordinator.getStatus(source)
       })
     } catch (error) {
       createRouteErrorHandler(res, error)

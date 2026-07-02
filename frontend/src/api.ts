@@ -14,6 +14,7 @@ import type {
   MessageDetailResponse,
   ReviewUpdateResponse,
   SearchIndexRefreshResponse,
+  SearchIndexRefreshSource,
   SearchIndexRefreshStatus,
   SmtpSettingsResponse,
   SmtpTestResponse,
@@ -210,12 +211,12 @@ export const api = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ scopePath, fileName })
       }),
-    refreshSearchIndex: () =>
-      requestJson<SearchIndexRefreshResponse>('/api/search/index/refresh', {
+    refreshSearchIndex: (source: SearchIndexRefreshSource) =>
+      requestJson<SearchIndexRefreshResponse>(`/api/search/index/refresh?${buildQuery({ source })}`, {
         method: 'POST'
       }),
-    refreshSearchIndexStatus: () =>
-      requestJson<SearchIndexRefreshResponse>('/api/search/index/refresh/status', {
+    refreshSearchIndexStatus: (source: SearchIndexRefreshSource) =>
+      requestJson<SearchIndexRefreshResponse>(`/api/search/index/refresh/status?${buildQuery({ source })}`, {
         cache: 'no-store'
       })
   },

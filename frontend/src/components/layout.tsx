@@ -25,6 +25,7 @@ import type {
   FolderNode,
   MessageDetail,
   MessageSummary,
+  SearchIndexRefreshSource,
   SearchIndexRefreshStatus,
   ReviewState
 } from '@/types'
@@ -211,9 +212,9 @@ interface SidebarProps {
   onScopeChange: (value: string) => void
   onSourceTypeChange: (value: 'mailbox' | 'teams' | 'sharepoint') => void
   canRefreshSearchIndex: boolean
-  searchIndexRefreshStatus: SearchIndexRefreshStatus | null
-  searchIndexRefreshBusy: boolean
-  onRefreshSearchIndex: () => void
+  searchIndexRefreshStatuses: Partial<Record<SearchIndexRefreshSource, SearchIndexRefreshStatus | null>>
+  searchIndexRefreshBusyBySource: Partial<Record<SearchIndexRefreshSource, boolean>>
+  onRefreshSearchIndex: (source: SearchIndexRefreshSource) => void
   onOpenMailbox: (fileName: string, scopePath: string) => void
   folderTree: FolderNode | null
   currentFolderId: string
@@ -235,8 +236,8 @@ export function Sidebar({
   onScopeChange,
   onSourceTypeChange,
   canRefreshSearchIndex,
-  searchIndexRefreshStatus,
-  searchIndexRefreshBusy,
+  searchIndexRefreshStatuses,
+  searchIndexRefreshBusyBySource,
   onRefreshSearchIndex,
   onOpenMailbox,
   folderTree,
@@ -246,6 +247,10 @@ export function Sidebar({
   const selectedMailbox =
     catalogFiles.find((file) => file.fileName === selectedPstFileName) || catalogFiles[0] || null
   const tabCounts = sourceCounts || { mailbox: 0, teams: 0, sharepoint: 0 }
+  const mailboxesRefreshStatus = searchIndexRefreshStatuses.mailboxes || null
+  const itemsRefreshStatus = searchIndexRefreshStatuses.items || null
+  const mailboxesRefreshBusy = Boolean(searchIndexRefreshBusyBySource.mailboxes)
+  const itemsRefreshBusy = Boolean(searchIndexRefreshBusyBySource.items)
 
   const sourceTabs: Array<{
     key: 'mailbox' | 'teams' | 'sharepoint'
@@ -277,31 +282,54 @@ export function Sidebar({
           <div className="text-sm text-[color:var(--muted)]">Browse and open a mailbox</div>
         </div>
         {canRefreshSearchIndex ? (
-          <div className="flex items-center gap-2">
-            {searchIndexRefreshStatus?.status === 'running' ? (
-              <span className="inline-flex items-center gap-2 rounded-full border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-3 py-1 text-xs font-medium text-[color:var(--muted)]">
-                <RefreshCw className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                Reindexing
-              </span>
-            ) : searchIndexRefreshStatus?.status === 'failed' ? (
-              <span className="inline-flex items-center gap-2 rounded-full border border-[color:rgba(220,38,38,0.2)] bg-[color:rgba(220,38,38,0.08)] px-3 py-1 text-xs font-medium text-[color:var(--danger)]">
-                <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />
-                Reindex failed
-              </span>
-            ) : null}
-            <IconButton
-              label="Refresh search index"
-              onClick={onRefreshSearchIndex}
-              disabled={searchIndexRefreshBusy || searchIndexRefreshStatus?.status === 'running'}
-            >
-              <RefreshCw className="h-4 w-4" />
-            </IconButton>
+          <div className="flex flex-wrap items-center gap-2">
+            {[
+              {
+                key: 'mailboxes' as const,
+                label: 'Mailboxes',
+                status: mailboxesRefreshStatus,
+                busy: mailboxesRefreshBusy
+              },
+              {
+                key: 'items' as const,
+                label: 'Items',
+                status: itemsRefreshStatus,
+                busy: itemsRefreshBusy
+              }
+            ].map((entry) => (
+              <div key={entry.key} className="flex items-center gap-2">
+                {entry.status?.status === 'running' ? (
+                  <span className="inline-flex items-center gap-2 rounded-full border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-3 py-1 text-xs font-medium text-[color:var(--muted)]">
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                    Reindexing {entry.label.toLowerCase()}
+                  </span>
+                ) : entry.status?.status === 'failed' ? (
+                  <span className="inline-flex items-center gap-2 rounded-full border border-[color:rgba(220,38,38,0.2)] bg-[color:rgba(220,38,38,0.08)] px-3 py-1 text-xs font-medium text-[color:var(--danger)]">
+                    <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />
+                    {entry.label} reindex failed
+                  </span>
+                ) : null}
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-2 rounded-full border border-[color:var(--line)] bg-[color:var(--surface-strong)] px-3 py-1.5 text-xs font-medium text-[color:var(--text)] transition hover:bg-[color:var(--surface-soft)] focus:outline-none focus:ring-2 focus:ring-[color:var(--focus-ring)] disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={entry.busy || entry.status?.status === 'running'}
+                  onClick={() => onRefreshSearchIndex(entry.key)}
+                >
+                  <RefreshCw className={cn('h-3.5 w-3.5', entry.status?.status === 'running' && 'animate-spin')} aria-hidden="true" />
+                  Reindex {entry.label.toLowerCase()}
+                </button>
+              </div>
+            ))}
           </div>
         ) : null}
       </div>
-      {searchIndexRefreshStatus?.status === 'failed' && searchIndexRefreshStatus.error ? (
+      {[mailboxesRefreshStatus, itemsRefreshStatus].find((status) => status?.status === 'failed' && status.error) ? (
         <div className="border-t border-[color:var(--line)] px-4 py-3 text-xs leading-5 text-[color:var(--danger)]">
-          {searchIndexRefreshStatus.error}
+          {mailboxesRefreshStatus?.status === 'failed' && mailboxesRefreshStatus.error
+            ? mailboxesRefreshStatus.error
+            : itemsRefreshStatus?.status === 'failed' && itemsRefreshStatus.error
+              ? itemsRefreshStatus.error
+              : null}
         </div>
       ) : null}
 

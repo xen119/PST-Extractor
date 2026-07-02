@@ -220,14 +220,24 @@ async function startApp(
   })
 
   const searchIndexRefreshCoordinator = app.get('searchIndexRefreshCoordinator') as
-    | { start(trigger: 'startup' | 'manual'): Promise<{ status: string }>; getStatus(): { status: string } }
+    | {
+        start(
+          source: 'mailboxes' | 'items',
+          trigger: 'startup' | 'manual'
+        ): Promise<{ status: string }>
+        getStatus(source: 'mailboxes' | 'items'): { status: string }
+      }
     | undefined
   if (!options?.skipInitialRefresh && searchIndexRefreshCoordinator) {
-    const startPromise = searchIndexRefreshCoordinator.start('startup')
+    const startPromises = [
+      searchIndexRefreshCoordinator.start('mailboxes', 'startup'),
+      searchIndexRefreshCoordinator.start('items', 'startup')
+    ]
     if (!options?.backgroundInitialRefresh) {
-      const started = await startPromise
-      if (started.status === 'running') {
-        await waitForSearchIndexRefreshCompletion(searchIndexRefreshCoordinator)
+      const started = await Promise.all(startPromises)
+      if (started.some((entry) => entry.status === 'running')) {
+        await waitForSearchIndexRefreshCompletion(searchIndexRefreshCoordinator, 'mailboxes')
+        await waitForSearchIndexRefreshCompletion(searchIndexRefreshCoordinator, 'items')
       }
     }
   }
@@ -245,10 +255,11 @@ async function startApp(
 }
 
 async function waitForSearchIndexRefreshCompletion(
-  coordinator: { getStatus(): { status: string } }
+  coordinator: { getStatus(source: 'mailboxes' | 'items'): { status: string } },
+  source: 'mailboxes' | 'items'
 ): Promise<void> {
   for (;;) {
-    const status = coordinator.getStatus()
+    const status = coordinator.getStatus(source)
     if (status.status !== 'running') {
       return
     }
@@ -258,7 +269,7 @@ async function waitForSearchIndexRefreshCompletion(
 
 async function waitForRefreshStatus(baseUrl: string, cookie: string): Promise<void> {
   for (let attempt = 0; attempt < 200; attempt += 1) {
-    const response = await fetch(`${baseUrl}/api/search/index/refresh/status`, {
+    const response = await fetch(`${baseUrl}/api/search/index/refresh/status?source=mailboxes`, {
       headers: {
         Cookie: cookie
       }
@@ -484,7 +495,7 @@ describe('pst review api', () => {
     expect(searchMailbox.scope).toBe('pst')
     expect(searchMailbox.page.total).toBeGreaterThan(0)
 
-    const refreshedIndexResponse = await fetch(`${started.baseUrl}/api/search/index/refresh`, {
+    const refreshedIndexResponse = await fetch(`${started.baseUrl}/api/search/index/refresh?source=mailboxes`, {
       method: 'POST'
     })
     const refreshedIndex = await readJson(refreshedIndexResponse)
@@ -836,7 +847,7 @@ describe('pst review api', () => {
     const cookiePair = getCookiePair(getSetCookieHeader(loginResponse))
     expect(loginResponse.status).toBe(200)
 
-    const firstRefreshResponsePromise = fetch(`${started.baseUrl}/api/search/index/refresh`, {
+    const firstRefreshResponsePromise = fetch(`${started.baseUrl}/api/search/index/refresh?source=mailboxes`, {
       method: 'POST',
       headers: {
         Cookie: cookiePair
@@ -845,7 +856,7 @@ describe('pst review api', () => {
 
     await firstReplaceStarted.promise
 
-    const secondRefreshResponse = await fetch(`${started.baseUrl}/api/search/index/refresh`, {
+    const secondRefreshResponse = await fetch(`${started.baseUrl}/api/search/index/refresh?source=mailboxes`, {
       method: 'POST',
       headers: {
         Cookie: cookiePair
@@ -853,7 +864,7 @@ describe('pst review api', () => {
     })
     const secondRefreshPayload = await readJson(secondRefreshResponse)
     expect(secondRefreshResponse.status).toBe(409)
-    expect(secondRefreshPayload.error).toBe('Search index refresh already in progress')
+    expect(secondRefreshPayload.error).toBe('Search index refresh already in progress for mailboxes')
 
     releaseRefresh.resolve()
     const firstRefreshResponse = await firstRefreshResponsePromise
@@ -2386,7 +2397,7 @@ describe('pst review api', () => {
     })
     expect(aliceOpenResponse.sessionId).toBeTruthy()
 
-    const aliceRefreshResponse = await fetch(`${started.baseUrl}/api/search/index/refresh`, {
+    const aliceRefreshResponse = await fetch(`${started.baseUrl}/api/search/index/refresh?source=mailboxes`, {
       method: 'POST',
       headers: {
         Cookie: aliceRecoveryCookiePair
@@ -3236,7 +3247,7 @@ describe('pst review api', () => {
     )
     expect(reviewResponse.review.flagged).toBe(true)
 
-    const refreshResponse = await fetch(`${started.baseUrl}/api/search/index/refresh`, {
+    const refreshResponse = await fetch(`${started.baseUrl}/api/search/index/refresh?source=mailboxes`, {
       method: 'POST',
       headers: {
         Cookie: adminCookie
@@ -3266,10 +3277,10 @@ describe('pst review api', () => {
         expect.objectContaining({ action: 'message.view', outcome: 'success' }),
         expect.objectContaining({ action: 'search.execute', outcome: 'success' }),
         expect.objectContaining({ action: 'message.review.update', outcome: 'success' }),
-        expect.objectContaining({ action: 'search.index.refresh', outcome: 'success' })
+        expect.objectContaining({ action: 'search.index.refresh.mailboxes', outcome: 'success' })
       ])
     )
-    expect(activityLogResponse.entries[0].action).toBe('search.index.refresh')
+    expect(activityLogResponse.entries[0].action).toBe('search.index.refresh.mailboxes')
     expect(activityLogResponse.entries.some((entry: any) =>
       entry.action === 'message.review.update' && entry.metadata?.flagged === true
     )).toBe(true)
@@ -3288,7 +3299,7 @@ describe('pst review api', () => {
     expect(activityLogCsvResponse.headers.get('content-disposition')).toContain('activity-log-admin.csv')
     expect(activityLogCsvText).toContain('timestamp,actorUsername,actorAuthenticated,actorAdmin')
     expect(activityLogCsvText).toContain('auth.login')
-    expect(activityLogCsvText).toContain('search.index.refresh')
+    expect(activityLogCsvText).toContain('search.index.refresh.mailboxes')
     expect(readAuditLogEntries(started.auditLogPath)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -3340,7 +3351,7 @@ describe('pst review api', () => {
     expect(restartedActivityLogResponse.entries).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ action: 'mailbox.open', outcome: 'success' }),
-        expect.objectContaining({ action: 'search.index.refresh', outcome: 'success' })
+        expect.objectContaining({ action: 'search.index.refresh.mailboxes', outcome: 'success' })
       ])
     )
     expect(readAuditLogEntries(started.auditLogPath).length).toBeGreaterThanOrEqual(

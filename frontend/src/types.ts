@@ -4,6 +4,7 @@ export interface AuthUser {
 }
 
 export type SearchSourceType = 'mailbox' | 'teams' | 'sharepoint'
+export type SearchIndexRefreshSource = 'mailboxes' | 'items'
 
 export interface AuthStatus {
   authenticated: boolean
@@ -349,9 +350,14 @@ export interface SmtpTestResponse {
 export interface SearchIndexRefreshSummary {
   mailboxCount: number
   messageCount: number
+  changedCount?: number
+  skippedCount?: number
+  removedCount?: number
+  failedCount?: number
 }
 
 export interface SearchIndexRefreshStatus {
+  source?: SearchIndexRefreshSource
   jobId: string | null
   status: 'idle' | 'running' | 'succeeded' | 'failed'
   trigger: 'startup' | 'manual' | null

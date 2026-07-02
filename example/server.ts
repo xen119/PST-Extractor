@@ -213,8 +213,11 @@ async function main(): Promise<void> {
     'searchIndexRefreshCoordinator'
   ) as SearchIndexRefreshCoordinator | undefined
   if (searchIndexRefreshCoordinator) {
-    void searchIndexRefreshCoordinator.start('startup').catch((error) => {
-      console.error('Unable to start background search index refresh:', error)
+    void searchIndexRefreshCoordinator.start('mailboxes', 'startup').catch((error) => {
+      console.error('Unable to start mailbox search index refresh:', error)
+    })
+    void searchIndexRefreshCoordinator.start('items', 'startup').catch((error) => {
+      console.error('Unable to start items search index refresh:', error)
     })
   }
 

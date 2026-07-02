@@ -10,6 +10,7 @@ export type SearchScope = 'all' | 'search' | 'pst'
 export type SearchMode = 'and' | 'or'
 export type HiddenRuleKind = 'address' | 'subject'
 export type SearchSourceType = 'mailbox' | ArchiveBundleSourceType
+export type SearchIndexRefreshSource = 'mailboxes' | 'items'
 
 export interface HiddenRuleRecord {
   filterId: string
@@ -79,6 +80,30 @@ export interface SearchIndexDocument {
   updatedAt: string
 }
 
+export interface SearchIndexFileFingerprint {
+  source: SearchIndexRefreshSource
+  mailboxKey: string
+  fileName: string
+  scopePath: string
+  scopeLabel: string
+  size: number
+  modifiedAt: string | null
+  updatedAt: string
+}
+
+export interface SearchIndexRefreshPlan {
+  source: SearchIndexRefreshSource
+  mailboxCount: number
+  messageCount: number
+  changedCount: number
+  skippedCount: number
+  removedCount: number
+  failedCount: number
+  changedMailboxKeys: string[]
+  removedMailboxKeys: string[]
+  fingerprints: SearchIndexFileFingerprint[]
+}
+
 export interface SearchIndexSearchOptions {
   scope: SearchScope
   scopePath?: string
@@ -141,7 +166,14 @@ export interface SearchIndexStore {
   deleteHiddenRule(filterId: string): Promise<boolean>
   search(options: SearchIndexSearchOptions): Promise<SearchIndexPage>
   findDocumentById(id: string): Promise<SearchIndexDocument | null>
-  promoteStagedDocuments?(stagingDocumentsCollectionName: string): Promise<void>
+  listFileFingerprints(source: SearchIndexRefreshSource): Promise<SearchIndexFileFingerprint[]>
+  replaceFileFingerprints(source: SearchIndexRefreshSource, fingerprints: SearchIndexFileFingerprint[]): Promise<void>
+  deleteFileFingerprints(source: SearchIndexRefreshSource, mailboxKeys: string[]): Promise<void>
+  promoteStagedDocuments?(
+    stagingDocumentsCollectionName: string,
+    changedMailboxKeys?: string[],
+    removedMailboxKeys?: string[]
+  ): Promise<void>
   close(): Promise<void>
 }
 
@@ -184,12 +216,30 @@ interface HiddenRuleCollectionLike {
   deleteMany: (filter: Record<string, unknown>) => Promise<{ deletedCount?: number }>
 }
 
+interface FileFingerprintCollectionLike {
+  createIndex?: (index: Record<string, 1 | -1>, options?: { unique?: boolean; name?: string }) => Promise<unknown>
+  find: (filter: Record<string, unknown>) => {
+    sort: (sort: Record<string, 1 | -1>) => {
+      toArray: () => Promise<SearchIndexFileFingerprint[]>
+    }
+  }
+  findOne: (filter: Record<string, unknown>) => Promise<SearchIndexFileFingerprint | null>
+  updateOne: (
+    filter: Record<string, unknown>,
+    update: Record<string, unknown>,
+    options?: { upsert?: boolean }
+  ) => Promise<unknown>
+  deleteMany: (filter: Record<string, unknown>) => Promise<{ deletedCount?: number }>
+}
+
 const DEFAULT_INDEX_COLLECTION = 'pst_search_documents'
 const DEFAULT_RULE_COLLECTION = 'pst_search_hidden_rules'
+const DEFAULT_FINGERPRINT_COLLECTION = 'pst_search_file_fingerprints'
 
 export interface MongoSearchIndexStoreConnectOptions {
   documentsCollectionName?: string
   rulesCollectionName?: string
+  fingerprintsCollectionName?: string
 }
 
 function normalizeText(value: unknown): string {
@@ -214,6 +264,10 @@ function normalizeSourceType(value: unknown): SearchSourceType {
   return 'mailbox'
 }
 
+function normalizeRefreshSource(value: unknown): SearchIndexRefreshSource {
+  return normalizeText(value).toLowerCase() === 'items' ? 'items' : 'mailboxes'
+}
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
@@ -224,6 +278,53 @@ function uniqueStrings(values: string[]): string[] {
 
 function uniqueTextValues(values: string[]): string[] {
   return [...new Set(values.map((value) => normalizeText(value)).filter(Boolean))]
+}
+
+function uniqueFingerprintValues(values: SearchIndexFileFingerprint[]): SearchIndexFileFingerprint[] {
+  const seen = new Set<string>()
+  const records: SearchIndexFileFingerprint[] = []
+  for (const value of values) {
+    const normalized = normalizeFingerprintRecord(value)
+    const key = buildFingerprintKey(normalized.source, normalized.mailboxKey)
+    if (seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    records.push(normalized)
+  }
+  return records
+}
+
+function buildFingerprintKey(source: SearchIndexRefreshSource, mailboxKey: string): string {
+  return `${normalizeRefreshSource(source)}\u0000${normalizeText(mailboxKey)}`
+}
+
+function fingerprintMatches(
+  left: SearchIndexFileFingerprint | null | undefined,
+  right: SearchIndexFileFingerprint
+): boolean {
+  if (!left) {
+    return false
+  }
+  return (
+    normalizeRefreshSource(left.source) === normalizeRefreshSource(right.source) &&
+    normalizeText(left.mailboxKey) === normalizeText(right.mailboxKey) &&
+    Number(left.size || 0) === Number(right.size || 0) &&
+    normalizeText(left.modifiedAt || '') === normalizeText(right.modifiedAt || '')
+  )
+}
+
+function normalizeFingerprintRecord(record: SearchIndexFileFingerprint): SearchIndexFileFingerprint {
+  return {
+    source: normalizeRefreshSource(record.source),
+    mailboxKey: normalizeText(record.mailboxKey),
+    fileName: normalizeText(record.fileName),
+    scopePath: normalizeText(record.scopePath),
+    scopeLabel: normalizeText(record.scopeLabel),
+    size: Number.isFinite(record.size) ? Number(record.size) : 0,
+    modifiedAt: record.modifiedAt ? normalizeText(record.modifiedAt) || null : null,
+    updatedAt: normalizeText(record.updatedAt) || new Date().toISOString()
+  }
 }
 
 function dedupeSearchIndexDocuments(documents: SearchIndexDocument[]): SearchIndexDocument[] {
@@ -779,8 +880,27 @@ export function buildSearchIndexDocumentsFromSession(
 }
 
 export function buildSearchIndexDocumentsFromArchiveItems(
-  items: ArchiveBundleItem[]
+  items: ArchiveBundleItem[],
+  reviewRecords: ReviewRecord[] = []
 ): SearchIndexDocument[] {
+  const reviewStatesByMessageId = new Map<
+    string,
+    Array<{ reviewerUsername: string; review: ReviewState }>
+  >()
+
+  for (const record of reviewRecords) {
+    const messageId = normalizeText(record.messageId)
+    if (!messageId) {
+      continue
+    }
+    const entries = reviewStatesByMessageId.get(messageId) || []
+    entries.push({
+      reviewerUsername: normalizeReviewerUsername(record.reviewerUsername),
+      review: normalizeReview(record)
+    })
+    reviewStatesByMessageId.set(messageId, entries)
+  }
+
   const documents = items.map((item) =>
     toDocument(
       {
@@ -830,7 +950,7 @@ export function buildSearchIndexDocumentsFromArchiveItems(
         previewHtml: item.previewHtml
       },
       item.searchText,
-      []
+      reviewStatesByMessageId.get(item.archiveItemId) || []
     )
   )
 
@@ -892,6 +1012,7 @@ export class MemorySearchIndexStore implements SearchIndexStore {
   public isPersistent = false
   private readonly documents = new Map<string, Map<string, SearchIndexDocument>>()
   private readonly hiddenRules = new MemoryHiddenRuleStore()
+  private readonly fingerprints = new Map<string, SearchIndexFileFingerprint>()
 
   async replaceMailboxDocuments(mailboxKey: string, documents: SearchIndexDocument[]): Promise<void> {
     const key = normalizeText(mailboxKey)
@@ -947,6 +1068,45 @@ export class MemorySearchIndexStore implements SearchIndexStore {
 
   async clearAllDocuments(): Promise<void> {
     this.documents.clear()
+  }
+
+  async listFileFingerprints(source: SearchIndexRefreshSource): Promise<SearchIndexFileFingerprint[]> {
+    const normalizedSource = normalizeRefreshSource(source)
+    return [...this.fingerprints.values()]
+      .filter((record) => normalizeRefreshSource(record.source) === normalizedSource)
+      .map((record) => ({ ...record }))
+      .sort((left, right) => {
+        if (left.scopeLabel !== right.scopeLabel) {
+          return left.scopeLabel.localeCompare(right.scopeLabel, undefined, { sensitivity: 'base' })
+        }
+        return left.mailboxKey.localeCompare(right.mailboxKey, undefined, { sensitivity: 'base' })
+      })
+  }
+
+  async replaceFileFingerprints(
+    source: SearchIndexRefreshSource,
+    fingerprints: SearchIndexFileFingerprint[]
+  ): Promise<void> {
+    const normalizedSource = normalizeRefreshSource(source)
+    for (const key of [...this.fingerprints.keys()]) {
+      if (normalizeRefreshSource(this.fingerprints.get(key)?.source) === normalizedSource) {
+        this.fingerprints.delete(key)
+      }
+    }
+    for (const record of fingerprints) {
+      const normalized = normalizeFingerprintRecord({
+        ...record,
+        source: normalizedSource
+      })
+      this.fingerprints.set(buildFingerprintKey(normalizedSource, normalized.mailboxKey), normalized)
+    }
+  }
+
+  async deleteFileFingerprints(source: SearchIndexRefreshSource, mailboxKeys: string[]): Promise<void> {
+    const normalizedSource = normalizeRefreshSource(source)
+    for (const mailboxKey of mailboxKeys) {
+      this.fingerprints.delete(buildFingerprintKey(normalizedSource, mailboxKey))
+    }
   }
 
   async listHiddenRules(): Promise<HiddenRuleRecord[]> {
@@ -1011,6 +1171,7 @@ export class MemorySearchIndexStore implements SearchIndexStore {
   async close(): Promise<void> {
     this.documents.clear()
     this.hiddenRules.clear()
+    this.fingerprints.clear()
   }
 }
 
@@ -1189,10 +1350,12 @@ export class MongoSearchIndexStore implements SearchIndexStore {
   constructor(
     private readonly documents: SearchIndexCollectionLike,
     private readonly rules: HiddenRuleCollectionLike,
+    private readonly fingerprints: FileFingerprintCollectionLike,
     private readonly client?: MongoClient,
     private readonly dbName = 'pst-extractor',
     private readonly documentsCollectionName = DEFAULT_INDEX_COLLECTION,
-    private readonly rulesCollectionName = DEFAULT_RULE_COLLECTION
+    private readonly rulesCollectionName = DEFAULT_RULE_COLLECTION,
+    private readonly fingerprintsCollectionName = DEFAULT_FINGERPRINT_COLLECTION
   ) {}
 
   static async connect(
@@ -1207,6 +1370,9 @@ export class MongoSearchIndexStore implements SearchIndexStore {
       options.documentsCollectionName || DEFAULT_INDEX_COLLECTION
     )
     const rules = db.collection<HiddenRuleRecord>(options.rulesCollectionName || DEFAULT_RULE_COLLECTION)
+    const fingerprints = db.collection<SearchIndexFileFingerprint>(
+      options.fingerprintsCollectionName || DEFAULT_FINGERPRINT_COLLECTION
+    )
     await documents.createIndex?.({ mailboxKey: 1, messageId: 1 }, { unique: true })
     await documents.createIndex?.({ messageId: 1 })
     await documents.createIndex?.({ sourceType: 1, scopePath: 1 })
@@ -1220,13 +1386,17 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     await documents.createIndex?.({ mailboxKey: 1, sortDateMs: -1 })
     await rules.createIndex?.({ kind: 1, value: 1 }, { unique: true })
     await rules.createIndex?.({ updatedAt: -1 })
+    await fingerprints.createIndex?.({ source: 1, mailboxKey: 1 }, { unique: true })
+    await fingerprints.createIndex?.({ source: 1, updatedAt: -1 })
     return new MongoSearchIndexStore(
       documents as unknown as SearchIndexCollectionLike,
       rules as unknown as HiddenRuleCollectionLike,
+      fingerprints as unknown as FileFingerprintCollectionLike,
       client,
       dbName,
       options.documentsCollectionName || DEFAULT_INDEX_COLLECTION,
-      options.rulesCollectionName || DEFAULT_RULE_COLLECTION
+      options.rulesCollectionName || DEFAULT_RULE_COLLECTION,
+      options.fingerprintsCollectionName || DEFAULT_FINGERPRINT_COLLECTION
     )
   }
 
@@ -1248,6 +1418,52 @@ export class MongoSearchIndexStore implements SearchIndexStore {
 
   async deleteMailboxDocuments(mailboxKey: string): Promise<void> {
     await this.documents.deleteMany({ mailboxKey: normalizeText(mailboxKey) })
+  }
+
+  async listFileFingerprints(source: SearchIndexRefreshSource): Promise<SearchIndexFileFingerprint[]> {
+    const normalizedSource = normalizeRefreshSource(source)
+    return this.fingerprints
+      .find({ source: normalizedSource })
+      .sort({ scopeLabel: 1, mailboxKey: 1 })
+      .toArray()
+  }
+
+  async replaceFileFingerprints(
+    source: SearchIndexRefreshSource,
+    fingerprints: SearchIndexFileFingerprint[]
+  ): Promise<void> {
+    const normalizedSource = normalizeRefreshSource(source)
+    await this.fingerprints.deleteMany({ source: normalizedSource })
+    const uniqueFingerprints = uniqueFingerprintValues(
+      fingerprints.map((record) => ({
+        ...record,
+        source: normalizedSource
+      }))
+    )
+    for (const record of uniqueFingerprints) {
+      await this.fingerprints.updateOne(
+        { source: normalizedSource, mailboxKey: record.mailboxKey },
+        {
+          $set: {
+            ...record,
+            source: normalizedSource
+          }
+        },
+        { upsert: true }
+      )
+    }
+  }
+
+  async deleteFileFingerprints(source: SearchIndexRefreshSource, mailboxKeys: string[]): Promise<void> {
+    const normalizedSource = normalizeRefreshSource(source)
+    const keys = uniqueTextValues(mailboxKeys)
+    if (!keys.length) {
+      return
+    }
+    await this.fingerprints.deleteMany({
+      source: normalizedSource,
+      mailboxKey: { $in: keys }
+    })
   }
 
   async findDocumentById(id: string): Promise<SearchIndexDocument | null> {
@@ -1338,7 +1554,11 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     return Boolean(result.deletedCount && result.deletedCount > 0)
   }
 
-  async promoteStagedDocuments(stagingDocumentsCollectionName: string): Promise<void> {
+  async promoteStagedDocuments(
+    stagingDocumentsCollectionName: string,
+    changedMailboxKeys: string[] = [],
+    removedMailboxKeys: string[] = []
+  ): Promise<void> {
     if (!this.client) {
       throw new Error('Mongo client is not available')
     }
@@ -1348,11 +1568,24 @@ export class MongoSearchIndexStore implements SearchIndexStore {
       return
     }
 
-    await this.client.db('admin').command({
-      renameCollection: `${this.dbName}.${stagingName}`,
-      to: `${this.dbName}.${this.documentsCollectionName}`,
-      dropTarget: true
-    })
+    const db = this.client.db(this.dbName)
+    const stagingDocuments = db.collection<SearchIndexDocument>(stagingName)
+    const activeMailboxKeys = uniqueTextValues(changedMailboxKeys)
+    const removedKeys = uniqueTextValues(removedMailboxKeys)
+
+    for (const mailboxKey of removedKeys) {
+      await this.documents.deleteMany({ mailboxKey })
+    }
+
+    for (const mailboxKey of activeMailboxKeys) {
+      const stagedDocuments = await stagingDocuments.find({ mailboxKey }).sort({ messageId: 1 }).toArray()
+      await this.documents.deleteMany({ mailboxKey })
+      if (stagedDocuments.length) {
+        await this.documents.insertMany(stagedDocuments)
+      }
+    }
+
+    await stagingDocuments.deleteMany({})
   }
 
   async search(options: SearchIndexSearchOptions): Promise<SearchIndexPage> {
@@ -1433,23 +1666,76 @@ export async function createSearchIndexStoreFromEnv(
   return MongoSearchIndexStore.connect(uri, dbName, options)
 }
 
-export async function refreshSearchIndexFromCatalog(
+async function discoverRefreshSourceFiles(
   rootPath: string,
-  reviewStore: ReviewStore,
-  searchIndexStore: SearchIndexStore
-): Promise<{
-  mailboxCount: number
-  messageCount: number
-}> {
-  const { listPstMailboxFiles, openPstMailbox } = await import('./pstCatalog')
-  const { listArchiveBundleFiles, extractArchiveBundleItems } = await import('./archiveBundles')
-  const catalog = listPstMailboxFiles(rootPath)
-  const archiveCatalog = listArchiveBundleFiles(rootPath)
-  await searchIndexStore.clearAllDocuments()
+  source: SearchIndexRefreshSource
+): Promise<Array<{
+  mailboxKey: string
+  fileName: string
+  scopePath: string
+  scopeLabel: string
+  size: number
+  modifiedAt: string | null
+}>> {
+  const { listPstMailboxFiles } = await import('./pstCatalog')
+  const { listArchiveBundleFiles } = await import('./archiveBundles')
 
+  if (normalizeRefreshSource(source) === 'items') {
+    const catalog = listArchiveBundleFiles(rootPath)
+    return catalog.scopes.flatMap((scope) =>
+      scope.files.map((file) => ({
+        mailboxKey: path.resolve(rootPath, scope.scopePath ? scope.scopePath : '', file.fileName),
+        fileName: file.fileName,
+        scopePath: scope.scopePath,
+        scopeLabel: scope.scopeLabel,
+        size: file.size,
+        modifiedAt: file.modifiedAt || null
+      }))
+    )
+  }
+
+  const catalog = listPstMailboxFiles(rootPath)
+  return catalog.scopes.flatMap((scope) =>
+    scope.files.map((file) => ({
+      mailboxKey: path.resolve(rootPath, scope.scopePath ? scope.scopePath : '', file.fileName),
+      fileName: file.fileName,
+      scopePath: scope.scopePath,
+      scopeLabel: scope.scopeLabel,
+      size: file.size,
+      modifiedAt: file.modifiedAt || null
+    }))
+  )
+}
+
+export async function refreshSearchIndexSourceFromCatalog(
+  rootPath: string,
+  source: SearchIndexRefreshSource,
+  reviewStore: ReviewStore,
+  searchIndexStore: SearchIndexStore,
+  options: {
+    pruneRemovedFiles?: boolean
+    updateFingerprints?: boolean
+  } = {}
+): Promise<SearchIndexRefreshPlan> {
+  const { openPstMailbox } = await import('./pstCatalog')
+  const { extractArchiveBundleItems } = await import('./archiveBundles')
+  const normalizedSource = normalizeRefreshSource(source)
+  const discoveredFiles = await discoverRefreshSourceFiles(rootPath, normalizedSource)
+  const existingFingerprints = new Map(
+    (await searchIndexStore.listFileFingerprints(normalizedSource)).map((record) => [
+      buildFingerprintKey(record.source, record.mailboxKey),
+      record
+    ])
+  )
+  const nextFingerprints: SearchIndexFileFingerprint[] = []
+  const discoveredMailboxKeys = new Set<string>()
+  const removedMailboxKeys: string[] = []
+  const changedMailboxKeys: string[] = []
+  const warnedMessages = new Set<string>()
   let mailboxCount = 0
   let messageCount = 0
-  const warnedMessages = new Set<string>()
+  let skippedCount = 0
+  let failedCount = 0
 
   function warnOnce(scopeLabel: string, fileName: string, error: unknown): void {
     const message = error instanceof Error ? error.message : String(error)
@@ -1461,49 +1747,105 @@ export async function refreshSearchIndexFromCatalog(
     console.warn(`Unable to refresh search index for ${scopeLabel}/${fileName}:`, message)
   }
 
-  for (const scope of catalog.scopes) {
-    for (const file of scope.files) {
-      try {
-        const session = openPstMailbox(rootPath, scope.scopePath, file.fileName)
-        const mailboxKey = session.filePath
-        const reviewRecords = await reviewStore.listReviews(mailboxKey)
-        const documents = buildSearchIndexDocumentsFromSession(
+  for (const file of discoveredFiles) {
+    const fingerprint: SearchIndexFileFingerprint = normalizeFingerprintRecord({
+      source: normalizedSource,
+      mailboxKey: file.mailboxKey,
+      fileName: file.fileName,
+      scopePath: file.scopePath,
+      scopeLabel: file.scopeLabel,
+      size: file.size,
+      modifiedAt: file.modifiedAt,
+      updatedAt: new Date().toISOString()
+    })
+    discoveredMailboxKeys.add(fingerprint.mailboxKey)
+    const existingFingerprint = existingFingerprints.get(buildFingerprintKey(normalizedSource, fingerprint.mailboxKey))
+    if (fingerprintMatches(existingFingerprint, fingerprint)) {
+      skippedCount += 1
+      nextFingerprints.push(existingFingerprint ? normalizeFingerprintRecord(existingFingerprint) : fingerprint)
+      continue
+    }
+
+    try {
+      let documents: SearchIndexDocument[] = []
+      if (normalizedSource === 'mailboxes') {
+        const session = openPstMailbox(rootPath, file.scopePath, file.fileName)
+        const reviewRecords = await reviewStore.listReviews(session.filePath)
+        documents = buildSearchIndexDocumentsFromSession(
           session,
           {
-            mailboxKey,
-            scopePath: scope.scopePath,
-            scopeLabel: scope.scopeLabel,
+            mailboxKey: session.filePath,
+            scopePath: file.scopePath,
+            scopeLabel: file.scopeLabel,
             fileName: file.fileName,
             mailboxName: session.mailboxName
           },
           reviewRecords
         )
-        await searchIndexStore.replaceMailboxDocuments(mailboxKey, documents)
-        mailboxCount += 1
-        messageCount += documents.length
-      } catch (error) {
-        warnOnce(scope.scopeLabel, file.fileName, error)
+      } else {
+        const reviewRecords = await reviewStore.listReviews(fingerprint.mailboxKey)
+        const archiveItems = await extractArchiveBundleItems(fingerprint.mailboxKey, file.scopePath, file.fileName)
+        documents = buildSearchIndexDocumentsFromArchiveItems(archiveItems, reviewRecords)
       }
+
+      await searchIndexStore.replaceMailboxDocuments(fingerprint.mailboxKey, documents)
+      changedMailboxKeys.push(fingerprint.mailboxKey)
+      nextFingerprints.push(fingerprint)
+      mailboxCount += 1
+      messageCount += documents.length
+    } catch (error) {
+      failedCount += 1
+      warnOnce(file.scopeLabel, file.fileName, error)
     }
   }
 
-  for (const scope of archiveCatalog.scopes) {
-    for (const file of scope.files) {
-      try {
-        const bundlePath = path.resolve(rootPath, scope.scopePath ? scope.scopePath : '', file.fileName)
-        const archiveItems = await extractArchiveBundleItems(bundlePath, scope.scopePath, file.fileName)
-        const documents = buildSearchIndexDocumentsFromArchiveItems(archiveItems)
-        await searchIndexStore.replaceMailboxDocuments(bundlePath, documents)
-        mailboxCount += 1
-        messageCount += documents.length
-      } catch (error) {
-        warnOnce(scope.scopeLabel, file.fileName, error)
-      }
+  for (const record of existingFingerprints.values()) {
+    if (!discoveredMailboxKeys.has(record.mailboxKey)) {
+      removedMailboxKeys.push(record.mailboxKey)
     }
+  }
+
+  if (options.pruneRemovedFiles !== false && removedMailboxKeys.length) {
+    for (const mailboxKey of removedMailboxKeys) {
+      await searchIndexStore.deleteMailboxDocuments(mailboxKey)
+    }
+  }
+
+  if (options.updateFingerprints !== false) {
+    await searchIndexStore.replaceFileFingerprints(normalizedSource, nextFingerprints)
   }
 
   return {
-    mailboxCount,
-    messageCount
+    source: normalizedSource,
+    mailboxCount: nextFingerprints.length,
+    messageCount,
+    changedCount: changedMailboxKeys.length,
+    skippedCount,
+    removedCount: removedMailboxKeys.length,
+    failedCount,
+    changedMailboxKeys,
+    removedMailboxKeys,
+    fingerprints: nextFingerprints
+  }
+}
+
+export async function refreshSearchIndexFromCatalog(
+  rootPath: string,
+  reviewStore: ReviewStore,
+  searchIndexStore: SearchIndexStore
+): Promise<{
+  mailboxCount: number
+  messageCount: number
+}> {
+  const mailboxSummary = await refreshSearchIndexSourceFromCatalog(
+    rootPath,
+    'mailboxes',
+    reviewStore,
+    searchIndexStore
+  )
+  const itemSummary = await refreshSearchIndexSourceFromCatalog(rootPath, 'items', reviewStore, searchIndexStore)
+  return {
+    mailboxCount: mailboxSummary.mailboxCount + itemSummary.mailboxCount,
+    messageCount: mailboxSummary.messageCount + itemSummary.messageCount
   }
 }

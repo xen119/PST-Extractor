@@ -1,9 +1,13 @@
-import { fork, type ChildProcess } from 'child_process'
+import { fork } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import { randomBytes } from 'crypto'
 import type { ReviewStore } from './reviewStore'
-import type { SearchIndexStore } from './searchIndex'
+import type {
+  SearchIndexRefreshPlan,
+  SearchIndexRefreshSource,
+  SearchIndexStore
+} from './searchIndex'
 
 export type SearchIndexRefreshTrigger = 'startup' | 'manual'
 export type SearchIndexRefreshState = 'idle' | 'running' | 'succeeded' | 'failed'
@@ -11,9 +15,14 @@ export type SearchIndexRefreshState = 'idle' | 'running' | 'succeeded' | 'failed
 export interface SearchIndexRefreshSummary {
   mailboxCount: number
   messageCount: number
+  changedCount: number
+  skippedCount: number
+  removedCount: number
+  failedCount: number
 }
 
 export interface SearchIndexRefreshStatus {
+  source: SearchIndexRefreshSource
   jobId: string | null
   status: SearchIndexRefreshState
   trigger: SearchIndexRefreshTrigger | null
@@ -25,8 +34,8 @@ export interface SearchIndexRefreshStatus {
 }
 
 export interface SearchIndexRefreshCoordinator {
-  start(trigger: SearchIndexRefreshTrigger): Promise<SearchIndexRefreshStatus>
-  getStatus(): SearchIndexRefreshStatus
+  start(source: SearchIndexRefreshSource, trigger: SearchIndexRefreshTrigger): Promise<SearchIndexRefreshStatus>
+  getStatus(source: SearchIndexRefreshSource): SearchIndexRefreshStatus
 }
 
 export interface SearchIndexRefreshCoordinatorOptions {
@@ -37,6 +46,7 @@ export interface SearchIndexRefreshCoordinatorOptions {
 }
 
 interface RefreshJobContext {
+  source: SearchIndexRefreshSource
   jobId: string
   trigger: SearchIndexRefreshTrigger
   startedAt: string
@@ -45,15 +55,15 @@ interface RefreshJobContext {
 
 interface WorkerMessage {
   type: 'success' | 'failure'
-  summary?: SearchIndexRefreshSummary
+  plan?: SearchIndexRefreshPlan
   error?: string
 }
 
 class SearchIndexRefreshInProgressError extends Error {
   statusCode = 409
 
-  constructor() {
-    super('Search index refresh already in progress')
+  constructor(source: SearchIndexRefreshSource) {
+    super(`Search index refresh already in progress for ${source}`)
   }
 }
 
@@ -61,12 +71,17 @@ function normalizeText(value: unknown): string {
   return String(value ?? '').trim()
 }
 
+function normalizeRefreshSource(value: unknown): SearchIndexRefreshSource {
+  return normalizeText(value).toLowerCase() === 'items' ? 'items' : 'mailboxes'
+}
+
 function nowIso(): string {
   return new Date().toISOString()
 }
 
-function buildInitialStatus(): SearchIndexRefreshStatus {
+function buildInitialStatus(source: SearchIndexRefreshSource): SearchIndexRefreshStatus {
   return {
+    source,
     jobId: null,
     status: 'idle',
     trigger: null,
@@ -95,13 +110,17 @@ function resolveWorkerScriptPath(): string {
   return candidates[candidates.length - 1]
 }
 
-function createStagingDocumentsCollectionName(jobId: string): string {
-  return `pst_search_documents_staging_${jobId}`
+function createStagingDocumentsCollectionName(source: SearchIndexRefreshSource, jobId: string): string {
+  return `pst_search_documents_staging_${source}_${jobId}`
 }
 
 function isMongoSearchIndexStore(store: SearchIndexStore): store is SearchIndexStore & {
   kind: 'mongo'
-  promoteStagedDocuments?: (stagingDocumentsCollectionName: string) => Promise<void>
+  promoteStagedDocuments?: (
+    stagingDocumentsCollectionName: string,
+    changedMailboxKeys?: string[],
+    removedMailboxKeys?: string[]
+  ) => Promise<void>
 } {
   return store.kind === 'mongo'
 }
@@ -110,14 +129,26 @@ function isPersistentReviewStore(store: ReviewStore): boolean {
   return store.isPersistent
 }
 
+function buildSummaryFromPlan(plan: SearchIndexRefreshPlan): SearchIndexRefreshSummary {
+  return {
+    mailboxCount: plan.mailboxCount,
+    messageCount: plan.messageCount,
+    changedCount: plan.changedCount,
+    skippedCount: plan.skippedCount,
+    removedCount: plan.removedCount,
+    failedCount: plan.failedCount
+  }
+}
+
 function createWorkerTransport(
   context: RefreshJobContext,
   options: SearchIndexRefreshCoordinatorOptions
-): Promise<SearchIndexRefreshSummary> {
+): Promise<SearchIndexRefreshPlan> {
   return new Promise((resolve, reject) => {
     const workerEnv: NodeJS.ProcessEnv = {
       ...process.env,
       PST_SEARCH_INDEX_REFRESH_JOB_ID: context.jobId,
+      PST_SEARCH_INDEX_REFRESH_SOURCE: context.source,
       PST_SEARCH_INDEX_REFRESH_TRIGGER: context.trigger,
       PST_SEARCH_INDEX_PST_ROOT_DIR: options.pstRootDir,
       PST_SEARCH_INDEX_STAGING_DOCUMENTS_COLLECTION: context.stagingDocumentsCollectionName
@@ -131,7 +162,7 @@ function createWorkerTransport(
 
     let settled = false
 
-    const finish = (error: Error | null, summary?: SearchIndexRefreshSummary) => {
+    const finish = (error: Error | null, plan?: SearchIndexRefreshPlan) => {
       if (settled) {
         return
       }
@@ -142,9 +173,17 @@ function createWorkerTransport(
         return
       }
       resolve(
-        summary || {
+        plan || {
+          source: context.source,
           mailboxCount: 0,
-          messageCount: 0
+          messageCount: 0,
+          changedCount: 0,
+          skippedCount: 0,
+          removedCount: 0,
+          failedCount: 0,
+          changedMailboxKeys: [],
+          removedMailboxKeys: [],
+          fingerprints: []
         }
       )
     }
@@ -154,7 +193,7 @@ function createWorkerTransport(
         return
       }
       if (message.type === 'success') {
-        finish(null, message.summary)
+        finish(null, message.plan)
         return
       }
       if (message.type === 'failure') {
@@ -188,54 +227,76 @@ function createWorkerTransport(
 export function createSearchIndexRefreshCoordinator(
   options: SearchIndexRefreshCoordinatorOptions
 ): SearchIndexRefreshCoordinator {
-  let status = buildInitialStatus()
-  let activeJob: Promise<void> | null = null
+  const statusBySource = new Map<SearchIndexRefreshSource, SearchIndexRefreshStatus>([
+    ['mailboxes', buildInitialStatus('mailboxes')],
+    ['items', buildInitialStatus('items')]
+  ])
+  const activeJobs = new Map<SearchIndexRefreshSource, Promise<void>>()
 
-  async function promoteStagedSnapshot(stagingDocumentsCollectionName: string): Promise<void> {
+  async function promoteStagedSnapshot(
+    stagingDocumentsCollectionName: string,
+    changedMailboxKeys: string[],
+    removedMailboxKeys: string[]
+  ): Promise<void> {
     if (!isMongoSearchIndexStore(options.searchIndexStore)) {
       return
     }
 
     if (typeof options.searchIndexStore.promoteStagedDocuments === 'function') {
-      await options.searchIndexStore.promoteStagedDocuments(stagingDocumentsCollectionName)
+      await options.searchIndexStore.promoteStagedDocuments(
+        stagingDocumentsCollectionName,
+        changedMailboxKeys,
+        removedMailboxKeys
+      )
     }
   }
 
-  async function runInProcessRefresh(context: RefreshJobContext): Promise<SearchIndexRefreshSummary> {
-    const { refreshSearchIndexFromCatalog } = await import('./searchIndex')
-    return refreshSearchIndexFromCatalog(options.pstRootDir, options.reviewStore, options.searchIndexStore)
+  async function runInProcessRefresh(context: RefreshJobContext): Promise<SearchIndexRefreshPlan> {
+    const { refreshSearchIndexSourceFromCatalog } = await import('./searchIndex')
+    return refreshSearchIndexSourceFromCatalog(
+      options.pstRootDir,
+      context.source,
+      options.reviewStore,
+      options.searchIndexStore,
+      {
+        pruneRemovedFiles: true,
+        updateFingerprints: true
+      }
+    )
   }
 
   async function executeJob(job: RefreshJobContext): Promise<void> {
-    const shouldUseWorker = isMongoSearchIndexStore(options.searchIndexStore) && isPersistentReviewStore(options.reviewStore)
+    const shouldUseWorker =
+      isMongoSearchIndexStore(options.searchIndexStore) && isPersistentReviewStore(options.reviewStore)
     const startedAt = job.startedAt
 
     try {
-      const summary = shouldUseWorker
-        ? await createWorkerTransport(job, options)
-        : await runInProcessRefresh(job)
+      const plan = shouldUseWorker ? await createWorkerTransport(job, options) : await runInProcessRefresh(job)
 
       if (shouldUseWorker) {
-        await promoteStagedSnapshot(job.stagingDocumentsCollectionName)
+        await promoteStagedSnapshot(job.stagingDocumentsCollectionName, plan.changedMailboxKeys, plan.removedMailboxKeys)
+        await options.searchIndexStore.replaceFileFingerprints(job.source, plan.fingerprints)
       }
 
-      status = {
+      statusBySource.set(job.source, {
+        source: job.source,
         jobId: job.jobId,
         status: 'succeeded',
         trigger: job.trigger,
         startedAt,
         completedAt: nowIso(),
         updatedAt: nowIso(),
-        summary,
+        summary: buildSummaryFromPlan(plan),
         error: null
-      }
+      })
       try {
-        options.onJobComplete?.({ ...status })
+        options.onJobComplete?.({ ...statusBySource.get(job.source)! })
       } catch {
         // Ignore audit callback failures.
       }
     } catch (error) {
-      status = {
+      statusBySource.set(job.source, {
+        source: job.source,
         jobId: job.jobId,
         status: 'failed',
         trigger: job.trigger,
@@ -244,31 +305,34 @@ export function createSearchIndexRefreshCoordinator(
         updatedAt: nowIso(),
         summary: null,
         error: error instanceof Error ? error.message : String(error)
-      }
+      })
       try {
-        options.onJobComplete?.({ ...status })
+        options.onJobComplete?.({ ...statusBySource.get(job.source)! })
       } catch {
         // Ignore audit callback failures.
       }
     } finally {
-      activeJob = null
+      activeJobs.delete(job.source)
     }
   }
 
   return {
-    start(trigger: SearchIndexRefreshTrigger): Promise<SearchIndexRefreshStatus> {
-      if (activeJob) {
-        throw new SearchIndexRefreshInProgressError()
+    start(source: SearchIndexRefreshSource, trigger: SearchIndexRefreshTrigger): Promise<SearchIndexRefreshStatus> {
+      const normalizedSource = normalizeRefreshSource(source)
+      if (activeJobs.has(normalizedSource)) {
+        throw new SearchIndexRefreshInProgressError(normalizedSource)
       }
 
       const job: RefreshJobContext = {
+        source: normalizedSource,
         jobId: randomBytes(8).toString('hex'),
         trigger,
         startedAt: nowIso(),
         stagingDocumentsCollectionName: ''
       }
-      job.stagingDocumentsCollectionName = createStagingDocumentsCollectionName(job.jobId)
-      status = {
+      job.stagingDocumentsCollectionName = createStagingDocumentsCollectionName(normalizedSource, job.jobId)
+      statusBySource.set(normalizedSource, {
+        source: normalizedSource,
         jobId: job.jobId,
         status: 'running',
         trigger,
@@ -277,14 +341,16 @@ export function createSearchIndexRefreshCoordinator(
         updatedAt: job.startedAt,
         summary: null,
         error: null
-      }
-      activeJob = executeJob(job)
+      })
+      const activeJob = executeJob(job)
+      activeJobs.set(normalizedSource, activeJob)
       void activeJob.catch(() => undefined)
-      return Promise.resolve({ ...status })
+      return Promise.resolve({ ...statusBySource.get(normalizedSource)! })
     },
 
-    getStatus(): SearchIndexRefreshStatus {
-      return { ...status }
+    getStatus(source: SearchIndexRefreshSource): SearchIndexRefreshStatus {
+      const normalizedSource = normalizeRefreshSource(source)
+      return { ...(statusBySource.get(normalizedSource) || buildInitialStatus(normalizedSource)) }
     }
   }
 }
