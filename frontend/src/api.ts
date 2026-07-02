@@ -168,6 +168,22 @@ export const api = {
       return query ? `/api/activity-log.csv?${query}` : '/api/activity-log.csv'
     }
   },
+  workspace: {
+    itemsCsvUrl: (params: Record<string, string | number | boolean | undefined>) => {
+      const query = buildQuery(params)
+      return query ? `/api/exports/items.csv?${query}` : '/api/exports/items.csv'
+    },
+    clearAllFlags: (params: Record<string, string | number | boolean | undefined>) =>
+      requestJson<{
+        clearedCount: number
+        itemCount: number
+        scopePath: string
+        scopeLabel: string
+      }>(
+        `/api/reviews/clear-flags${buildQuery(params) ? `?${buildQuery(params)}` : ''}`,
+        { method: 'POST' }
+      )
+  },
   pst: {
     catalog: (scopePath = '', removed = false) => {
       const query = buildQuery({ scopePath })

@@ -408,6 +408,8 @@ describe('auth shell', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: 'admin' }))
+    expect(await screen.findByRole('button', { name: 'Download items CSV' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Clear all flags' })).toBeInTheDocument()
     await user.click(await screen.findByRole('button', { name: 'Manage users' }))
 
     expect(await screen.findByRole('heading', { name: 'User management' })).toBeInTheDocument()

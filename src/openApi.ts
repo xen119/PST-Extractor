@@ -1160,6 +1160,90 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
           }
         }
       },
+      [openApiPath(API_ROUTES.loadedItemsCsv)]: {
+        get: {
+          tags: ['Review'],
+          summary: 'Export all indexed items permitted to the current user as CSV with review status',
+          parameters: [
+            {
+              name: 'workspaceMode',
+              in: 'query',
+              required: false,
+              schema: { type: 'string', enum: ['folder', 'search'] },
+              description:
+                'Accepted for backwards compatibility, but the export reads the full permitted index and ignores the current workspace selection.'
+            },
+            { name: 'sourceType', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'scope', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'scopePath', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'sessionId', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'folderId', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'query', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'mode', in: 'query', required: false, schema: { type: 'string', enum: ['and', 'or'] } },
+            { name: 'mailOnly', in: 'query', required: false, schema: { type: 'boolean' } },
+            { name: 'sort', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'reviewFlagged', in: 'query', required: false, schema: { type: 'boolean' } },
+            { name: 'reviewTagged', in: 'query', required: false, schema: { type: 'boolean' } },
+            { name: 'reviewTag', in: 'query', required: false, schema: { type: 'string' } }
+          ],
+          responses: {
+            200: {
+              description: 'CSV export',
+              content: {
+                'text/csv': {
+                  schema: { type: 'string' }
+                }
+              }
+            },
+            ...errorResponse(400, 'Invalid workspace selection'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Case access required')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.reviewClearFlags)]: {
+        post: {
+          tags: ['Review'],
+          summary: 'Clear all flagged items from the currently loaded workspace for the signed-in user',
+          parameters: [
+            {
+              name: 'workspaceMode',
+              in: 'query',
+              required: false,
+              schema: { type: 'string', enum: ['folder', 'search'] },
+              description: 'Clear flags from either the current mailbox folder or the current search results.'
+            },
+            { name: 'sourceType', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'scope', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'scopePath', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'sessionId', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'folderId', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'query', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'mode', in: 'query', required: false, schema: { type: 'string', enum: ['and', 'or'] } },
+            { name: 'mailOnly', in: 'query', required: false, schema: { type: 'boolean' } },
+            { name: 'sort', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'reviewFlagged', in: 'query', required: false, schema: { type: 'boolean' } },
+            { name: 'reviewTagged', in: 'query', required: false, schema: { type: 'boolean' } },
+            { name: 'reviewTag', in: 'query', required: false, schema: { type: 'string' } }
+          ],
+          responses: {
+            200: jsonResponse({
+              type: 'object',
+              additionalProperties: true,
+              required: ['clearedCount', 'itemCount', 'scopePath', 'scopeLabel'],
+              properties: {
+                clearedCount: { type: 'integer' },
+                itemCount: { type: 'integer' },
+                scopePath: { type: 'string' },
+                scopeLabel: { type: 'string' }
+              }
+            }),
+            ...errorResponse(400, 'Invalid workspace selection'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Case access required')
+          }
+        }
+      },
       [openApiPath(API_ROUTES.pstCatalog)]: {
         get: {
           tags: ['PST catalog'],

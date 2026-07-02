@@ -45,6 +45,7 @@ import {
   type HiddenRuleRecord,
   type SearchIndexDocument,
   type SearchIndexPage,
+  type SearchIndexSearchOptions,
   type SearchIndexStore,
   type SearchScope
 } from './searchIndex'
@@ -331,6 +332,7 @@ interface ReviewedFolderPage extends FolderMessagePage {
 
 interface SearchRequestQuery {
   scope?: string
+  sourceType?: string
   scopePath?: string
   sessionId?: string
   query?: string
@@ -342,6 +344,11 @@ interface SearchRequestQuery {
   reviewFlagged?: boolean
   reviewTagged?: boolean
   reviewTag?: string
+}
+
+interface WorkspaceItemsRequestQuery extends SearchRequestQuery {
+  workspaceMode?: 'folder' | 'search'
+  folderId?: string
 }
 
 interface FlaggedBundleQuery {
@@ -456,6 +463,32 @@ function normalizeOrigin(value: unknown): string {
   } catch {
     return text.toLowerCase()
   }
+}
+
+interface LoadedReviewableItem {
+  sourceType: SearchIndexDocument['sourceType']
+  mailboxKey: string
+  scopePath: string
+  scopeLabel: string
+  fileName: string
+  folderId: string
+  folderPath: string
+  messageId: string
+  descriptorId: string
+  messageClass: string
+  kind: ReviewRecord['kind']
+  isMailLike: boolean
+  subject: string
+  senderName: string
+  senderEmailAddress: string
+  displayTo: string
+  displayCC: string
+  displayBCC: string
+  resolvedDisplayTo: string
+  resolvedDisplayCC: string
+  resolvedDisplayBCC: string
+  sortDate: string
+  review: ReviewState
 }
 
 function normalizeRequestInfoField(value: unknown): string {
@@ -1821,6 +1854,409 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     return `activity-log-${safeSegment || 'user'}.csv`
   }
 
+  function buildLoadedItemsCsvFileName(): string {
+    return 'loaded-items.csv'
+  }
+
+  function buildLoadedItemsCsvHeader(): string {
+    return [
+      'sourceType',
+      'scopePath',
+      'scopeLabel',
+      'fileName',
+      'mailboxKey',
+      'folderPath',
+      'messageId',
+      'descriptorId',
+      'kind',
+      'subject',
+      'senderName',
+      'senderEmailAddress',
+      'sortDate',
+      'flagged',
+      'tags',
+      'reviewUpdatedAt'
+    ]
+      .map(csvCell)
+      .join(',')
+  }
+
+  function buildLoadedItemsCsvRow(item: LoadedReviewableItem): string {
+    return [
+      item.sourceType,
+      item.scopePath,
+      item.scopeLabel,
+      item.fileName,
+      item.mailboxKey,
+      item.folderPath,
+      item.messageId,
+      item.descriptorId,
+      item.kind,
+      item.subject,
+      item.senderName,
+      item.senderEmailAddress,
+      item.sortDate,
+      item.review.flagged,
+      item.review.tags.join('; '),
+      item.review.updatedAt
+    ]
+      .map(csvCell)
+      .join(',')
+  }
+
+  function buildLoadedReviewableItemFromSearchDocument(
+    item: SearchIndexDocument
+  ): LoadedReviewableItem {
+    return {
+      sourceType: item.sourceType,
+      mailboxKey: item.mailboxKey,
+      scopePath: item.scopePath,
+      scopeLabel: item.scopeLabel,
+      fileName: item.fileName,
+      folderId: item.folderId,
+      folderPath: item.folderPath,
+      messageId: item.messageId,
+      descriptorId: item.descriptorId,
+      messageClass: item.messageClass,
+      kind: item.kind,
+      isMailLike: item.isMailLike,
+      subject: item.subject,
+      senderName: item.senderName,
+      senderEmailAddress: item.senderEmailAddress,
+      displayTo: item.displayTo,
+      displayCC: item.displayCC,
+      displayBCC: item.displayBCC,
+      resolvedDisplayTo: item.resolvedDisplayTo,
+      resolvedDisplayCC: item.resolvedDisplayCC,
+      resolvedDisplayBCC: item.resolvedDisplayBCC,
+      sortDate: item.sortDate || '',
+      review: normalizeReviewState(item.review)
+    }
+  }
+
+  function buildLoadedReviewableItemFromFolderSummary(
+    session: SessionRecord,
+    item: ReviewedMessageSummary
+  ): LoadedReviewableItem {
+    return {
+      sourceType: 'mailbox',
+      mailboxKey: session.filePath,
+      scopePath: session.scopePath,
+      scopeLabel: session.scopeLabel || getScopeLabel(session.scopePath),
+      fileName: session.fileName,
+      folderId: item.folderId,
+      folderPath: item.folderPath,
+      messageId: item.id,
+      descriptorId: item.descriptorId,
+      messageClass: item.messageClass,
+      kind: item.kind,
+      isMailLike: item.isMailLike,
+      subject: item.subject,
+      senderName: item.senderName,
+      senderEmailAddress: item.senderEmailAddress,
+      displayTo: item.displayTo,
+      displayCC: item.displayCC,
+      displayBCC: item.displayBCC,
+      resolvedDisplayTo: item.resolvedDisplayTo,
+      resolvedDisplayCC: item.resolvedDisplayCC,
+      resolvedDisplayBCC: item.resolvedDisplayBCC,
+      sortDate: item.sortDate || '',
+      review: normalizeReviewState(item.review)
+    }
+  }
+
+  function buildReviewPatchInputFromLoadedItem(
+    item: LoadedReviewableItem,
+    reviewerUsername: string
+  ): Parameters<ReviewStore['upsertReview']>[0] {
+    return {
+      mailboxKey: item.mailboxKey,
+      reviewerUsername: normalizeText(reviewerUsername) || 'anonymous',
+      fileName: item.fileName,
+      messageId: item.messageId,
+      descriptorId: item.descriptorId,
+      folderId: item.folderId,
+      folderPath: item.folderPath,
+      messageClass: item.messageClass,
+      kind: item.kind,
+      isMailLike: item.isMailLike,
+      subject: item.subject,
+      senderName: item.senderName,
+      senderEmailAddress: item.senderEmailAddress,
+      displayTo: item.displayTo,
+      displayCC: item.displayCC,
+      displayBCC: item.displayBCC,
+      resolvedDisplayTo: item.resolvedDisplayTo,
+      resolvedDisplayCC: item.resolvedDisplayCC,
+      resolvedDisplayBCC: item.resolvedDisplayBCC
+    }
+  }
+
+  function buildLoadedItemsCsv(items: LoadedReviewableItem[]): string {
+    const lines = items.map((item) => buildLoadedItemsCsvRow(item))
+    return [buildLoadedItemsCsvHeader(), ...lines].join('\r\n')
+  }
+
+  function dedupeTextValues(values: string[]): string[] {
+    const seen = new Set<string>()
+    const deduped: string[] = []
+    for (const value of values) {
+      const normalized = normalizeText(value)
+      if (!normalized || seen.has(normalized)) {
+        continue
+      }
+      seen.add(normalized)
+      deduped.push(normalized)
+    }
+    return deduped
+  }
+
+  async function resolveCsvExportMailboxKeys(authSession: AuthSessionRecord | null): Promise<string[] | undefined> {
+    const allowAllCases = !authConfig.enabled || isAdminAuthSession(authSession, authConfig)
+    if (allowAllCases) {
+      return undefined
+    }
+
+    const currentUser = authSession ? await authUserStore.getUser(authSession.username) : null
+    const allowedCasePaths = getAccessibleCasePaths(currentUser)
+    const mailCatalog = listPstMailboxFiles(pstRootDir)
+    const archiveCatalog = listArchiveBundleFiles(pstRootDir)
+    const mailboxKeys = mailCatalog.scopes
+      .filter((scope) => isScopePathAllowed(scope.scopePath, allowedCasePaths, allowAllCases))
+      .flatMap((scope) => scope.files.map((file) => resolvePstMailboxPath(pstRootDir, scope.scopePath, file.fileName)))
+    const archiveMailboxKeys = archiveCatalog.scopes
+      .filter((scope) => isScopePathAllowed(scope.scopePath, allowedCasePaths, allowAllCases))
+      .flatMap((scope) =>
+        scope.files.map((file) => resolveArchiveBundlePath(pstRootDir, scope.scopePath, file.fileName))
+      )
+    return dedupeTextValues([...mailboxKeys, ...archiveMailboxKeys])
+  }
+
+  async function streamLoadedItemsCsv(
+    res: express.Response,
+    authSession: AuthSessionRecord | null
+  ): Promise<number> {
+    const reviewerUsername = getReviewOwnerUsername(authSession)
+    const allowedMailboxKeys = await resolveCsvExportMailboxKeys(authSession)
+    const pageSize = 1000
+    let page = 1
+    let totalPages = 1
+    let itemCount = 0
+
+    res.status(200)
+      .type('text/csv; charset=utf-8')
+      .set('Content-Disposition', `attachment; filename="${buildLoadedItemsCsvFileName()}"`)
+    res.write(`${buildLoadedItemsCsvHeader()}\r\n`)
+    res.flushHeaders?.()
+
+    while (page <= totalPages) {
+      const pageResult = await searchIndexStore.search({
+        scope: 'all',
+        scopePath: '',
+        mailboxKey: '',
+        allowedMailboxKeys,
+        reviewerUsername,
+        sourceType: 'all',
+        query: '',
+        mode: 'and',
+        mailOnly: false,
+        sort: 'date-desc',
+        reviewFlaggedOnly: false,
+        reviewTaggedOnly: false,
+        reviewTag: '',
+        page,
+        pageSize
+      })
+      totalPages = Math.max(1, pageResult.totalPages || 1)
+      for (const item of pageResult.items) {
+        itemCount += 1
+        res.write(`${buildLoadedItemsCsvRow(buildLoadedReviewableItemFromSearchDocument(item))}\r\n`)
+      }
+      if (pageResult.items.length < pageSize) {
+        break
+      }
+      page += 1
+    }
+
+    res.end()
+    return itemCount
+  }
+
+  async function collectAllSearchIndexDocuments(
+    options: Omit<SearchIndexSearchOptions, 'page' | 'pageSize'>,
+    pageSize = 500
+  ): Promise<SearchIndexDocument[]> {
+    const documents: SearchIndexDocument[] = []
+    let page = 1
+    let totalPages = 1
+
+    while (page <= totalPages) {
+      const result = await searchIndexStore.search({
+        ...options,
+        page,
+        pageSize
+      })
+      documents.push(...result.items)
+      totalPages = Math.max(1, result.totalPages || 1)
+      if (result.items.length < pageSize) {
+        break
+      }
+      page += 1
+    }
+
+    return documents
+  }
+
+  async function collectLoadedReviewableItems(
+    query: WorkspaceItemsRequestQuery,
+    authSession: AuthSessionRecord | null
+  ): Promise<{
+    scopePath: string
+    scopeLabel: string
+    sourceType: SearchIndexDocument['sourceType']
+    items: LoadedReviewableItem[]
+  }> {
+    const currentUser = authSession ? await authUserStore.getUser(authSession.username) : null
+    const allowAllCases = !authConfig.enabled || isAdminAuthSession(authSession, authConfig)
+    const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
+    const reviewerUsername = getReviewOwnerUsername(authSession)
+    const filters = parseReviewFilters(query as Record<string, string | string[] | undefined>)
+    const workspaceMode = normalizeText(query.workspaceMode).toLowerCase() === 'search' ? 'search' : 'folder'
+
+    if (workspaceMode === 'folder') {
+      const sessionId = normalizeText(query.sessionId)
+      const folderId = normalizeText(query.folderId)
+      if (!sessionId) {
+        throw createAppError(400, 'Session id is required for folder exports')
+      }
+      if (!folderId) {
+        throw createAppError(400, 'Folder id is required for folder exports')
+      }
+
+      const session = getSessionOrThrow(sessions, sessionId)
+      if (!isScopePathAllowed(session.scopePath, allowedCasePaths, allowAllCases)) {
+        throw createAppError(403, 'Case access required')
+      }
+
+      const hiddenRules = await searchIndexStore.listHiddenRules()
+      const page = await buildReviewedFolderPage(
+        session,
+        folderId,
+        {
+          query: filters.query,
+          mailOnly: filters.mailOnly,
+          sort: filters.sort,
+          page: 1,
+          pageSize: Number.MAX_SAFE_INTEGER,
+          reviewFlaggedOnly: filters.reviewFlaggedOnly,
+          reviewTaggedOnly: filters.reviewTaggedOnly,
+          reviewTag: filters.reviewTag,
+          mode: filters.mode
+        },
+        reviewStore,
+        hiddenRules,
+        reviewerUsername
+      )
+
+      return {
+        scopePath: session.scopePath,
+        scopeLabel: session.scopeLabel || getScopeLabel(session.scopePath),
+        sourceType: 'mailbox',
+        items: page.items.map((item) => buildLoadedReviewableItemFromFolderSummary(session, item))
+      }
+    }
+
+    const sourceType = parseSearchSourceType(query.sourceType)
+    const requestedScope = parseSearchScope(query.scope) as SearchScope
+    const requestedScopePath = normalizeScopePath(query.scopePath)
+    const sessionId = normalizeText(query.sessionId)
+    const scope = sourceType === 'mailbox' ? requestedScope : 'search'
+    let scopePath = ''
+    let scopeLabel = 'All cases/searches'
+    let mailboxKey = ''
+    let allowedMailboxKeys: string[] = []
+
+    if (sourceType === 'mailbox' && scope === 'pst') {
+      if (!sessionId) {
+        throw createAppError(400, 'Session id is required for selected PST search')
+      }
+      const session = getSessionOrThrow(sessions, sessionId)
+      if (!isScopePathAllowed(session.scopePath, allowedCasePaths, allowAllCases)) {
+        throw createAppError(403, 'Case access required')
+      }
+      scopePath = session.scopePath
+      scopeLabel = session.scopeLabel || getScopeLabel(scopePath)
+      mailboxKey = session.filePath
+      allowedMailboxKeys = [mailboxKey]
+    } else if (sourceType === 'mailbox' && scope === 'search') {
+      const catalog = resolveAccessibleCatalogSelection(
+        pstRootDir,
+        requestedScopePath,
+        allowedCasePaths,
+        listPstMailboxFiles,
+        allowAllCases
+      )
+      scopePath = catalog.scopePath
+      scopeLabel = catalog.scopeLabel
+      const selectedCatalog = scopePath
+        ? resolveAccessibleCatalogSelection(
+            pstRootDir,
+            scopePath,
+            allowedCasePaths,
+            listPstMailboxFiles,
+            allowAllCases
+          )
+        : resolveAccessibleCatalogSelection(pstRootDir, '', allowedCasePaths, listPstMailboxFiles, allowAllCases)
+      allowedMailboxKeys = selectedCatalog.files.map((file) =>
+        resolvePstMailboxPath(pstRootDir, selectedCatalog.scopePath, file.fileName)
+      )
+    } else if (sourceType === 'mailbox' && scope === 'all') {
+      const activeCatalog = resolveAccessibleCatalogSelection(
+        pstRootDir,
+        '',
+        allowedCasePaths,
+        listPstMailboxFiles,
+        allowAllCases
+      )
+      allowedMailboxKeys = activeCatalog.scopes.flatMap((entry) =>
+        entry.files.map((file) => resolvePstMailboxPath(pstRootDir, entry.scopePath, file.fileName))
+      )
+    } else {
+      const archiveCatalog = resolveAccessibleArchiveCatalogSelection(
+        pstRootDir,
+        requestedScopePath,
+        allowedCasePaths,
+        allowAllCases
+      )
+      scopePath = archiveCatalog.scopePath
+      scopeLabel = archiveCatalog.scopeLabel
+      allowedMailboxKeys = buildArchiveMailboxKeys(pstRootDir, archiveCatalog)
+    }
+
+    const documents = await collectAllSearchIndexDocuments({
+      scope,
+      scopePath,
+      mailboxKey,
+      allowedMailboxKeys,
+      reviewerUsername,
+      sourceType,
+      query: filters.query,
+      mode: filters.mode,
+      mailOnly: filters.mailOnly,
+      sort: filters.sort,
+      reviewFlaggedOnly: filters.reviewFlaggedOnly,
+      reviewTaggedOnly: filters.reviewTaggedOnly,
+      reviewTag: filters.reviewTag
+    })
+
+    return {
+      scopePath,
+      scopeLabel,
+      sourceType: sourceType === 'all' ? 'mailbox' : sourceType,
+      items: documents.map((item) => buildLoadedReviewableItemFromSearchDocument(item))
+    }
+  }
+
   const searchIndexRefreshCoordinator =
     options.searchIndexRefreshCoordinator ||
     createSearchIndexRefreshCoordinator({
@@ -2441,6 +2877,10 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         )
       )
     } catch (error) {
+      if (res.headersSent) {
+        res.destroy()
+        return
+      }
       createRouteErrorHandler(res, error)
     }
   })
@@ -4628,6 +5068,101 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         sessionId: '',
         messageId: item.messageId,
         review: normalizeReviewState(null)
+      })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.loadedItemsCsv, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      const itemCount = await streamLoadedItemsCsv(res, authSession)
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'items.export.csv',
+        target: 'Indexed items',
+        outcome: 'success',
+        metadata: {
+          scopePath: '',
+          sourceType: 'all',
+          itemCount
+        }
+      })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.post(API_ROUTES.reviewClearFlags, async (req, res) => {
+    try {
+      const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      const reviewerUsername = getReviewOwnerUsername(authSession)
+      const loadedItems = await collectLoadedReviewableItems(
+        req.query as WorkspaceItemsRequestQuery,
+        authSession
+      )
+      let clearedCount = 0
+
+      for (const item of loadedItems.items) {
+        if (!item.review.flagged) {
+          continue
+        }
+
+        clearedCount += 1
+        const reviewContext = buildReviewPatchInputFromLoadedItem(item, reviewerUsername)
+        if (item.review.tags.length) {
+          const review = await reviewStore.upsertReview({
+            ...reviewContext,
+            flagged: false,
+            tags: [...item.review.tags]
+          })
+          await searchIndexStore.updateReviewState(item.mailboxKey, item.messageId, reviewerUsername, review)
+        } else {
+          await reviewStore.deleteReview(item.mailboxKey, item.messageId, reviewerUsername)
+          await searchIndexStore.updateReviewState(item.mailboxKey, item.messageId, reviewerUsername, null)
+        }
+      }
+
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'review.clear.flags',
+        target: loadedItems.scopeLabel,
+        outcome: 'success',
+        metadata: {
+          workspaceMode:
+            normalizeText((req.query as WorkspaceItemsRequestQuery).workspaceMode).toLowerCase() === 'search'
+              ? 'search'
+              : 'folder',
+          scopePath: loadedItems.scopePath,
+          sourceType: loadedItems.sourceType,
+          itemCount: loadedItems.items.length,
+          clearedCount
+        }
+      })
+
+      responseJson(res, 200, {
+        clearedCount,
+        itemCount: loadedItems.items.length,
+        scopePath: loadedItems.scopePath,
+        scopeLabel: loadedItems.scopeLabel
       })
     } catch (error) {
       createRouteErrorHandler(res, error)

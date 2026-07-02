@@ -377,6 +377,9 @@ export function App() {
   const [activityMessage, setActivityMessage] = React.useState('')
   const [activityEntries, setActivityEntries] = React.useState<ActivityLogEntry[]>([])
   const [activityFilterUser, setActivityFilterUser] = React.useState('')
+  const [clearFlagsDialogOpen, setClearFlagsDialogOpen] = React.useState(false)
+  const [clearFlagsLoading, setClearFlagsLoading] = React.useState(false)
+  const [clearFlagsError, setClearFlagsError] = React.useState('')
   const [searchIndexRefreshStatus, setSearchIndexRefreshStatus] =
     React.useState<SearchIndexRefreshStatus | null>(null)
   const [searchIndexRefreshActionBusy, setSearchIndexRefreshActionBusy] = React.useState(false)
@@ -1899,6 +1902,56 @@ export function App() {
     await loadSearchPage(1)
   }
 
+  function getWorkspaceItemsRequestParams(): Record<string, string | number | boolean | undefined> {
+    const effectiveSearchScope =
+      sourceType === 'mailbox'
+        ? searchScope === 'pst' && !sessionId
+          ? 'all'
+          : searchScope
+        : 'search'
+
+    return {
+      workspaceMode,
+      scope: effectiveSearchScope,
+      sourceType,
+      query: searchQuery,
+      mode: deriveSearchMode(searchQuery, 'and'),
+      mailOnly,
+      sort,
+      reviewFlagged: reviewFlaggedOnly,
+      reviewTagged: reviewTaggedOnly,
+      scopePath: selectedScopePath || selectedCasePath,
+      sessionId:
+        workspaceMode === 'folder'
+          ? sessionId || undefined
+          : sourceType === 'mailbox' && effectiveSearchScope === 'pst' && sessionId
+            ? sessionId
+            : undefined,
+      folderId: workspaceMode === 'folder' ? currentFolderId : undefined
+    }
+  }
+
+  async function downloadWorkspaceItemsCsv(): Promise<void> {
+    triggerDownload(api.workspace.itemsCsvUrl(getWorkspaceItemsRequestParams()), 'loaded-items.csv')
+  }
+
+  async function clearAllFlags(): Promise<void> {
+    if (clearFlagsLoading) {
+      return
+    }
+    setClearFlagsLoading(true)
+    setClearFlagsError('')
+    try {
+      await api.workspace.clearAllFlags(getWorkspaceItemsRequestParams())
+      setClearFlagsDialogOpen(false)
+      await refreshCurrentPage()
+    } catch (error) {
+      setClearFlagsError(error instanceof Error ? error.message : 'Unable to clear flags')
+    } finally {
+      setClearFlagsLoading(false)
+    }
+  }
+
   async function setMfaReminderSkipped(): Promise<void> {
     if (username && !mfaEnforced) {
       writeReminderDismissed(username, true)
@@ -1922,6 +1975,28 @@ export function App() {
           </Button>
         </PopoverClose>
       ) : null}
+      <PopoverClose asChild>
+        <Button
+          variant="ghost"
+          className="w-full justify-start gap-3"
+          onClick={() => {
+            void downloadWorkspaceItemsCsv()
+          }}
+        >
+          <Download className="h-4 w-4" />
+          Download items CSV
+        </Button>
+      </PopoverClose>
+      <PopoverClose asChild>
+        <Button
+          variant="danger"
+          className="w-full justify-start gap-3"
+          onClick={() => setClearFlagsDialogOpen(true)}
+        >
+          <RotateCcw className="h-4 w-4" />
+          Clear all flags
+        </Button>
+      </PopoverClose>
       {canManageUsers ? (
         <>
           <PopoverClose asChild>
@@ -2412,6 +2487,42 @@ export function App() {
           triggerDownload(api.activityLog.csvUrl(activityFilterUser), 'activity-log.csv')
         }}
       />
+
+      <Dialog open={clearFlagsDialogOpen} onOpenChange={setClearFlagsDialogOpen}>
+        <DialogContent className="w-[min(92vw,520px)]" showCloseButton={!clearFlagsLoading}>
+          <div className="flex flex-col gap-5 p-6">
+            <div>
+              <div className="text-xs font-semibold tracking-[0.18em] text-[color:var(--muted)] uppercase">
+                Workspace
+              </div>
+              <DialogTitle className="mt-1 text-2xl">Clear all flags</DialogTitle>
+              <DialogDescription>
+                This clears your flagged state for the items currently loaded in the workspace.
+                Tags are left unchanged.
+              </DialogDescription>
+            </div>
+
+            {clearFlagsError ? (
+              <div className="rounded-2xl border border-[color:rgba(220,38,38,0.22)] bg-[color:rgba(220,38,38,0.08)] px-4 py-3 text-sm text-[color:var(--danger)]">
+                {clearFlagsError}
+              </div>
+            ) : null}
+
+            <div className="flex items-center justify-end gap-3">
+              <Button
+                variant="ghost"
+                onClick={() => setClearFlagsDialogOpen(false)}
+                disabled={clearFlagsLoading}
+              >
+                Cancel
+              </Button>
+              <Button variant="danger" onClick={() => void clearAllFlags()} disabled={clearFlagsLoading}>
+                {clearFlagsLoading ? 'Clearing...' : 'Clear flags'}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </>
   ) : null
 

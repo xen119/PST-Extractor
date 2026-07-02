@@ -18,6 +18,8 @@ export const API_ROUTES = {
   smtpSettingsTest: '/api/settings/smtp/test',
   activityLog: '/api/activity-log',
   activityLogCsv: '/api/activity-log.csv',
+  loadedItemsCsv: '/api/exports/items.csv',
+  reviewClearFlags: '/api/reviews/clear-flags',
   pstCatalog: '/api/psts',
   pstRemovedCatalog: '/api/psts/removed',
   pstOpen: '/api/psts/open',

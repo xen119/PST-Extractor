@@ -1202,6 +1202,7 @@ describe('pst review api', () => {
     rootDir = makeTempDir('pst-review-api-archive-bundle-')
     const pstDir = path.join(rootDir, 'PST')
     fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
+    stageFixture(enronPath, path.join(pstDir, 'Case1', 'Search1', 'mailbox.pst'))
     stageArchiveBundle(path.join(pstDir, 'Case1', 'Search1', 'Items.1.001.BONUS_AND_COMMISSION_DECISION_MAKING.zip'), [
       ['Exchange/Thread/TeamsMessagesData/chat.json', JSON.stringify({ subject: 'Launch', body: 'Teams chat' })],
       ['SharePoint/Docs/report.txt', 'Quarterly report'],
@@ -1319,6 +1320,20 @@ describe('pst review api', () => {
     expect([...entries.keys()].some((name) => name.endsWith('report.txt'))).toBe(true)
     expect([...entries.keys()].some((name) => name.endsWith('.eml'))).toBe(false)
     expect([...entries.keys()].some((name) => name.endsWith('.ics'))).toBe(false)
+
+    const { response: csvResponse, buffer: csvBuffer } = await requestBuffer(
+      `${started.baseUrl}/api/exports/items.csv`
+    )
+    expect(csvResponse.headers.get('content-type')).toContain('text/csv')
+    const csvLines = csvBuffer
+      .toString('utf8')
+      .split(/\r?\n/g)
+      .map((line) => line.trim())
+      .filter(Boolean)
+    expect(csvLines[0]).toContain('sourceType')
+    expect(csvLines.some((line) => line.startsWith('"mailbox",'))).toBe(true)
+    expect(csvLines.some((line) => line.startsWith('"teams",'))).toBe(true)
+    expect(csvLines.some((line) => line.startsWith('"sharepoint",'))).toBe(true)
   })
 
   it('does not leak archive search results across case/search scopes', async () => {
@@ -1577,6 +1592,107 @@ describe('pst review api', () => {
     expect(bobManifest.counts.total).toBe(1)
     expect(bobManifest.items).toHaveLength(1)
     expect(bobManifest.items[0].review.tags).toEqual(['Bob'])
+
+    const adminItemsCsvBeforeClear = await requestBuffer(
+      `${started.baseUrl}/api/exports/items.csv`,
+      {
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    const adminItemsCsvBeforeClearText = adminItemsCsvBeforeClear.buffer.toString('utf8')
+    const adminMailRowBeforeClear = adminItemsCsvBeforeClearText
+      .split(/\r?\n/g)
+      .find((line) => line.includes(`"${mailItem.id}"`))
+    expect(adminItemsCsvBeforeClearText.split(/\r?\n/g)[0]).toContain('flagged')
+    if (!adminMailRowBeforeClear) {
+      throw new Error('Expected mail row in items CSV before clearing flags')
+    }
+    expect(adminMailRowBeforeClear).toContain(',"true",')
+
+    const clearFlags = await requestJson(
+      `${started.baseUrl}/api/reviews/clear-flags?workspaceMode=folder&sessionId=${opened.sessionId}&folderId=${encodeURIComponent(
+        mailFolder!.id
+      )}`,
+      {
+        method: 'POST',
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    expect(clearFlags.clearedCount).toBeGreaterThan(0)
+
+    const adminFolderAfterClear = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/folders/${encodeURIComponent(
+        mailFolder!.id
+      )}/messages?page=1&pageSize=20`,
+      {
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    const adminFolderItemAfterClear = adminFolderAfterClear.page.items.find(
+      (item: { id: string }) => item.id === mailItem.id
+    )
+    if (!adminFolderItemAfterClear) {
+      throw new Error('Expected mail item in admin folder after clearing flags')
+    }
+    expect(adminFolderItemAfterClear.review.flagged).toBe(false)
+
+    const bobFolderAfterClear = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/folders/${encodeURIComponent(
+        mailFolder!.id
+      )}/messages?page=1&pageSize=20`,
+      {
+        headers: {
+          Cookie: bobCookie
+        }
+      }
+    )
+    const bobFolderItemAfterClear = bobFolderAfterClear.page.items.find(
+      (item: { id: string }) => item.id === mailItem.id
+    )
+    if (!bobFolderItemAfterClear) {
+      throw new Error('Expected mail item in bob folder after clearing flags')
+    }
+    expect(bobFolderItemAfterClear.review.flagged).toBe(true)
+
+    const adminItemsCsvAfterClear = await requestBuffer(
+      `${started.baseUrl}/api/exports/items.csv`,
+      {
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    const adminItemsCsvAfterClearText = adminItemsCsvAfterClear.buffer.toString('utf8')
+    const adminMailRowAfterClear = adminItemsCsvAfterClearText
+      .split(/\r?\n/g)
+      .find((line) => line.includes(`"${mailItem.id}"`))
+    if (!adminMailRowAfterClear) {
+      throw new Error('Expected mail row in items CSV after clearing flags')
+    }
+    expect(adminMailRowAfterClear).toContain(',"false",')
+
+    const bobItemsCsvAfterClear = await requestBuffer(
+      `${started.baseUrl}/api/exports/items.csv`,
+      {
+        headers: {
+          Cookie: bobCookie
+        }
+      }
+    )
+    const bobItemsCsvAfterClearText = bobItemsCsvAfterClear.buffer.toString('utf8')
+    const bobMailRowAfterClear = bobItemsCsvAfterClearText
+      .split(/\r?\n/g)
+      .find((line) => line.includes(`"${mailItem.id}"`))
+    if (!bobMailRowAfterClear) {
+      throw new Error('Expected mail row in items CSV for bob after clearing flags')
+    }
+    expect(bobMailRowAfterClear).toContain(',"true",')
 
     const auditEntries = readAuditLogEntries(started.auditLogPath)
     expect(auditEntries).toEqual(
