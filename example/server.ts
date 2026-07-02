@@ -9,7 +9,6 @@ import { createPstReviewApp, type ApiSecurityConfig, type AppAuthConfig } from '
 import { createReviewStoreFromEnv } from '../src/reviewStore'
 import { createSearchIndexStoreFromEnv } from '../src/searchIndex'
 import { resolvePstRootDirectory } from '../src/pstCatalog'
-import type { SearchIndexRefreshCoordinator } from '../src/searchIndexRefresh'
 
 interface PackageJson {
   version: string
@@ -57,15 +56,6 @@ function getFallbackRequestInfo(req: any) {
   }
 }
 
-function loadOptionalModule<T>(modulePath: string, fallback: T, label: string): T {
-  try {
-    return require(modulePath) as T
-  } catch (error) {
-    console.warn(`Unable to load ${label} from ${modulePath}:`, error)
-    return fallback
-  }
-}
-
 loadEnvFile(path.join(__dirname, '.env'))
 loadEnvFile(path.join(__dirname, '..', '.env'))
 
@@ -73,25 +63,17 @@ const host = process.env.HOST || '127.0.0.1'
 const port = Number(process.env.PORT || 3030)
 const auditLogDir = path.join(__dirname, 'logs')
 const pstRootDir = resolvePstRootDirectory(process.env.PST_ROOT_DIR, __dirname)
-const webChecks = loadOptionalModule(
-  'C:\\Coding\\NodeFunctions\\httpSecurity.js',
-  {
-    getRequestInfo: getFallbackRequestInfo
-  },
-  'webChecks'
-)
-const m365Auth = loadOptionalModule(
-  'C:\\Coding\\NodeFunctions\\m365-auth.js',
-  {
-    CheckTokens: async (_req: any, res: any) => {
-      return res.status(500).json({
-        success: false,
-        message: 'M365 auth middleware is not available on this host.'
-      })
-    }
-  },
-  'm365Auth'
-)
+const webChecks = {
+  getRequestInfo: getFallbackRequestInfo
+}
+const m365Auth = {
+  CheckTokens: async (_req: any, res: any) => {
+    return res.status(500).json({
+      success: false,
+      message: 'M365 auth middleware is not available on this host.'
+    })
+  }
+}
 
 const apiSecurity: ApiSecurityConfig = {
   webChecks,
@@ -208,18 +190,6 @@ async function main(): Promise<void> {
   server = app.listen(port, host, () => {
     console.log(`PST Mail Explorer running at http://${host}:${port}`)
   })
-
-  const searchIndexRefreshCoordinator = app.get(
-    'searchIndexRefreshCoordinator'
-  ) as SearchIndexRefreshCoordinator | undefined
-  if (searchIndexRefreshCoordinator) {
-    void searchIndexRefreshCoordinator.start('mailboxes', 'startup').catch((error) => {
-      console.error('Unable to start mailbox search index refresh:', error)
-    })
-    void searchIndexRefreshCoordinator.start('items', 'startup').catch((error) => {
-      console.error('Unable to start items search index refresh:', error)
-    })
-  }
 
   process.once('SIGINT', () => {
     void shutdown(0)
