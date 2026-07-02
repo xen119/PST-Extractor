@@ -62,6 +62,7 @@ import type {
   MfaEnrollmentStartResponse,
   PageResponse,
   PstCatalogResponse,
+  SearchSourceType,
   SessionOpenResponse,
   SmtpSettings,
   SmtpSettingsResponse,
@@ -73,6 +74,7 @@ import { useUiStore } from '@/store/ui'
 
 type WorkspaceMode = 'folder' | 'search'
 type SearchScope = 'pst' | 'search' | 'all'
+type CorpusSourceType = SearchSourceType
 type OpenMailboxOptions = {
   preserveWorkspaceMode?: boolean
   selectedMessageId?: string
@@ -98,6 +100,8 @@ const DEFAULT_SMTP_FORM: SmtpFormState = {
   fromAddress: '',
   replyTo: ''
 }
+
+const SEARCH_INDEX_REFRESH_POLL_INTERVAL_MS = 2000
 
 function getInviteToken(pathname = window.location.pathname): string | null {
   const match = pathname.match(/^\/invite\/([^/?#]+)/i)
@@ -270,6 +274,9 @@ function isSameMailboxContext(
   currentFileName: string,
   currentScopePath: string
 ): boolean {
+  if (message.sourceType && message.sourceType !== 'mailbox') {
+    return false
+  }
   const nextFileName = normalizeText(message.fileName || '')
   const nextScopePath = normalizeText(message.scopePath || '')
   const normalizedCurrentFileName = normalizeText(currentFileName)
@@ -334,7 +341,8 @@ export function App() {
   const [messageLoading, setMessageLoading] = React.useState(false)
   const [workspaceMode, setWorkspaceMode] = React.useState<WorkspaceMode>('folder')
   const [searchQuery, setSearchQuery] = React.useState('')
-  const [searchScope, setSearchScope] = React.useState<SearchScope>('pst')
+  const [searchScope, setSearchScope] = React.useState<SearchScope>('all')
+  const [sourceType, setSourceType] = React.useState<CorpusSourceType>('mailbox')
   const [mailOnly, setMailOnly] = React.useState(false)
   const [sort, setSort] = React.useState('date-desc')
   const [reviewFlaggedOnly, setReviewFlaggedOnly] = React.useState(false)
@@ -376,6 +384,9 @@ export function App() {
   const [tagsDialogOpen, setTagsDialogOpen] = React.useState(false)
   const [fullViewOpen, setFullViewOpen] = React.useState(false)
   const refreshCurrentPageRef = React.useRef<() => Promise<void>>(async () => undefined)
+  const searchIndexRefreshPollTimeoutRef = React.useRef<number | null>(null)
+  const searchIndexRefreshPollInFlightRef = React.useRef(false)
+  const searchIndexRefreshPollJobIdRef = React.useRef<string | null>(null)
 
   const catalogLoadKeyRef = React.useRef('')
 
@@ -387,6 +398,10 @@ export function App() {
   const mfaEnforced = Boolean(authStatus?.mfaEnforced)
   const assignedCasePathsKey = (authStatus?.user?.assignedCasePaths || []).join('|')
   const searchIndexRefreshRunning = searchIndexRefreshStatus?.status === 'running'
+  const selectedPageItem = React.useMemo(
+    () => currentPage?.items?.find((item) => item.id === selectedMessageId) || null,
+    [currentPage, selectedMessageId]
+  )
   const showReminder =
     authenticated &&
     !mfaEnabled &&
@@ -520,6 +535,10 @@ export function App() {
     setSearchQuery(readWorkspaceStorageItem('query', true, username, ''))
     const rememberedSearchScope = (readWorkspaceStorageItem('searchScope', true, username, 'all') as SearchScope) || 'all'
     setSearchScope(rememberedSearchScope === 'pst' ? 'all' : rememberedSearchScope)
+    const rememberedSourceType = readWorkspaceStorageItem('sourceType', true, username, 'mailbox') as CorpusSourceType
+    setSourceType(
+      rememberedSourceType === 'teams' || rememberedSourceType === 'sharepoint' ? rememberedSourceType : 'mailbox'
+    )
     setMailOnly(readWorkspaceStorageBool('mailOnly', true, username, false))
     setSort(readWorkspaceStorageItem('sort', true, username, 'date-desc'))
     setReviewFlaggedOnly(readWorkspaceStorageBool('reviewFlaggedOnly', true, username, false))
@@ -575,6 +594,7 @@ export function App() {
     writeWorkspaceStorageItem('sort', true, username, sort)
     writeWorkspaceStorageItem('reviewFlaggedOnly', true, username, reviewFlaggedOnly)
     writeWorkspaceStorageItem('reviewTaggedOnly', true, username, reviewTaggedOnly)
+    writeWorkspaceStorageItem('sourceType', true, username, sourceType)
     writeWorkspaceStorageItem('hiddenFiltersOpen', true, username, hiddenFiltersOpen)
     writeWorkspaceStorageItem('activityFilterUser', true, username, activityFilterUser)
   }, [
@@ -587,6 +607,7 @@ export function App() {
     reviewTaggedOnly,
     searchQuery,
     searchScope,
+    sourceType,
     selectedCasePath,
     selectedMessageId,
     selectedPstFileName,
@@ -660,7 +681,7 @@ export function App() {
   }, [assignedCasePathsKey, authenticated, selectedCasePath, selectedScopePath, username])
 
   React.useEffect(() => {
-    if (!workspaceReady || !authenticated || !catalog?.scopes?.length || !activeCatalogScope) {
+    if (!workspaceReady || !authenticated || sourceType !== 'mailbox' || !catalog?.scopes?.length || !activeCatalogScope) {
       return
     }
 
@@ -682,12 +703,26 @@ export function App() {
     activeCatalogScope,
     authenticated,
     catalog,
+    sourceType,
     selectedCasePath,
     selectedPstFileName,
     selectedScopePath,
     username,
     workspaceReady
   ])
+
+  React.useEffect(() => {
+    if (!workspaceReady || !authenticated) {
+      return
+    }
+    if (sourceType !== 'mailbox') {
+      setWorkspaceMode('search')
+      setSearchScope((current) => (current === 'pst' ? 'search' : current))
+      setSelectedMessage(null)
+      setSelectedMessageId('')
+      setPageIndex(1)
+    }
+  }, [authenticated, sourceType, workspaceReady])
 
   React.useEffect(() => {
     const activeSessionId = sessionId
@@ -705,7 +740,15 @@ export function App() {
         const queryParams =
           workspaceMode === 'search'
             ? {
-                scope: searchScope === 'pst' && !activeSessionId ? 'all' : searchScope,
+                scope:
+                  sourceType === 'mailbox'
+                    ? searchScope === 'pst' && !activeSessionId
+                      ? 'all'
+                      : searchScope
+                    : searchScope === 'pst'
+                      ? 'search'
+                      : searchScope,
+                sourceType,
                 query: searchQuery,
                 mode: deriveSearchMode(searchQuery, 'and'),
                 page: pageIndex,
@@ -715,7 +758,7 @@ export function App() {
                 reviewFlagged: reviewFlaggedOnly,
                 reviewTagged: reviewTaggedOnly,
                 scopePath: selectedScopePath || selectedCasePath,
-                sessionId: searchScope === 'pst' && activeSessionId ? sessionToken : undefined
+                sessionId: sourceType === 'mailbox' && searchScope === 'pst' && activeSessionId ? sessionToken : undefined
               }
             : null
 
@@ -785,15 +828,23 @@ export function App() {
     selectedScopePath,
     sessionId,
     sort,
+    sourceType,
     username,
     workspaceMode,
     workspaceReady
   ])
 
   React.useEffect(() => {
-    const activeSessionId = sessionId
     const activeMessageId = selectedMessageId
-    if (!workspaceReady || !activeSessionId || !activeMessageId) {
+    if (!workspaceReady || !activeMessageId) {
+      setSelectedMessage(null)
+      return
+    }
+    if (selectedPageItem?.sourceType && selectedPageItem.sourceType !== 'mailbox') {
+      return
+    }
+    const activeSessionId = sessionId
+    if (!activeSessionId) {
       setSelectedMessage(null)
       return
     }
@@ -826,7 +877,7 @@ export function App() {
     return () => {
       cancelled = true
     }
-  }, [selectedMessageId, sessionId, workspaceReady])
+  }, [selectedMessageId, selectedPageItem?.sourceType, sessionId, workspaceReady])
 
   React.useEffect(() => {
     if (!workspaceReady || !selectedMessage) {
@@ -992,7 +1043,8 @@ export function App() {
       setSelectedMessage(null)
       setWorkspaceMode('folder')
       setSearchQuery('')
-      setSearchScope('pst')
+      setSearchScope('all')
+      setSourceType('mailbox')
       setMailOnly(false)
       setSort('date-desc')
       setReviewFlaggedOnly(false)
@@ -1450,12 +1502,18 @@ export function App() {
     setMessagesLoading(true)
     try {
       setPageIndex(nextPage)
-      const effectiveSearchScope = searchScope === 'pst' && !sessionId ? 'all' : searchScope
+      const effectiveSearchScope =
+        sourceType === 'mailbox'
+          ? searchScope === 'pst' && !sessionId
+            ? 'all'
+            : searchScope
+          : 'search'
       if (effectiveSearchScope !== searchScope) {
         setSearchScope(effectiveSearchScope)
       }
       const response = await api.search({
         scope: effectiveSearchScope,
+        sourceType,
         query: searchQuery,
         mode: deriveSearchMode(searchQuery, 'and'),
         page: nextPage,
@@ -1465,7 +1523,7 @@ export function App() {
         reviewFlagged: reviewFlaggedOnly,
         reviewTagged: reviewTaggedOnly,
         scopePath: selectedScopePath || selectedCasePath,
-        sessionId: effectiveSearchScope === 'pst' && sessionId ? sessionId : undefined
+        sessionId: sourceType === 'mailbox' && effectiveSearchScope === 'pst' && sessionId ? sessionId : undefined
       })
       setCurrentPage(normalizeSearchResultsPage(response.page))
       setWorkspaceMode('search')
@@ -1527,6 +1585,21 @@ export function App() {
   }
 
   async function openMessageSummary(message: MessageSummary): Promise<void> {
+    if (message.sourceType && message.sourceType !== 'mailbox') {
+      try {
+        setMessageLoading(true)
+        const response = await api.item.detail(message.id)
+        setSelectedMessage(response.detail)
+        setSelectedMessageId(message.id)
+        setWorkspaceMode('search')
+      } catch (error) {
+        setAuthError(error instanceof Error ? error.message : 'Unable to load item detail')
+      } finally {
+        setMessageLoading(false)
+      }
+      return
+    }
+
     const currentFileName = selectedPstFileName || sessionSummary?.fileName || ''
     const currentScopePath = selectedScopePath || selectedCasePath
 
@@ -1580,7 +1653,17 @@ export function App() {
   }
 
   async function toggleFlag(): Promise<void> {
-    if (!sessionId || !selectedMessageId) {
+    if (!selectedMessageId) {
+      return
+    }
+    if (selectedMessage?.archivePath || !sessionId) {
+      await api.item.updateReview(selectedMessageId, {
+        flagged: !(selectedMessage?.review?.flagged ?? false),
+        tags: selectedMessage?.review?.tags || []
+      })
+      await refreshCurrentPage()
+      const response = await api.item.detail(selectedMessageId)
+      setSelectedMessage(response.detail)
       return
     }
     await api.session.updateReview(sessionId, selectedMessageId, {
@@ -1592,7 +1675,14 @@ export function App() {
   }
 
   async function clearFlag(): Promise<void> {
-    if (!sessionId || !selectedMessageId) {
+    if (!selectedMessageId) {
+      return
+    }
+    if (selectedMessage?.archivePath || !sessionId) {
+      await api.item.clearReview(selectedMessageId)
+      await refreshCurrentPage()
+      const response = await api.item.detail(selectedMessageId)
+      setSelectedMessage(response.detail)
       return
     }
     await api.session.clearReview(sessionId, selectedMessageId)
@@ -1601,7 +1691,16 @@ export function App() {
   }
 
   async function addTag(tag: string): Promise<void> {
-    if (!sessionId || !selectedMessageId) {
+    if (!selectedMessageId) {
+      return
+    }
+    if (selectedMessage?.archivePath || !sessionId) {
+      await api.item.updateReview(selectedMessageId, {
+        tags: Array.from(new Set([...(selectedMessage?.review?.tags || []), tag]))
+      })
+      await refreshCurrentPage()
+      const response = await api.item.detail(selectedMessageId)
+      setSelectedMessage(response.detail)
       return
     }
     await api.session.updateReview(sessionId, selectedMessageId, {
@@ -1612,7 +1711,16 @@ export function App() {
   }
 
   async function removeTag(tag: string): Promise<void> {
-    if (!sessionId || !selectedMessageId) {
+    if (!selectedMessageId) {
+      return
+    }
+    if (selectedMessage?.archivePath || !sessionId) {
+      await api.item.updateReview(selectedMessageId, {
+        tags: (selectedMessage?.review?.tags || []).filter((item) => item !== tag)
+      })
+      await refreshCurrentPage()
+      const response = await api.item.detail(selectedMessageId)
+      setSelectedMessage(response.detail)
       return
     }
     await api.session.updateReview(sessionId, selectedMessageId, {
@@ -1627,6 +1735,84 @@ export function App() {
     return response.status
   }
 
+  function stopSearchIndexRefreshPolling(): void {
+    if (searchIndexRefreshPollTimeoutRef.current !== null) {
+      window.clearTimeout(searchIndexRefreshPollTimeoutRef.current)
+      searchIndexRefreshPollTimeoutRef.current = null
+    }
+    searchIndexRefreshPollInFlightRef.current = false
+    searchIndexRefreshPollJobIdRef.current = null
+  }
+
+  function scheduleSearchIndexRefreshPolling(jobId: string): void {
+    if (searchIndexRefreshPollJobIdRef.current !== jobId) {
+      return
+    }
+    if (searchIndexRefreshPollTimeoutRef.current !== null) {
+      window.clearTimeout(searchIndexRefreshPollTimeoutRef.current)
+    }
+    searchIndexRefreshPollTimeoutRef.current = window.setTimeout(() => {
+      searchIndexRefreshPollTimeoutRef.current = null
+      void pollSearchIndexRefreshStatus(jobId)
+    }, SEARCH_INDEX_REFRESH_POLL_INTERVAL_MS)
+  }
+
+  async function pollSearchIndexRefreshStatus(jobId: string): Promise<void> {
+    if (searchIndexRefreshPollInFlightRef.current || searchIndexRefreshPollJobIdRef.current !== jobId) {
+      return
+    }
+
+    searchIndexRefreshPollInFlightRef.current = true
+    try {
+      const response = await api.pst.refreshSearchIndexStatus()
+      if (searchIndexRefreshPollJobIdRef.current !== jobId) {
+        return
+      }
+
+      const nextStatus = response.status
+      if (nextStatus.status === 'running') {
+        setSearchIndexRefreshStatus(nextStatus)
+        scheduleSearchIndexRefreshPolling(jobId)
+        return
+      }
+
+      if (nextStatus.status === 'succeeded') {
+        const hiddenRulesResponse = await api.hiddenFilters.list()
+        if (searchIndexRefreshPollJobIdRef.current !== jobId) {
+          return
+        }
+        setHiddenRules(hiddenRulesResponse.items || [])
+        await refreshCurrentPageRef.current()
+        if (searchIndexRefreshPollJobIdRef.current !== jobId) {
+          return
+        }
+        stopSearchIndexRefreshPolling()
+        setSearchIndexRefreshStatus(null)
+        return
+      }
+
+      stopSearchIndexRefreshPolling()
+      setSearchIndexRefreshStatus(nextStatus.status === 'failed' ? nextStatus : null)
+    } catch (error) {
+      if (searchIndexRefreshPollJobIdRef.current !== jobId) {
+        return
+      }
+      stopSearchIndexRefreshPolling()
+      setSearchIndexRefreshStatus({
+        jobId,
+        status: 'failed',
+        trigger: searchIndexRefreshStatus?.trigger || 'manual',
+        startedAt: searchIndexRefreshStatus?.startedAt || null,
+        completedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        summary: null,
+        error: error instanceof Error ? error.message : 'Unable to refresh search index'
+      })
+    } finally {
+      searchIndexRefreshPollInFlightRef.current = false
+    }
+  }
+
   async function handleRefreshSearchIndex(): Promise<void> {
     if (searchIndexRefreshActionBusy || searchIndexRefreshRunning) {
       return
@@ -1636,6 +1822,11 @@ export function App() {
     try {
       const status = await refreshSearchIndex()
       setSearchIndexRefreshStatus(status)
+      if (status.status === 'running') {
+        searchIndexRefreshPollJobIdRef.current = status.jobId
+        void pollSearchIndexRefreshStatus(status.jobId)
+        return
+      }
       if (status.status === 'succeeded') {
         await api.hiddenFilters.list().then((result) => setHiddenRules(result.items || []))
         await refreshCurrentPage()
@@ -1659,65 +1850,29 @@ export function App() {
 
   React.useEffect(() => {
     if (!authenticated || !canManageUsers || searchIndexRefreshStatus?.status !== 'running') {
+      stopSearchIndexRefreshPolling()
       return
     }
 
-    let cancelled = false
-    let timer: number | null = null
-
-    async function pollStatus(): Promise<void> {
-      try {
-        const response = await api.pst.refreshSearchIndexStatus()
-        if (cancelled) {
-          return
-        }
-
-        const nextStatus = response.status
-        setSearchIndexRefreshStatus(nextStatus.status === 'running' || nextStatus.status === 'failed' ? nextStatus : null)
-
-        if (nextStatus.status === 'running') {
-          timer = window.setTimeout(() => {
-            void pollStatus()
-          }, 500)
-          return
-        }
-
-        if (nextStatus.status === 'succeeded') {
-          const hiddenRulesResponse = await api.hiddenFilters.list()
-          if (cancelled) {
-            return
-          }
-          setHiddenRules(hiddenRulesResponse.items || [])
-          await refreshCurrentPageRef.current()
-          if (!cancelled) {
-            setSearchIndexRefreshStatus(null)
-          }
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setSearchIndexRefreshStatus({
-            jobId: searchIndexRefreshStatus.jobId,
-            status: 'failed',
-            trigger: searchIndexRefreshStatus.trigger,
-            startedAt: searchIndexRefreshStatus.startedAt,
-            completedAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            summary: null,
-            error: error instanceof Error ? error.message : 'Unable to refresh search index'
-          })
-        }
-      }
+    const jobId = searchIndexRefreshStatus.jobId
+    if (!jobId) {
+      stopSearchIndexRefreshPolling()
+      return
     }
 
-    void pollStatus()
+    if (searchIndexRefreshPollJobIdRef.current === jobId) {
+      return
+    }
+
+    searchIndexRefreshPollJobIdRef.current = jobId
+    void pollSearchIndexRefreshStatus(jobId)
 
     return () => {
-      cancelled = true
-      if (timer !== null) {
-        window.clearTimeout(timer)
+      if (searchIndexRefreshPollJobIdRef.current === jobId) {
+        stopSearchIndexRefreshPolling()
       }
     }
-  }, [authenticated, canManageUsers, searchIndexRefreshStatus?.jobId, searchIndexRefreshStatus?.startedAt, searchIndexRefreshStatus?.status, searchIndexRefreshStatus?.trigger])
+  }, [authenticated, canManageUsers, searchIndexRefreshStatus?.jobId, searchIndexRefreshStatus?.status])
 
   async function createHiddenFilter(kind: 'address' | 'subject', value: string, label?: string): Promise<void> {
     await api.hiddenFilters.create(kind, value, label)
@@ -1734,7 +1889,11 @@ export function App() {
   }
 
   async function runSearch(): Promise<void> {
-    if (!searchQuery.trim() && searchScope === 'pst') {
+    const effectiveScope =
+      sourceType === 'mailbox'
+        ? searchScope
+        : 'search'
+    if (!searchQuery.trim() && effectiveScope === 'pst') {
       await refreshCurrentPage()
       return
     }
@@ -1818,6 +1977,8 @@ export function App() {
       caseOptions={caseSelectorOptions}
       selectedCasePath={selectedCasePath}
       selectedScopePath={selectedScopePath}
+      sourceType={sourceType}
+      sourceCounts={currentPage?.sourceCounts}
       searchOptions={searchSelectorOptions}
       catalogFiles={catalogFiles}
       selectedPstFileName={selectedPstFileName}
@@ -1836,6 +1997,10 @@ export function App() {
         setSelectedScopePath(nextScopePath)
         writeWorkspaceStorageItem('casePath', true, username, nextCasePath)
         writeWorkspaceStorageItem('scopePath', true, username, nextScopePath)
+      }}
+      onSourceTypeChange={(value) => {
+        setSourceType(value)
+        writeWorkspaceStorageItem('sourceType', true, username, value)
       }}
       canRefreshSearchIndex={canManageUsers}
       searchIndexRefreshStatus={searchIndexRefreshStatus}
@@ -1863,6 +2028,7 @@ export function App() {
       page={currentPage}
       loading={messagesLoading}
       query={searchQuery}
+      sourceType={sourceType}
       searchScope={searchScope}
       mailOnly={mailOnly}
       sort={sort}
@@ -1917,7 +2083,7 @@ export function App() {
   )
 
   const previewNode = workspaceReady ? (
-      <EmailPreview
+    <EmailPreview
       detail={selectedMessage}
       theme={theme}
       onDownloadJson={() => {
@@ -1925,6 +2091,14 @@ export function App() {
       }}
       onDownloadEml={() => {
         void downloadEml()
+      }}
+      onDownloadItem={() => {
+        if (selectedMessage?.downloadUrl) {
+          triggerDownload(
+            selectedMessage.downloadUrl,
+            selectedMessage.downloadFilename || selectedMessage.archiveEntryName || selectedMessage.subject || undefined
+          )
+        }
       }}
       onToggleFlag={() => {
         void toggleFlag()
@@ -2031,6 +2205,14 @@ export function App() {
               }}
               onDownloadEml={() => {
                 void downloadEml()
+              }}
+              onDownloadItem={() => {
+                if (selectedMessage?.downloadUrl) {
+                  triggerDownload(
+                    selectedMessage.downloadUrl,
+                    selectedMessage.downloadFilename || selectedMessage.archiveEntryName || selectedMessage.subject || undefined
+                  )
+                }
               }}
               onToggleFlag={() => {
                 void toggleFlag()

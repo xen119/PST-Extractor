@@ -92,6 +92,7 @@ function messageSummarySchema(): Record<string, unknown> {
     additionalProperties: true,
     properties: {
       id: { type: 'string' },
+      sourceType: { type: 'string', enum: ['mailbox', 'teams', 'sharepoint'] },
       descriptorId: { type: 'string' },
       folderId: { type: 'string' },
       folderPath: { type: 'string' },
@@ -119,6 +120,15 @@ function messageSummarySchema(): Record<string, unknown> {
       hasAttachments: { type: 'boolean' },
       isRead: { type: 'boolean' },
       isMailLike: { type: 'boolean' },
+      archivePath: { type: 'string' },
+      archiveEntryPath: { type: 'string' },
+      archiveEntryName: { type: 'string' },
+      contentType: { type: 'string' },
+      downloadFilename: { type: 'string' },
+      previewKind: { type: 'string', enum: ['text', 'html', 'binary'] },
+      previewText: { type: 'string' },
+      previewHtml: { type: 'string' },
+      downloadUrl: { type: 'string' },
       review: {
         type: 'object',
         additionalProperties: true,
@@ -165,6 +175,20 @@ function messageDetailSchema(): Record<string, unknown> {
     type: 'object',
     additionalProperties: true,
     properties: {
+      sourceType: { type: 'string', enum: ['mailbox', 'teams', 'sharepoint'] },
+      archivePath: { type: 'string' },
+      archiveEntryPath: { type: 'string' },
+      archiveEntryName: { type: 'string' },
+      archiveEntryChain: {
+        type: 'array',
+        items: { type: 'string' }
+      },
+      contentType: { type: 'string' },
+      downloadFilename: { type: 'string' },
+      previewKind: { type: 'string', enum: ['text', 'html', 'binary'] },
+      previewText: { type: 'string' },
+      previewHtml: { type: 'string' },
+      downloadUrl: { type: 'string' },
       review: reviewStateSchema(),
       attachments: {
         type: 'array',
@@ -660,7 +684,23 @@ function searchPageSchema(): Record<string, unknown> {
   return {
     type: 'object',
     additionalProperties: true,
-    required: ['items', 'total', 'page', 'pageSize', 'totalPages', 'query', 'mode', 'mailOnly', 'sort', 'scope', 'scopePath', 'scopeLabel', 'hiddenRules'],
+    required: [
+      'items',
+      'total',
+      'page',
+      'pageSize',
+      'totalPages',
+      'query',
+      'mode',
+      'mailOnly',
+      'sort',
+      'scope',
+      'scopePath',
+      'scopeLabel',
+      'hiddenRules',
+      'sourceType',
+      'sourceCounts'
+    ],
     properties: {
       items: {
         type: 'array',
@@ -677,6 +717,16 @@ function searchPageSchema(): Record<string, unknown> {
       scope: { type: 'string' },
       scopePath: { type: 'string' },
       scopeLabel: { type: 'string' },
+      sourceType: { type: 'string', enum: ['mailbox', 'teams', 'sharepoint', 'all'] },
+      sourceCounts: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          mailbox: { type: 'integer' },
+          teams: { type: 'integer' },
+          sharepoint: { type: 'integer' }
+        }
+      },
       hiddenRules: {
         type: 'array',
         items: hiddenRuleSchema()
@@ -1297,6 +1347,13 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
               schema: { type: 'string', enum: ['pst', 'search', 'all'] },
               description: 'Search within the selected PST, selected search folder, or all cases/searches.'
             },
+            {
+              name: 'sourceType',
+              in: 'query',
+              required: false,
+              schema: { type: 'string', enum: ['mailbox', 'teams', 'sharepoint'] },
+              description: 'Limit results to one source corpus.'
+            },
             { name: 'scopePath', in: 'query', required: false, schema: { type: 'string' } },
             { name: 'sessionId', in: 'query', required: false, schema: { type: 'string' } },
             {
@@ -1332,6 +1389,7 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
                 scope: { type: 'string' },
                 scopePath: { type: 'string' },
                 scopeLabel: { type: 'string' },
+                sourceType: { type: 'string', enum: ['mailbox', 'teams', 'sharepoint', 'all'] },
                 page: searchPageSchema()
               }
             })
@@ -1582,6 +1640,65 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
           }
         }
       },
+      [openApiPath(API_ROUTES.itemDetail)]: {
+        get: {
+          tags: ['Extraction'],
+          summary: 'Load a Teams or SharePoint/OneDrive item preview by item id',
+          parameters: [
+            { name: 'itemId', in: 'path', required: true, schema: { type: 'string' } }
+          ],
+          responses: {
+            200: jsonResponse({
+              type: 'object',
+              additionalProperties: true,
+              required: ['detail'],
+              properties: {
+                detail: messageDetailSchema()
+              }
+            }),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Case access required'),
+            ...errorResponse(404, 'Item not found')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.itemContent)]: {
+        get: {
+          tags: ['Extraction'],
+          summary: 'Stream the raw content for a Teams or SharePoint/OneDrive item',
+          parameters: [
+            { name: 'itemId', in: 'path', required: true, schema: { type: 'string' } }
+          ],
+          responses: {
+            200: {
+              description: 'Binary or inline preview stream',
+              content: {
+                'application/octet-stream': {
+                  schema: { type: 'string', format: 'binary' }
+                },
+                'application/pdf': {
+                  schema: { type: 'string', format: 'binary' }
+                },
+                'image/png': {
+                  schema: { type: 'string', format: 'binary' }
+                },
+                'image/jpeg': {
+                  schema: { type: 'string', format: 'binary' }
+                },
+                'text/html': {
+                  schema: { type: 'string', format: 'binary' }
+                },
+                'text/plain': {
+                  schema: { type: 'string', format: 'binary' }
+                }
+              }
+            },
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Case access required'),
+            ...errorResponse(404, 'Item not found')
+          }
+        }
+      },
       [openApiPath(API_ROUTES.messageExtract)]: {
         get: {
           tags: ['Extraction'],
@@ -1761,6 +1878,91 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
               }
             }),
             ...errorResponse(404, 'Message not found')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.itemReview)]: {
+        get: {
+          tags: ['Review'],
+          summary: 'Read the current flag/tag state for a search item',
+          parameters: [
+            { name: 'itemId', in: 'path', required: true, schema: { type: 'string' } }
+          ],
+          responses: {
+            200: jsonResponse({
+              type: 'object',
+              additionalProperties: true,
+              required: ['sessionId', 'messageId', 'review'],
+              properties: {
+                sessionId: { type: 'string' },
+                messageId: { type: 'string' },
+                review: reviewStateSchema()
+              }
+            }),
+            ...errorResponse(404, 'Item not found')
+          }
+        },
+        patch: {
+          tags: ['Review'],
+          summary: 'Update the flag/tag state for a search item',
+          parameters: [
+            { name: 'itemId', in: 'path', required: true, schema: { type: 'string' } }
+          ],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    flagged: { type: 'boolean' },
+                    tags: {
+                      oneOf: [
+                        {
+                          type: 'array',
+                          items: { type: 'string' }
+                        },
+                        { type: 'string' }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          responses: {
+            200: jsonResponse({
+              type: 'object',
+              additionalProperties: true,
+              required: ['sessionId', 'messageId', 'review'],
+              properties: {
+                sessionId: { type: 'string' },
+                messageId: { type: 'string' },
+                review: reviewStateSchema()
+              }
+            }),
+            ...errorResponse(400, 'Invalid review payload'),
+            ...errorResponse(404, 'Item not found')
+          }
+        },
+        delete: {
+          tags: ['Review'],
+          summary: 'Clear the flag/tag state for a search item',
+          parameters: [
+            { name: 'itemId', in: 'path', required: true, schema: { type: 'string' } }
+          ],
+          responses: {
+            200: jsonResponse({
+              type: 'object',
+              additionalProperties: true,
+              required: ['sessionId', 'messageId', 'review'],
+              properties: {
+                sessionId: { type: 'string' },
+                messageId: { type: 'string' },
+                review: reviewStateSchema()
+              }
+            }),
+            ...errorResponse(404, 'Item not found')
           }
         }
       },

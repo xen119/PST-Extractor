@@ -1,12 +1,15 @@
 import { randomBytes } from 'crypto'
+import * as path from 'path'
 import { MongoClient } from 'mongodb'
 import type { ReviewStore } from './reviewStore'
 import type { ReviewRecord, ReviewState } from './reviewTypes'
 import type { MessageSummary, ViewerSessionIndex } from './viewer'
+import type { ArchiveBundleItem, ArchiveBundleSourceType } from './archiveBundles'
 
 export type SearchScope = 'all' | 'search' | 'pst'
 export type SearchMode = 'and' | 'or'
 export type HiddenRuleKind = 'address' | 'subject'
+export type SearchSourceType = 'mailbox' | ArchiveBundleSourceType
 
 export interface HiddenRuleRecord {
   filterId: string
@@ -18,6 +21,8 @@ export interface HiddenRuleRecord {
 }
 
 export interface SearchIndexDocument {
+  id?: string
+  sourceType: SearchSourceType
   mailboxKey: string
   scopePath: string
   scopeLabel: string
@@ -56,6 +61,15 @@ export interface SearchIndexDocument {
   searchTokens: string[]
   addressValues: string[]
   subjectValues: string[]
+  archivePath?: string
+  archiveEntryPath?: string
+  archiveEntryChain?: string[]
+  archiveEntryName?: string
+  contentType?: string
+  downloadFilename?: string
+  previewKind?: 'text' | 'html' | 'binary'
+  previewText?: string
+  previewHtml?: string
   review: ReviewState
   reviewStates: Array<{
     reviewerUsername: string
@@ -71,6 +85,7 @@ export interface SearchIndexSearchOptions {
   mailboxKey?: string
   allowedMailboxKeys?: string[]
   reviewerUsername?: string
+  sourceType?: SearchSourceType | 'all'
   query: string
   mode: SearchMode
   mailOnly: boolean
@@ -96,6 +111,8 @@ export interface SearchIndexPage {
   scopePath: string
   scopeLabel: string
   hiddenRules: HiddenRuleRecord[]
+  sourceType: SearchSourceType | 'all'
+  sourceCounts: Record<SearchSourceType, number>
   reviewFilters: {
     flaggedOnly: boolean
     taggedOnly: boolean
@@ -123,6 +140,7 @@ export interface SearchIndexStore {
   }): Promise<HiddenRuleRecord>
   deleteHiddenRule(filterId: string): Promise<boolean>
   search(options: SearchIndexSearchOptions): Promise<SearchIndexPage>
+  findDocumentById(id: string): Promise<SearchIndexDocument | null>
   promoteStagedDocuments?(stagingDocumentsCollectionName: string): Promise<void>
   close(): Promise<void>
 }
@@ -188,6 +206,14 @@ function normalizeReviewerUsername(value: unknown): string {
   return normalizeText(value) || 'anonymous'
 }
 
+function normalizeSourceType(value: unknown): SearchSourceType {
+  const normalized = normalizeText(value).toLowerCase()
+  if (normalized === 'teams' || normalized === 'sharepoint') {
+    return normalized
+  }
+  return 'mailbox'
+}
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
@@ -219,7 +245,8 @@ function dedupeSearchIndexDocuments(documents: SearchIndexDocument[]): SearchInd
     seen.add(dedupeKey)
     deduped.push({
       ...document,
-      mailboxKey
+      mailboxKey,
+      sourceType: normalizeSourceType(document.sourceType)
     })
   }
 
@@ -340,6 +367,8 @@ function buildSearchTextParts(
     | 'resolvedDisplayBCC'
     | 'messageClass'
     | 'kind'
+    | 'previewText'
+    | 'previewHtml'
   >,
   bodySearchText: string
 ): string[] {
@@ -357,8 +386,10 @@ function buildSearchTextParts(
     document.resolvedDisplayBCC,
     document.messageClass,
     document.kind,
+    document.previewText,
+    document.previewHtml,
     bodySearchText
-  ]
+  ].filter((value): value is string => Boolean(value))
 }
 
 function buildSearchText(
@@ -377,6 +408,8 @@ function buildSearchText(
     | 'resolvedDisplayBCC'
     | 'messageClass'
     | 'kind'
+    | 'previewText'
+    | 'previewHtml'
   >,
   bodySearchText: string
 ): string {
@@ -521,6 +554,10 @@ function buildFilterMatch(
 
   if (options.mailOnly) {
     filter.isMailLike = true
+  }
+
+  if (options.sourceType && options.sourceType !== 'all') {
+    filter.sourceType = normalizeSourceType(options.sourceType)
   }
 
   const reviewerUsername = normalizeReviewerUsername(options.reviewerUsername)
@@ -696,6 +733,8 @@ export function buildSearchIndexDocumentsFromSession(
     documents.push(
       toDocument(
         {
+          id: normalizeText(message.id),
+          sourceType: 'mailbox',
           mailboxKey: normalizeText(context.mailboxKey),
           scopePath: normalizeText(context.scopePath),
           scopeLabel: normalizeText(context.scopeLabel),
@@ -735,6 +774,65 @@ export function buildSearchIndexDocumentsFromSession(
       )
     )
   }
+
+  return dedupeSearchIndexDocuments(documents)
+}
+
+export function buildSearchIndexDocumentsFromArchiveItems(
+  items: ArchiveBundleItem[]
+): SearchIndexDocument[] {
+  const documents = items.map((item) =>
+    toDocument(
+      {
+        id: normalizeText(item.archiveItemId),
+        sourceType: normalizeSourceType(item.sourceType),
+        mailboxKey: normalizeText(item.bundlePath),
+        scopePath: normalizeText(item.scopePath),
+        scopeLabel: normalizeText(item.scopeLabel),
+        fileName: normalizeText(item.bundleFileName),
+        mailboxName: normalizeText(item.bundleFileName),
+        messageId: normalizeText(item.archiveItemId),
+        descriptorId: normalizeText(item.archiveItemId),
+        folderId: normalizeText(item.entryPath),
+        folderPath: normalizeText(path.dirname(item.entryPath)),
+        order: 0,
+        messageClass: item.sourceType === 'teams' ? 'IPM.Note' : 'IPM.Document',
+        kind: 'other',
+        subject: normalizeText(item.entryName),
+        originalSubject: normalizeText(item.entryName),
+        senderName: item.sourceType === 'teams' ? 'Teams' : 'SharePoint/OneDrive',
+        senderEmailAddress: '',
+        recipientText: item.entryPath,
+        displayTo: '',
+        displayCC: '',
+        displayBCC: '',
+        resolvedDisplayTo: '',
+        resolvedDisplayCC: '',
+        resolvedDisplayBCC: '',
+        clientSubmitTime: item.modifiedAt,
+        creationTime: item.modifiedAt,
+        modificationTime: item.modifiedAt,
+        messageDeliveryTime: item.modifiedAt,
+        sortDate: item.modifiedAt,
+        sortDateMs: item.modifiedAt ? Date.parse(item.modifiedAt) : null,
+        importance: 0,
+        hasAttachments: false,
+        isRead: true,
+        isMailLike: false,
+        archivePath: normalizeText(item.bundlePath),
+        archiveEntryPath: normalizeText(item.entryPath),
+        archiveEntryChain: [...item.entryChain],
+        archiveEntryName: normalizeText(item.entryName),
+        contentType: normalizeText(item.contentType),
+        downloadFilename: normalizeText(item.downloadFilename),
+        previewKind: item.previewKind,
+        previewText: item.previewText,
+        previewHtml: item.previewHtml
+      },
+      item.searchText,
+      []
+    )
+  )
 
   return dedupeSearchIndexDocuments(documents)
 }
@@ -799,7 +897,11 @@ export class MemorySearchIndexStore implements SearchIndexStore {
     const key = normalizeText(mailboxKey)
     const records = new Map<string, SearchIndexDocument>()
     for (const document of dedupeSearchIndexDocuments(documents)) {
-      records.set(document.messageId, { ...document, mailboxKey: key })
+      records.set(document.messageId, {
+        ...document,
+        mailboxKey: key,
+        sourceType: normalizeSourceType(document.sourceType)
+      })
     }
     this.documents.set(key, records)
   }
@@ -859,11 +961,41 @@ export class MemorySearchIndexStore implements SearchIndexStore {
     return this.hiddenRules.deleteHiddenRule(filterId)
   }
 
+  async findDocumentById(id: string): Promise<SearchIndexDocument | null> {
+    const normalizedId = normalizeText(id)
+    if (!normalizedId) {
+      return null
+    }
+    for (const mailbox of this.documents.values()) {
+      for (const record of mailbox.values()) {
+        if (normalizeText(record.id || record.messageId) === normalizedId || normalizeText(record.messageId) === normalizedId) {
+          return record
+        }
+      }
+    }
+    return null
+  }
+
   async search(options: SearchIndexSearchOptions): Promise<SearchIndexPage> {
     const hiddenRules = this.hiddenRules.listHiddenRules()
     const mailboxKeysProvided = options.allowedMailboxKeys !== undefined
     const allowedMailboxKeys = uniqueTextValues(options.allowedMailboxKeys || [])
     const allRecords = [...this.documents.values()].flatMap((mailbox) => [...mailbox.values()])
+    const countOptions = {
+      ...options,
+      sourceType: 'all' as const
+    }
+    const sourceCounts = allRecords
+      .filter((record) => (mailboxKeysProvided ? allowedMailboxKeys.includes(record.mailboxKey) : true))
+      .filter((record) => matchesDocument(record, countOptions, hiddenRules))
+      .reduce<Record<SearchSourceType, number>>(
+        (acc, record) => {
+          const sourceType = normalizeSourceType(record.sourceType)
+          acc[sourceType] = (acc[sourceType] || 0) + 1
+          return acc
+        },
+        { mailbox: 0, teams: 0, sharepoint: 0 }
+      )
     const records = mailboxKeysProvided
       ? allRecords.filter((record) => allowedMailboxKeys.includes(record.mailboxKey))
       : allRecords
@@ -873,7 +1005,7 @@ export class MemorySearchIndexStore implements SearchIndexStore {
     const resolved = matched.map((record) =>
       resolveSearchIndexDocument(record, options.reviewerUsername)
     )
-    return paginateSearchResults(resolved, options, hiddenRules)
+    return paginateSearchResults(resolved, options, hiddenRules, sourceCounts)
   }
 
   async close(): Promise<void> {
@@ -887,6 +1019,12 @@ function matchesDocument(
   options: SearchIndexSearchOptions,
   hiddenRules: HiddenRuleRecord[]
 ): boolean {
+  if (options.sourceType && options.sourceType !== 'all') {
+    if (normalizeSourceType(record.sourceType) !== normalizeSourceType(options.sourceType)) {
+      return false
+    }
+  }
+
   if (options.scope === 'pst') {
     if (options.mailboxKey && record.mailboxKey !== normalizeText(options.mailboxKey)) {
       return false
@@ -988,7 +1126,8 @@ function matchesSearchExpression(
 function paginateSearchResults(
   records: SearchIndexDocument[],
   options: SearchIndexSearchOptions,
-  hiddenRules: HiddenRuleRecord[]
+  hiddenRules: HiddenRuleRecord[],
+  sourceCounts?: Record<SearchSourceType, number>
 ): SearchIndexPage {
   const total = records.length
   const totalPages = Math.max(1, Math.ceil(total / options.pageSize))
@@ -1008,6 +1147,17 @@ function paginateSearchResults(
         ? ''
         : ''
 
+  const resolvedSourceCounts =
+    sourceCounts ||
+    records.reduce<Record<SearchSourceType, number>>(
+      (acc, record) => {
+        const sourceType = normalizeSourceType(record.sourceType)
+        acc[sourceType] = (acc[sourceType] || 0) + 1
+        return acc
+      },
+      { mailbox: 0, teams: 0, sharepoint: 0 }
+    )
+
   return {
     items: records.slice(start, start + options.pageSize),
     total,
@@ -1022,6 +1172,8 @@ function paginateSearchResults(
     scopePath,
     scopeLabel,
     hiddenRules,
+    sourceType: options.sourceType || 'all',
+    sourceCounts: resolvedSourceCounts,
     reviewFilters: {
       flaggedOnly: options.reviewFlaggedOnly,
       taggedOnly: options.reviewTaggedOnly,
@@ -1056,6 +1208,8 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     )
     const rules = db.collection<HiddenRuleRecord>(options.rulesCollectionName || DEFAULT_RULE_COLLECTION)
     await documents.createIndex?.({ mailboxKey: 1, messageId: 1 }, { unique: true })
+    await documents.createIndex?.({ messageId: 1 })
+    await documents.createIndex?.({ sourceType: 1, scopePath: 1 })
     await documents.createIndex?.({ mailboxKey: 1, scopePath: 1 })
     await documents.createIndex?.({ scopePath: 1, searchTokens: 1 })
     await documents.createIndex?.({ scopePath: 1, addressValues: 1 })
@@ -1083,11 +1237,27 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     if (!uniqueDocuments.length) {
       return
     }
-    await this.documents.insertMany(uniqueDocuments.map((document) => ({ ...document, mailboxKey: key })))
+    await this.documents.insertMany(
+      uniqueDocuments.map((document) => ({
+        ...document,
+        mailboxKey: key,
+        sourceType: normalizeSourceType(document.sourceType)
+      }))
+    )
   }
 
   async deleteMailboxDocuments(mailboxKey: string): Promise<void> {
     await this.documents.deleteMany({ mailboxKey: normalizeText(mailboxKey) })
+  }
+
+  async findDocumentById(id: string): Promise<SearchIndexDocument | null> {
+    const normalizedId = normalizeText(id)
+    if (!normalizedId) {
+      return null
+    }
+    return this.documents.findOne({
+      $or: [{ messageId: normalizedId }, { id: normalizedId }]
+    })
   }
 
   async updateReviewState(
@@ -1188,6 +1358,13 @@ export class MongoSearchIndexStore implements SearchIndexStore {
   async search(options: SearchIndexSearchOptions): Promise<SearchIndexPage> {
     const hiddenRules = await this.listHiddenRules()
     const filter = buildFilterMatch(options, hiddenRules)
+    const countFilter = buildFilterMatch(
+      {
+        ...options,
+        sourceType: 'all'
+      },
+      hiddenRules
+    )
     const total = await this.documents.countDocuments(filter)
     const totalPages = Math.max(1, Math.ceil(total / options.pageSize))
     const page = Math.min(Math.max(options.page, 1), totalPages)
@@ -1200,6 +1377,11 @@ export class MongoSearchIndexStore implements SearchIndexStore {
       .toArray()
     const resolvedItems = items.map((record) => resolveSearchIndexDocument(record, options.reviewerUsername))
     const parsed = parseSearchTerms(options.query, options.mode)
+    const sourceCounts = {
+      mailbox: await this.documents.countDocuments({ ...countFilter, sourceType: 'mailbox' }),
+      teams: await this.documents.countDocuments({ ...countFilter, sourceType: 'teams' }),
+      sharepoint: await this.documents.countDocuments({ ...countFilter, sourceType: 'sharepoint' })
+    }
     return {
       items: resolvedItems,
       total,
@@ -1222,6 +1404,8 @@ export class MongoSearchIndexStore implements SearchIndexStore {
             ? normalizeText(options.scopePath ? options.scopePath.split('/').join(' / ') : '')
             : 'Selected PST',
       hiddenRules,
+      sourceType: options.sourceType || 'all',
+      sourceCounts,
       reviewFilters: {
         flaggedOnly: options.reviewFlaggedOnly,
         taggedOnly: options.reviewTaggedOnly,
@@ -1258,7 +1442,9 @@ export async function refreshSearchIndexFromCatalog(
   messageCount: number
 }> {
   const { listPstMailboxFiles, openPstMailbox } = await import('./pstCatalog')
+  const { listArchiveBundleFiles, extractArchiveBundleItems } = await import('./archiveBundles')
   const catalog = listPstMailboxFiles(rootPath)
+  const archiveCatalog = listArchiveBundleFiles(rootPath)
   await searchIndexStore.clearAllDocuments()
 
   let mailboxCount = 0
@@ -1293,6 +1479,21 @@ export async function refreshSearchIndexFromCatalog(
           reviewRecords
         )
         await searchIndexStore.replaceMailboxDocuments(mailboxKey, documents)
+        mailboxCount += 1
+        messageCount += documents.length
+      } catch (error) {
+        warnOnce(scope.scopeLabel, file.fileName, error)
+      }
+    }
+  }
+
+  for (const scope of archiveCatalog.scopes) {
+    for (const file of scope.files) {
+      try {
+        const bundlePath = path.resolve(rootPath, scope.scopePath ? scope.scopePath : '', file.fileName)
+        const archiveItems = await extractArchiveBundleItems(bundlePath, scope.scopePath, file.fileName)
+        const documents = buildSearchIndexDocumentsFromArchiveItems(archiveItems)
+        await searchIndexStore.replaceMailboxDocuments(bundlePath, documents)
         mailboxCount += 1
         messageCount += documents.length
       } catch (error) {

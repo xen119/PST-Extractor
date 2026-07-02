@@ -84,6 +84,10 @@ import {
   resolvePstMailboxPath,
   restorePstMailboxFromRemoved
 } from './pstCatalog'
+import {
+  listArchiveBundleFiles,
+  readArchiveBundleItemContent
+} from './archiveBundles'
 import type { ReviewRecord } from './reviewTypes'
 import { createZipStreamWriter } from './zipWriter'
 
@@ -350,10 +354,18 @@ interface BundleMailboxDescriptor {
   session?: ViewerSessionIndex
 }
 
+interface ArchiveBundleDescriptor {
+  bundlePath: string
+  fileName: string
+  scopePath: string
+  scopeLabel: string
+}
+
 interface FlaggedBundleManifestItem {
   sourcePstPath: string
   mailboxName: string
   mailboxKey: string
+  sourceType: 'mailbox' | 'archive'
   scopePath: string
   scopeLabel: string
   fileName: string
@@ -365,9 +377,14 @@ interface FlaggedBundleManifestItem {
   subject: string
   review: ReviewState
   outputFile: string
-  outputType: 'eml' | 'ics'
+  outputType: 'eml' | 'ics' | 'raw'
   status: 'exported' | 'error'
   error?: string
+  archivePath?: string
+  archiveEntryPath?: string
+  archiveEntryName?: string
+  contentType?: string
+  downloadFilename?: string
 }
 
 interface FlaggedBundleManifest {
@@ -912,6 +929,32 @@ function parseSearchScope(value: unknown): 'all' | 'search' | 'pst' {
   return 'pst'
 }
 
+function parseSearchSourceType(value: unknown): 'mailbox' | 'teams' | 'sharepoint' | 'all' {
+  const normalized = normalizeText(value).toLowerCase()
+  if (normalized === 'teams' || normalized === 'sharepoint' || normalized === 'all') {
+    return normalized
+  }
+  return 'mailbox'
+}
+
+function collectCatalogMailboxKeys(
+  rootPath: string,
+  catalog: ReturnType<typeof listPstMailboxFiles>,
+  resolveFilePath: (rootPath: string, scopePath: string, fileName: string) => string
+): string[] {
+  return catalog.scopes.flatMap((scope) =>
+    scope.files.map((file) => resolveFilePath(rootPath, scope.scopePath, file.fileName))
+  )
+}
+
+function resolveArchiveBundlePath(rootPath: string, scopePath: string, fileName: string): string {
+  return path.resolve(rootPath, scopePath || '', fileName)
+}
+
+function buildArchiveMailboxKeys(rootPath: string, catalog: ReturnType<typeof listArchiveBundleFiles>): string[] {
+  return collectCatalogMailboxKeys(rootPath, catalog, resolveArchiveBundlePath)
+}
+
 function getScopeLabel(scopePath: string): string {
   return scopePath ? scopePath.split('/').join(' / ') : 'PST root'
 }
@@ -989,6 +1032,76 @@ function resolveAccessibleCatalogSelection(
   }
 }
 
+function resolveAccessibleArchiveCatalogSelection(
+  rootPath: string,
+  requestedScopePath: string,
+  allowedCasePaths: string[],
+  allowAll = false
+): ReturnType<typeof listArchiveBundleFiles> {
+  const normalizedRequestedScopePath = normalizeScopePath(requestedScopePath)
+  if (normalizedRequestedScopePath && !isScopePathAllowed(normalizedRequestedScopePath, allowedCasePaths, allowAll)) {
+    throw createAppError(403, 'Case access required')
+  }
+
+  if (!allowAll && !allowedCasePaths.length) {
+    return {
+      rootPath,
+      rootExists: fs.existsSync(rootPath),
+      scopes: [],
+      scopePath: '',
+      scopeLabel: '',
+      files: [],
+      message: 'No cases assigned.'
+    }
+  }
+
+  const catalog = listArchiveBundleFiles(rootPath, '')
+  const scopes = catalog.scopes.filter((scope) => isScopePathAllowed(scope.scopePath, allowedCasePaths, allowAll))
+  if (!scopes.length) {
+    return {
+      ...catalog,
+      scopes: [],
+      scopePath: '',
+      scopeLabel: '',
+      files: [],
+      message: catalog.message
+    }
+  }
+
+  if (!normalizedRequestedScopePath) {
+    const selectedScope = scopes.find((scope) => scope.scopePath === '') || scopes[0] || null
+    return {
+      ...catalog,
+      scopes,
+      scopePath: selectedScope?.scopePath || '',
+      scopeLabel: selectedScope?.scopeLabel || '',
+      files: selectedScope?.files || [],
+      message: catalog.message
+    }
+  }
+
+  const selectedScope = scopes.find((scope) => scope.scopePath === normalizedRequestedScopePath)
+  if (!selectedScope) {
+    return {
+      ...catalog,
+      scopes,
+      scopePath: normalizedRequestedScopePath,
+      scopeLabel: normalizedRequestedScopePath.split('/').join(' / '),
+      files: [],
+      message: `No Items*.zip bundles were found in ${normalizedRequestedScopePath.split('/').join(' / ')}.`
+    }
+  }
+
+  return {
+    ...catalog,
+    scopes,
+    scopePath: selectedScope.scopePath,
+    scopeLabel: selectedScope.scopeLabel,
+    files: selectedScope.files,
+    message: catalog.message
+  }
+}
+
 function parseFlaggedBundleScope(value: unknown): 'all' | 'search' | 'pst' {
   const normalized = normalizeText(value).toLowerCase()
   if (normalized === 'all' || normalized === 'search' || normalized === 'pst') {
@@ -1032,6 +1145,28 @@ function buildBundleEntryPath(
   return [kind === 'appointment' ? 'calendar' : 'mail', scopeSegment, mailboxSegment, ...folderSegments, itemName]
     .filter(Boolean)
     .join('/')
+}
+
+function buildArchiveBundleEntryPath(
+  scopePath: string,
+  bundleFileName: string,
+  archiveEntryPath: string,
+  downloadFilename: string,
+  messageId: string
+): string {
+  const scopeSegment = buildBundleScopeSegment(scopePath)
+  const bundleSegment = sanitizeBundleSegment(bundleFileName, 'bundle')
+  const entrySegments = normalizeScopePath(archiveEntryPath)
+    ? normalizeScopePath(archiveEntryPath)
+        .split('/')
+        .map((segment) => sanitizeBundleSegment(segment, 'entry'))
+        .filter(Boolean)
+    : []
+  const fileSegment = sanitizeBundleSegment(downloadFilename || messageId, 'item')
+  if (entrySegments.length) {
+    entrySegments.pop()
+  }
+  return ['archive', scopeSegment, bundleSegment, ...entrySegments, fileSegment].filter(Boolean).join('/')
 }
 
 function buildBundleMailboxes(
@@ -1080,6 +1215,37 @@ function buildBundleMailboxes(
   return mailboxes
 }
 
+function buildBundleArchiveDescriptors(
+  rootPath: string,
+  scope: 'all' | 'search' | 'pst',
+  scopePath: string,
+  allowedCasePaths: string[],
+  allowAll = false
+): ArchiveBundleDescriptor[] {
+  if (scope === 'pst') {
+    return []
+  }
+
+  const catalog =
+    scope === 'search'
+      ? resolveAccessibleArchiveCatalogSelection(rootPath, scopePath, allowedCasePaths, allowAll)
+      : resolveAccessibleCatalogSelection(rootPath, '', allowedCasePaths, listArchiveBundleFiles, allowAll)
+  const scopes = scope === 'search' ? [catalog] : catalog.scopes
+
+  const bundles: ArchiveBundleDescriptor[] = []
+  for (const catalogScope of scopes) {
+    for (const file of catalogScope.files) {
+      bundles.push({
+        bundlePath: resolveArchiveBundlePath(rootPath, catalogScope.scopePath, file.fileName),
+        fileName: file.fileName,
+        scopePath: catalogScope.scopePath,
+        scopeLabel: catalogScope.scopeLabel
+      })
+    }
+  }
+  return bundles
+}
+
 function createBundleManifest(scope: {
   scope: 'all' | 'search' | 'pst'
   scopePath: string
@@ -1109,6 +1275,33 @@ function addBundleManifestItem(
     manifest.counts.exported += 1
   } else {
     manifest.counts.failed += 1
+  }
+}
+
+function buildReviewContextFromSearchIndexDocument(
+  item: SearchIndexDocument,
+  reviewerUsername: string
+): Parameters<ReviewStore['upsertReview']>[0] {
+  return {
+    mailboxKey: item.mailboxKey,
+    reviewerUsername,
+    fileName: item.fileName,
+    messageId: item.messageId,
+    descriptorId: item.descriptorId,
+    folderId: item.folderId,
+    folderPath: item.folderPath,
+    messageClass: item.messageClass,
+    kind: item.kind,
+    isMailLike: item.isMailLike,
+    subject: item.subject,
+    senderName: item.senderName,
+    senderEmailAddress: item.senderEmailAddress,
+    displayTo: item.displayTo,
+    displayCC: item.displayCC,
+    displayBCC: item.displayBCC,
+    resolvedDisplayTo: item.resolvedDisplayTo,
+    resolvedDisplayCC: item.resolvedDisplayCC,
+    resolvedDisplayBCC: item.resolvedDisplayBCC
   }
 }
 
@@ -3836,15 +4029,17 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
       const reviewerUsername = getReviewOwnerUsername(authSession)
       const filters = parseReviewFilters(req.query as Record<string, string | string[] | undefined>)
-      const scope = parseSearchScope(req.query.scope) as SearchScope
+      const sourceType = parseSearchSourceType(req.query.sourceType)
+      const requestedScope = parseSearchScope(req.query.scope) as SearchScope
       const requestedScopePath = normalizeScopePath(req.query.scopePath)
       const sessionId = normalizeText(req.query.sessionId)
+      const scope = sourceType === 'mailbox' ? requestedScope : 'search'
       let scopePath = ''
       let scopeLabel = 'All cases/searches'
       let mailboxKey = ''
       let allowedMailboxKeys: string[] = []
 
-      if (scope === 'pst') {
+      if (sourceType === 'mailbox' && scope === 'pst') {
         if (!sessionId) {
           throw createAppError(400, 'Session id is required for selected PST search')
         }
@@ -3871,7 +4066,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         scopeLabel = session.scopeLabel || getScopeLabel(scopePath)
         mailboxKey = session.filePath
         allowedMailboxKeys = [mailboxKey]
-      } else if (scope === 'search') {
+      } else if (sourceType === 'mailbox' && scope === 'search') {
         const catalog = resolveAccessibleCatalogSelection(
           pstRootDir,
           requestedScopePath,
@@ -3892,7 +4087,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           : resolveAccessibleCatalogSelection(pstRootDir, '', allowedCasePaths, listPstMailboxFiles, allowAllCases)
         allowedMailboxKeys = selectedCatalog.files
           .map((file) => resolvePstMailboxPath(pstRootDir, selectedCatalog.scopePath, file.fileName))
-      } else {
+      } else if (sourceType === 'mailbox' && scope === 'all') {
         const activeCatalog = resolveAccessibleCatalogSelection(
           pstRootDir,
           '',
@@ -3903,6 +4098,16 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         allowedMailboxKeys = activeCatalog.scopes.flatMap((entry) =>
           entry.files.map((file) => resolvePstMailboxPath(pstRootDir, entry.scopePath, file.fileName))
         )
+      } else {
+        const archiveCatalog = resolveAccessibleArchiveCatalogSelection(
+          pstRootDir,
+          requestedScopePath,
+          allowedCasePaths,
+          allowAllCases
+        )
+        scopePath = archiveCatalog.scopePath
+        scopeLabel = archiveCatalog.scopeLabel
+        allowedMailboxKeys = buildArchiveMailboxKeys(pstRootDir, archiveCatalog)
       }
 
       const page = await searchIndexStore.search({
@@ -3911,6 +4116,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         mailboxKey,
         allowedMailboxKeys,
         reviewerUsername,
+        sourceType,
         query: filters.query,
         mode: filters.mode,
         mailOnly: filters.mailOnly,
@@ -3928,6 +4134,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         target: scopeLabel,
         outcome: 'success',
         metadata: {
+          sourceType,
           scope,
           scopePath,
           queryLength: filters.query.length,
@@ -3943,6 +4150,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         scope,
         scopePath: page.scopePath || scopePath,
         scopeLabel: page.scopeLabel || scopeLabel,
+        sourceType,
         page: {
           ...page,
           items: page.items.map((item) => {
@@ -3952,6 +4160,412 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
             return rest
           })
         }
+      })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.itemDetail, async (req, res) => {
+    try {
+      const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      const currentUser = authSession ? await authUserStore.getUser(authSession.username) : null
+      const allowAllCases = !authConfig.enabled || isAdminAuthSession(authSession, authConfig)
+      const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
+      const item = await searchIndexStore.findDocumentById(req.params.itemId)
+      if (!item) {
+        responseJson(res, 404, { error: 'Item not found' })
+        return
+      }
+      if (!isScopePathAllowed(item.scopePath, allowedCasePaths, allowAllCases)) {
+        recordAuditEvent({
+          req,
+          session: authSession,
+          action: 'search.item.view',
+          target: item.subject || item.archiveEntryName || item.messageId,
+          outcome: 'denied',
+          metadata: {
+            reason: 'Case access required',
+            scopePath: item.scopePath,
+            sourceType: item.sourceType
+          }
+        })
+        responseJson(res, 403, { error: 'Case access required' })
+        return
+      }
+
+      const detail = {
+        id: item.id || item.messageId,
+        sourceType: item.sourceType,
+        subject: item.subject,
+        senderName: item.senderName,
+        senderEmailAddress: item.senderEmailAddress,
+        displayTo: item.displayTo,
+        displayCC: item.displayCC,
+        displayBCC: item.displayBCC,
+        resolvedDisplayTo: item.resolvedDisplayTo,
+        resolvedDisplayCC: item.resolvedDisplayCC,
+        resolvedDisplayBCC: item.resolvedDisplayBCC,
+        clientSubmitTime: item.clientSubmitTime,
+        creationTime: item.creationTime,
+        modificationTime: item.modificationTime,
+        messageDeliveryTime: item.messageDeliveryTime,
+        sortDate: item.sortDate,
+        bodyHtml: item.previewHtml || '',
+        bodyText: item.previewText || '',
+        bodyPrefix: item.previewText || item.previewHtml ? 'Preview from archive item' : '',
+        parseError: '',
+        attachments: [],
+        review: item.review,
+        folderId: item.folderId,
+        folderPath: item.folderPath,
+        mailboxName: item.mailboxName,
+        archivePath: item.archivePath,
+        archiveEntryPath: item.archiveEntryPath,
+        archiveEntryChain: item.archiveEntryChain,
+        archiveEntryName: item.archiveEntryName,
+        contentType: item.contentType,
+        downloadFilename: item.downloadFilename,
+        previewKind: item.previewKind,
+        previewText: item.previewText,
+        previewHtml: item.previewHtml,
+        downloadUrl: item.archivePath ? `/api/items/${encodeURIComponent(item.id || item.messageId)}/content` : ''
+      }
+
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'search.item.view',
+        target: detail.subject || detail.archiveEntryName || detail.id || 'item',
+        outcome: 'success',
+        metadata: {
+          sourceType: item.sourceType,
+          scopePath: item.scopePath,
+          fileName: item.fileName,
+          archivePath: item.archivePath || '',
+          entryPath: item.archiveEntryPath || ''
+        }
+      })
+
+      responseJson(res, 200, { detail })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.itemContent, async (req, res) => {
+    try {
+      const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      const currentUser = authSession ? await authUserStore.getUser(authSession.username) : null
+      const allowAllCases = !authConfig.enabled || isAdminAuthSession(authSession, authConfig)
+      const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
+      const item = await searchIndexStore.findDocumentById(req.params.itemId)
+      if (!item || !item.archivePath || !item.archiveEntryChain?.length) {
+        responseJson(res, 404, { error: 'Item not found' })
+        return
+      }
+      if (!isScopePathAllowed(item.scopePath, allowedCasePaths, allowAllCases)) {
+        responseJson(res, 403, { error: 'Case access required' })
+        return
+      }
+
+      const { buffer, contentType, fileName } = await readArchiveBundleItemContent(item.archivePath, item.archiveEntryChain)
+      const downloadName = sanitizeFileNameForDownload(item.downloadFilename || fileName, fileName)
+      res.status(200)
+      res.setHeader('Content-Type', contentType || item.contentType || 'application/octet-stream')
+      res.setHeader('Content-Length', String(buffer.length))
+      res.setHeader('Content-Disposition', `inline; filename="${downloadName}"`)
+      res.send(buffer)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.itemDetail, async (req, res) => {
+    try {
+      const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      const currentUser = authSession ? await authUserStore.getUser(authSession.username) : null
+      const allowAllCases = !authConfig.enabled || isAdminAuthSession(authSession, authConfig)
+      const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
+      const item = await searchIndexStore.findDocumentById(req.params.itemId)
+      if (!item) {
+        responseJson(res, 404, { error: 'Item not found' })
+        return
+      }
+      if (!isScopePathAllowed(item.scopePath, allowedCasePaths, allowAllCases)) {
+        recordAuditEvent({
+          req,
+          session: authSession,
+          action: 'search.item.view',
+          target: item.subject || item.archiveEntryName || item.messageId,
+          outcome: 'denied',
+          metadata: {
+            reason: 'Case access required',
+            scopePath: item.scopePath,
+            sourceType: item.sourceType
+          }
+        })
+        responseJson(res, 403, { error: 'Case access required' })
+        return
+      }
+
+      const detail = {
+        id: item.id || item.messageId,
+        sourceType: item.sourceType,
+        subject: item.subject,
+        senderName: item.senderName,
+        senderEmailAddress: item.senderEmailAddress,
+        displayTo: item.displayTo,
+        displayCC: item.displayCC,
+        displayBCC: item.displayBCC,
+        resolvedDisplayTo: item.resolvedDisplayTo,
+        resolvedDisplayCC: item.resolvedDisplayCC,
+        resolvedDisplayBCC: item.resolvedDisplayBCC,
+        clientSubmitTime: item.clientSubmitTime,
+        creationTime: item.creationTime,
+        modificationTime: item.modificationTime,
+        messageDeliveryTime: item.messageDeliveryTime,
+        sortDate: item.sortDate,
+        bodyHtml: item.previewHtml || '',
+        bodyText: item.previewText || '',
+        bodyPrefix: item.previewText || item.previewHtml ? 'Preview from archive item' : '',
+        parseError: '',
+        attachments: [],
+        review: item.review,
+        folderId: item.folderId,
+        folderPath: item.folderPath,
+        mailboxName: item.mailboxName,
+        archivePath: item.archivePath,
+        archiveEntryPath: item.archiveEntryPath,
+        archiveEntryChain: item.archiveEntryChain,
+        archiveEntryName: item.archiveEntryName,
+        contentType: item.contentType,
+        downloadFilename: item.downloadFilename,
+        previewKind: item.previewKind,
+        previewText: item.previewText,
+        previewHtml: item.previewHtml,
+        downloadUrl: item.archivePath ? `/api/items/${encodeURIComponent(item.id || item.messageId)}/content` : ''
+      }
+
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'search.item.view',
+        target: detail.subject || detail.archiveEntryName || detail.id || 'item',
+        outcome: 'success',
+        metadata: {
+          sourceType: item.sourceType,
+          scopePath: item.scopePath,
+          fileName: item.fileName,
+          archivePath: item.archivePath || '',
+          entryPath: item.archiveEntryPath || ''
+        }
+      })
+
+      responseJson(res, 200, { detail })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.itemContent, async (req, res) => {
+    try {
+      const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      const currentUser = authSession ? await authUserStore.getUser(authSession.username) : null
+      const allowAllCases = !authConfig.enabled || isAdminAuthSession(authSession, authConfig)
+      const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
+      const item = await searchIndexStore.findDocumentById(req.params.itemId)
+      if (!item || !item.archivePath || !item.archiveEntryChain?.length) {
+        responseJson(res, 404, { error: 'Item not found' })
+        return
+      }
+      if (!isScopePathAllowed(item.scopePath, allowedCasePaths, allowAllCases)) {
+        responseJson(res, 403, { error: 'Case access required' })
+        return
+      }
+
+      const { buffer, contentType, fileName } = await readArchiveBundleItemContent(item.archivePath, item.archiveEntryChain)
+      const downloadName = sanitizeFileNameForDownload(item.downloadFilename || fileName, fileName)
+      res.status(200)
+      res.setHeader('Content-Type', contentType || item.contentType || 'application/octet-stream')
+      res.setHeader('Content-Length', String(buffer.length))
+      res.setHeader('Content-Disposition', `inline; filename="${downloadName}"`)
+      res.send(buffer)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.itemReview, async (req, res) => {
+    try {
+      const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      const currentUser = authSession ? await authUserStore.getUser(authSession.username) : null
+      const allowAllCases = !authConfig.enabled || isAdminAuthSession(authSession, authConfig)
+      const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
+      const item = await searchIndexStore.findDocumentById(req.params.itemId)
+      if (!item) {
+        responseJson(res, 404, { error: 'Item not found' })
+        return
+      }
+      if (!isScopePathAllowed(item.scopePath, allowedCasePaths, allowAllCases)) {
+        responseJson(res, 403, { error: 'Case access required' })
+        return
+      }
+
+      const reviewerUsername = getReviewOwnerUsername(authSession)
+      const review = normalizeReviewState(
+        await reviewStore.getReview(item.mailboxKey, item.messageId, reviewerUsername)
+      )
+      responseJson(res, 200, {
+        sessionId: '',
+        messageId: item.messageId,
+        review
+      })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.patch(API_ROUTES.itemReview, async (req, res) => {
+    try {
+      const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      const currentUser = authSession ? await authUserStore.getUser(authSession.username) : null
+      const allowAllCases = !authConfig.enabled || isAdminAuthSession(authSession, authConfig)
+      const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
+      const item = await searchIndexStore.findDocumentById(req.params.itemId)
+      if (!item) {
+        responseJson(res, 404, { error: 'Item not found' })
+        return
+      }
+      if (!isScopePathAllowed(item.scopePath, allowedCasePaths, allowAllCases)) {
+        responseJson(res, 403, { error: 'Case access required' })
+        return
+      }
+
+      const body = (req.body || {}) as ReviewPatchBody
+      if (body.flagged === undefined && body.tags === undefined) {
+        throw createAppError(400, 'Provide flagged or tags to update review state')
+      }
+
+      const reviewerUsername = getReviewOwnerUsername(authSession)
+      const review = await reviewStore.upsertReview({
+        ...buildReviewContextFromSearchIndexDocument(item, reviewerUsername),
+        flagged: body.flagged,
+        tags: body.tags
+      })
+      await searchIndexStore.updateReviewState(item.mailboxKey, item.messageId, reviewerUsername, review)
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'search.item.review.update',
+        target: item.subject || item.archiveEntryName || item.messageId,
+        outcome: 'success',
+        metadata: {
+          sourceType: item.sourceType,
+          scopePath: item.scopePath,
+          archivePath: item.archivePath || '',
+          reviewerUsername,
+          flagged: review ? review.flagged : false,
+          tagCount: review ? review.tags.length : 0
+        }
+      })
+
+      responseJson(res, 200, {
+        sessionId: '',
+        messageId: item.messageId,
+        review: normalizeReviewState(review)
+      })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.delete(API_ROUTES.itemReview, async (req, res) => {
+    try {
+      const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      const currentUser = authSession ? await authUserStore.getUser(authSession.username) : null
+      const allowAllCases = !authConfig.enabled || isAdminAuthSession(authSession, authConfig)
+      const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
+      const item = await searchIndexStore.findDocumentById(req.params.itemId)
+      if (!item) {
+        responseJson(res, 404, { error: 'Item not found' })
+        return
+      }
+      if (!isScopePathAllowed(item.scopePath, allowedCasePaths, allowAllCases)) {
+        responseJson(res, 403, { error: 'Case access required' })
+        return
+      }
+
+      const reviewerUsername = getReviewOwnerUsername(authSession)
+      await reviewStore.deleteReview(item.mailboxKey, item.messageId, reviewerUsername)
+      await searchIndexStore.updateReviewState(item.mailboxKey, item.messageId, reviewerUsername, null)
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'search.item.review.delete',
+        target: item.subject || item.archiveEntryName || item.messageId,
+        outcome: 'success',
+        metadata: {
+          sourceType: item.sourceType,
+          scopePath: item.scopePath,
+          archivePath: item.archivePath || '',
+          reviewerUsername
+        }
+      })
+
+      responseJson(res, 200, {
+        sessionId: '',
+        messageId: item.messageId,
+        review: normalizeReviewState(null)
       })
     } catch (error) {
       createRouteErrorHandler(res, error)
@@ -4388,11 +5002,10 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       const session = scope === 'pst' ? getSessionOrThrow(sessions, sessionId) : null
       const bundleScope =
         scope === 'search'
-          ? resolveAccessibleCatalogSelection(
+          ? resolveAccessibleArchiveCatalogSelection(
               pstRootDir,
               scopePath,
               allowedCasePaths,
-              listPstMailboxFiles,
               allowAllCases
             )
           : scope === 'all'
@@ -4423,6 +5036,13 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         scope,
         scope === 'search' ? normalizeText(bundleScope?.scopePath || scopePath) : scopePath,
         session,
+        allowedCasePaths,
+        allowAllCases
+      )
+      const archiveBundles = buildBundleArchiveDescriptors(
+        pstRootDir,
+        scope,
+        scope === 'search' ? normalizeText(bundleScope?.scopePath || scopePath) : scopePath,
         allowedCasePaths,
         allowAllCases
       )
@@ -4461,6 +5081,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
                 sourcePstPath: mailbox.mailboxKey,
                 mailboxName: mailbox.scopeLabel || mailbox.fileName,
                 mailboxKey: mailbox.mailboxKey,
+                sourceType: 'mailbox',
                 scopePath: mailbox.scopePath,
                 scopeLabel: mailbox.scopeLabel,
                 fileName: mailbox.fileName,
@@ -4508,6 +5129,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
               sourcePstPath: mailbox.mailboxKey,
               mailboxName: activeMailboxSession.mailboxName || mailbox.fileName,
               mailboxKey: mailbox.mailboxKey,
+              sourceType: 'mailbox',
               scopePath: mailbox.scopePath,
               scopeLabel: mailbox.scopeLabel,
               fileName: mailbox.fileName,
@@ -4546,6 +5168,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
               sourcePstPath: mailbox.mailboxKey,
               mailboxName: activeMailboxSession.mailboxName || mailbox.fileName,
               mailboxKey: mailbox.mailboxKey,
+              sourceType: 'mailbox',
               scopePath: mailbox.scopePath,
               scopeLabel: mailbox.scopeLabel,
               fileName: mailbox.fileName,
@@ -4570,6 +5193,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
               sourcePstPath: mailbox.mailboxKey,
               mailboxName: activeMailboxSession.mailboxName || mailbox.fileName,
               mailboxKey: mailbox.mailboxKey,
+              sourceType: 'mailbox',
               scopePath: mailbox.scopePath,
               scopeLabel: mailbox.scopeLabel,
               fileName: mailbox.fileName,
@@ -4587,6 +5211,126 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
               },
               outputFile,
               outputType,
+              status: 'error',
+              error: error instanceof Error ? error.message : String(error)
+            })
+          }
+        }
+      }
+
+      for (const bundle of archiveBundles) {
+        const flaggedReviews = await reviewStore.listReviews(bundle.bundlePath, {
+          flaggedOnly: true,
+          reviewerUsername
+        })
+        if (!flaggedReviews.length) {
+          continue
+        }
+
+        for (const review of flaggedReviews) {
+          const item = await searchIndexStore.findDocumentById(review.messageId)
+          const outputFile = buildArchiveBundleEntryPath(
+            bundle.scopePath,
+            bundle.fileName,
+            item?.archiveEntryPath || review.folderPath || review.messageId,
+            item?.downloadFilename || item?.archiveEntryName || review.subject || review.messageId,
+            review.messageId
+          )
+
+          if (!item || item.archivePath !== bundle.bundlePath || !item.archiveEntryChain?.length) {
+            addBundleManifestItem(manifest, {
+              sourcePstPath: bundle.bundlePath,
+              mailboxName: bundle.fileName,
+              mailboxKey: bundle.bundlePath,
+              sourceType: 'archive',
+              scopePath: bundle.scopePath,
+              scopeLabel: bundle.scopeLabel,
+              fileName: bundle.fileName,
+              folderId: review.folderId,
+              folderPath: review.folderPath,
+              messageId: review.messageId,
+              descriptorId: review.descriptorId,
+              kind: review.kind,
+              subject: review.subject,
+              review: {
+                flagged: review.flagged,
+                tags: [...review.tags],
+                createdAt: review.createdAt,
+                updatedAt: review.updatedAt
+              },
+              outputFile,
+              outputType: 'raw',
+              status: 'error',
+              error: 'Archive item not found in search index'
+            })
+            continue
+          }
+
+          try {
+            const { buffer, contentType, fileName } = await readArchiveBundleItemContent(
+              item.archivePath,
+              item.archiveEntryChain
+            )
+            const mtime = item.sortDate
+              ? new Date(item.sortDate)
+              : item.modificationTime
+                ? new Date(item.modificationTime)
+                : item.creationTime
+                  ? new Date(item.creationTime)
+                  : new Date()
+            await writer.addFile(outputFile, buffer, { mtime })
+            addBundleManifestItem(manifest, {
+              sourcePstPath: bundle.bundlePath,
+              mailboxName: bundle.fileName,
+              mailboxKey: bundle.bundlePath,
+              sourceType: 'archive',
+              scopePath: bundle.scopePath,
+              scopeLabel: bundle.scopeLabel,
+              fileName: bundle.fileName,
+              folderId: item.folderId,
+              folderPath: item.folderPath,
+              messageId: item.messageId,
+              descriptorId: item.descriptorId,
+              kind: item.kind,
+              subject: item.subject,
+              review: {
+                flagged: review.flagged,
+                tags: [...review.tags],
+                createdAt: review.createdAt,
+                updatedAt: review.updatedAt
+              },
+              outputFile,
+              outputType: 'raw',
+              status: 'exported',
+              archivePath: item.archivePath,
+              archiveEntryPath: item.archiveEntryPath,
+              archiveEntryName: item.archiveEntryName,
+              contentType: item.contentType || contentType,
+              downloadFilename: item.downloadFilename || fileName
+            })
+          } catch (error) {
+            addBundleManifestItem(manifest, {
+              sourcePstPath: bundle.bundlePath,
+              mailboxName: bundle.fileName,
+              mailboxKey: bundle.bundlePath,
+              sourceType: 'archive',
+              scopePath: bundle.scopePath,
+              scopeLabel: bundle.scopeLabel,
+              fileName: bundle.fileName,
+              folderId: review.folderId,
+              folderPath: review.folderPath,
+              messageId: review.messageId,
+              descriptorId: review.descriptorId,
+              kind: review.kind,
+              subject: review.subject,
+              review: {
+                flagged: review.flagged,
+                tags: [...review.tags],
+                createdAt: review.createdAt,
+                updatedAt: review.updatedAt
+              },
+              outputFile,
+              outputType: 'raw',
               status: 'error',
               error: error instanceof Error ? error.message : String(error)
             })

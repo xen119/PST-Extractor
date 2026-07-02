@@ -4,5 +4,5 @@
     "moduleResolution": "node",
     "types": ["node"]
   },
-  "include": ["server.ts"]
+  "include": ["server.ts", "../src/**/*.d.ts"]
 }

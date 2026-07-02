@@ -5,8 +5,10 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronDown,
+  Cloud,
   Download,
   Flag,
+  FileText,
   Mail,
   Maximize2,
   LogOut,
@@ -167,11 +169,14 @@ interface SidebarProps {
   caseOptions: Array<{ label: string; value: string; count: number }>
   selectedCasePath: string
   selectedScopePath: string
+  sourceType: 'mailbox' | 'teams' | 'sharepoint'
+  sourceCounts?: Record<'mailbox' | 'teams' | 'sharepoint', number>
   searchOptions: Array<{ label: string; value: string; count: number }>
   catalogFiles: CatalogEntry[]
   selectedPstFileName: string
   onCaseChange: (value: string) => void
   onScopeChange: (value: string) => void
+  onSourceTypeChange: (value: 'mailbox' | 'teams' | 'sharepoint') => void
   canRefreshSearchIndex: boolean
   searchIndexRefreshStatus: SearchIndexRefreshStatus | null
   searchIndexRefreshBusy: boolean
@@ -188,11 +193,14 @@ export function Sidebar({
   caseOptions,
   selectedCasePath,
   selectedScopePath,
+  sourceType,
+  sourceCounts,
   searchOptions,
   catalogFiles,
   selectedPstFileName,
   onCaseChange,
   onScopeChange,
+  onSourceTypeChange,
   canRefreshSearchIndex,
   searchIndexRefreshStatus,
   searchIndexRefreshBusy,
@@ -204,6 +212,29 @@ export function Sidebar({
 }: SidebarProps) {
   const selectedMailbox =
     catalogFiles.find((file) => file.fileName === selectedPstFileName) || catalogFiles[0] || null
+  const tabCounts = sourceCounts || { mailbox: 0, teams: 0, sharepoint: 0 }
+
+  const sourceTabs: Array<{
+    key: 'mailbox' | 'teams' | 'sharepoint'
+    label: string
+    icon: React.ReactNode
+  }> = [
+    {
+      key: 'mailbox',
+      label: 'Mailbox',
+      icon: <Mail className="h-4 w-4" />
+    },
+    {
+      key: 'teams',
+      label: 'Teams',
+      icon: <FileText className="h-4 w-4" />
+    },
+    {
+      key: 'sharepoint',
+      label: 'SharePoint/OneDrive',
+      icon: <Cloud className="h-4 w-4" />
+    }
+  ]
 
   return (
     <div className="panel-surface flex h-full min-h-0 flex-col overflow-hidden">
@@ -242,6 +273,35 @@ export function Sidebar({
       ) : null}
 
       <div className="space-y-3 border-t border-[color:var(--line)] px-4 py-4">
+        <div className="space-y-2">
+          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">Source</div>
+          <div className="grid grid-cols-3 gap-2">
+            {sourceTabs.map((tab) => {
+              const active = sourceType === tab.key
+              const count = tab.key === 'mailbox' ? catalogFiles.length : tabCounts[tab.key] || 0
+              return (
+                <button
+                  key={tab.key}
+                  type="button"
+                  className={cn(
+                    'inline-flex items-center justify-center gap-2 rounded-2xl border px-3 py-2 text-xs font-semibold transition focus:outline-none focus:ring-2 focus:ring-[color:var(--focus-ring)]',
+                    active
+                      ? 'border-[color:var(--accent)] bg-[color:var(--accent-soft)] text-[color:var(--accent)]'
+                      : 'border-[color:var(--line)] bg-[color:var(--surface-strong)] text-[color:var(--text)] hover:border-[color:var(--accent-soft)] hover:bg-[color:var(--surface-soft)]'
+                  )}
+                  onClick={() => onSourceTypeChange(tab.key)}
+                >
+                  {tab.icon}
+                  <span className="truncate">{tab.label}</span>
+                  <span className="rounded-full border border-[color:var(--line)] bg-[color:var(--surface)] px-2 py-0.5 text-[10px] font-medium text-[color:var(--muted)]">
+                    {count}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+
         <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
           Case
           <select
@@ -285,54 +345,64 @@ export function Sidebar({
       <Separator />
 
       <div className="flex min-h-0 flex-1 flex-col">
-        <div className="px-4 py-3">
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-semibold text-[color:var(--text)]">Mailboxes</div>
-            <Badge>{catalogFiles.length}</Badge>
-          </div>
-          {catalogFiles.length ? (
-            <div className="mt-2 flex items-center gap-2">
-              <select
-                className="select flex-1"
-                aria-label="Mailbox selector"
-                value={selectedMailbox?.fileName || ''}
-                onChange={(event) => {
-                  const nextMailbox = catalogFiles.find((file) => file.fileName === event.target.value)
-                  if (nextMailbox) {
-                    onOpenMailbox(nextMailbox.fileName, nextMailbox.scopePath || '')
-                  }
-                }}
-              >
-                {catalogFiles.map((file) => (
-                  <option key={`${file.scopePath || ''}/${file.fileName}`} value={file.fileName}>
-                    {file.fileName}
-                  </option>
-                ))}
-              </select>
+        {sourceType === 'mailbox' ? (
+          <>
+            <div className="px-4 py-3">
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-semibold text-[color:var(--text)]">Mailboxes</div>
+                <Badge>{catalogFiles.length}</Badge>
+              </div>
+              {catalogFiles.length ? (
+                <div className="mt-2 flex items-center gap-2">
+                  <select
+                    className="select flex-1"
+                    aria-label="Mailbox selector"
+                    value={selectedMailbox?.fileName || ''}
+                    onChange={(event) => {
+                      const nextMailbox = catalogFiles.find((file) => file.fileName === event.target.value)
+                      if (nextMailbox) {
+                        onOpenMailbox(nextMailbox.fileName, nextMailbox.scopePath || '')
+                      }
+                    }}
+                  >
+                    {catalogFiles.map((file) => (
+                      <option key={`${file.scopePath || ''}/${file.fileName}`} value={file.fileName}>
+                        {file.fileName}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <div className="mt-2 empty-state min-h-[112px]">No PST files are available in the current scope.</div>
+              )}
             </div>
-          ) : (
-            <div className="mt-2 empty-state min-h-[112px]">No PST files are available in the current scope.</div>
-          )}
-        </div>
 
-        <Separator />
+            <Separator />
 
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div className="panel-heading">
-            <div>
-          <div className="panel-title">Folders</div>
-              <div className="text-sm text-[color:var(--muted)]">Navigate mailbox structure</div>
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="panel-heading">
+                <div>
+                  <div className="panel-title">Folders</div>
+                  <div className="text-sm text-[color:var(--muted)]">Navigate mailbox structure</div>
+                </div>
+                <Badge>{folderTree ? 'loaded' : 'empty'}</Badge>
+              </div>
+              <ScrollArea className="min-h-0 flex-1 px-4 pb-4 pt-1">
+                {folderTree ? (
+                  <FolderList node={folderTree} currentFolderId={currentFolderId} onSelectFolder={onSelectFolder} />
+                ) : (
+                  <div className="empty-state">Open a PST to see folders.</div>
+                )}
+              </ScrollArea>
             </div>
-            <Badge>{folderTree ? 'loaded' : 'empty'}</Badge>
+          </>
+        ) : (
+          <div className="px-4 pb-4 pt-3">
+            <div className="empty-state min-h-[180px]">
+              Search results in {sourceType === 'teams' ? 'Teams' : 'SharePoint/OneDrive'} will appear here.
+            </div>
           </div>
-          <ScrollArea className="min-h-0 flex-1 px-4 pb-4 pt-1">
-            {folderTree ? (
-              <FolderList node={folderTree} currentFolderId={currentFolderId} onSelectFolder={onSelectFolder} />
-            ) : (
-              <div className="empty-state">Open a PST to see folders.</div>
-            )}
-          </ScrollArea>
-        </div>
+        )}
       </div>
     </div>
   )
@@ -397,6 +467,7 @@ interface MessageListProps {
   } | null
   loading: boolean
   query: string
+  sourceType: 'mailbox' | 'teams' | 'sharepoint'
   searchScope: 'pst' | 'search' | 'all'
   mailOnly: boolean
   sort: string
@@ -422,6 +493,7 @@ export function MessageList({
   page,
   loading,
   query,
+  sourceType,
   searchScope,
   mailOnly,
   sort,
@@ -465,15 +537,18 @@ export function MessageList({
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <IconButton label="Download flagged bundle" onClick={onOpenBundle}>
-            <Download className="h-4 w-4" />
-          </IconButton>
+          {sourceType === 'mailbox' ? (
+            <IconButton label="Download flagged bundle" onClick={onOpenBundle}>
+              <Download className="h-4 w-4" />
+            </IconButton>
+          ) : null}
         </div>
       </div>
 
       <div className="border-t border-[color:var(--line)] px-4 py-4">
         <MessageSearchBar
           query={query}
+          sourceType={sourceType}
           searchScope={searchScope}
           mailOnly={mailOnly}
           sort={sort}
@@ -551,6 +626,7 @@ export function MessageList({
 
 function MessageSearchBar(props: {
   query: string
+  sourceType: 'mailbox' | 'teams' | 'sharepoint'
   searchScope: 'pst' | 'search' | 'all'
   mailOnly: boolean
   sort: string
@@ -564,6 +640,16 @@ function MessageSearchBar(props: {
   onReviewFlaggedChange: (value: boolean) => void
   onReviewTaggedChange: (value: boolean) => void
 }) {
+  const effectiveSearchScope = props.sourceType === 'mailbox' ? props.searchScope : 'search'
+  const scopeOptions =
+    props.sourceType === 'mailbox'
+      ? [
+          { value: 'pst', label: 'Selected PST' },
+          { value: 'search', label: 'Selected search' },
+          { value: 'all', label: 'All cases/searches' }
+        ]
+      : [{ value: 'search', label: 'Selected search' }]
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-end gap-2">
@@ -595,12 +681,14 @@ function MessageSearchBar(props: {
           Scope
           <select
             className="select"
-            value={props.searchScope}
+            value={effectiveSearchScope}
             onChange={(event) => props.onSearchScopeChange(event.target.value as 'pst' | 'search' | 'all')}
           >
-            <option value="pst">Selected PST</option>
-            <option value="search">Selected search</option>
-            <option value="all">All cases/searches</option>
+            {scopeOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
           </select>
         </label>
 
@@ -662,6 +750,11 @@ export function MessageRow({ item, active, onSelect }: MessageRowProps) {
   const snippet = item.recipientText || item.displayTo || item.folderPath || item.scopeLabel || ''
   const review = item.review
   const chips = [
+    item.sourceType && item.sourceType !== 'mailbox' ? (
+      <span key="source" className="chip chip-active">
+        {item.sourceType === 'teams' ? 'Teams' : 'SharePoint/OneDrive'}
+      </span>
+    ) : null,
     item.kind ? <span key="kind" className="chip">{item.kind}</span> : null,
     item.hasAttachments ? <span key="attachments" className="chip chip-active">Attachments</span> : null,
     item.isRead ? <span key="read" className="chip">Read</span> : <span key="unread" className="chip chip-active">Unread</span>,
@@ -706,6 +799,7 @@ interface EmailPreviewProps {
   theme: 'light' | 'dark'
   onDownloadJson: () => void
   onDownloadEml: () => void
+  onDownloadItem?: () => void
   onToggleFlag: () => void
   onClearReview: () => void
   onOpenTags: () => void
@@ -724,6 +818,7 @@ export function EmailPreview({
   theme,
   onDownloadJson,
   onDownloadEml,
+  onDownloadItem,
   onToggleFlag,
   onClearReview,
   onOpenTags,
@@ -752,13 +847,19 @@ export function EmailPreview({
   const bodyText = detail.bodyText || detail.bodyPrefix || detail.parseError || ''
   const hasHtml = Boolean(bodyHtml.trim())
   const bodyFrame = hasHtml ? buildHtmlFrameSrcDoc(bodyHtml, theme === 'dark') : ''
+  const isArchiveItem = Boolean(detail.archivePath)
+  const downloadUrl = detail.downloadUrl || ''
+  const isImagePreview = Boolean(detail.contentType && detail.contentType.startsWith('image/'))
+  const isPdfPreview = Boolean(detail.contentType === 'application/pdf')
 
   return (
     <div className="panel-surface flex h-full min-h-0 flex-col overflow-hidden">
       <div className="panel-heading border-b border-[color:var(--line)]">
         <div>
-          <div className="panel-title">Reading pane</div>
-          <div className="text-sm text-[color:var(--muted)]">Message details and preview</div>
+          <div className="panel-title">{isArchiveItem ? 'Document preview' : 'Reading pane'}</div>
+          <div className="text-sm text-[color:var(--muted)]">
+            {isArchiveItem ? 'Teams or document preview' : 'Message details and preview'}
+          </div>
         </div>
         {showNavigationControls ? (
           <div className="flex items-center gap-2">
@@ -783,8 +884,9 @@ export function EmailPreview({
             tagCount={tagCount}
             onOpenTags={onOpenTags}
             onOpenFullView={onOpenFullView}
-            onDownloadJson={onDownloadJson}
-            onDownloadEml={onDownloadEml}
+            onDownloadJson={isArchiveItem ? undefined : onDownloadJson}
+            onDownloadEml={isArchiveItem ? undefined : onDownloadEml}
+            onDownloadItem={isArchiveItem ? onDownloadItem : undefined}
             onToggleFlag={onToggleFlag}
             onClearReview={onClearReview}
           />
@@ -808,11 +910,33 @@ export function EmailPreview({
                   srcDoc={bodyFrame}
                   title="Message body"
                 />
+              ) : isImagePreview && downloadUrl ? (
+                <img
+                  alt={getMessagePreviewTitle(detail)}
+                  className="max-h-[42rem] w-auto max-w-full rounded-2xl border border-[color:var(--line)] object-contain"
+                  src={downloadUrl}
+                />
+              ) : isPdfPreview && downloadUrl ? (
+                <iframe
+                  className="h-[42rem] w-full rounded-2xl border border-[color:var(--line)] bg-white"
+                  src={downloadUrl}
+                  title="Document preview"
+                />
               ) : (
                 <pre className="whitespace-pre-wrap rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-4 text-sm leading-7 text-[color:var(--text)]">
                   {bodyText || 'No message body is available.'}
                 </pre>
               )}
+              {isArchiveItem && !hasHtml && !bodyText && downloadUrl ? (
+                <div className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-4 py-3 text-sm text-[color:var(--muted)]">
+                  <span>No inline preview is available for this file type.</span>
+                  {onDownloadItem ? (
+                    <Button variant="secondary" onClick={onDownloadItem}>
+                      Download file
+                    </Button>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           </div>
 
@@ -844,6 +968,7 @@ function EmailHeader({
   onOpenFullView,
   onDownloadJson,
   onDownloadEml,
+  onDownloadItem,
   onToggleFlag,
   onClearReview
 }: {
@@ -852,18 +977,20 @@ function EmailHeader({
   senderEmail: string
   sentTime: string
   tagCount: number
-  onOpenTags: () => void
+  onOpenTags?: () => void
   onOpenFullView?: () => void
-  onDownloadJson: () => void
-  onDownloadEml: () => void
-  onToggleFlag: () => void
-  onClearReview: () => void
+  onDownloadJson?: () => void
+  onDownloadEml?: () => void
+  onDownloadItem?: () => void
+  onToggleFlag?: () => void
+  onClearReview?: () => void
 }) {
   const recipients = [
     detail.displayTo || detail.resolvedDisplayTo,
     detail.displayCC || detail.resolvedDisplayCC,
     detail.displayBCC || detail.resolvedDisplayBCC
   ].filter(Boolean)
+  const isArchiveItem = Boolean(detail.archivePath)
 
   return (
     <div className="p-4">
@@ -921,25 +1048,42 @@ function EmailHeader({
           ) : null}
           <div className="flex items-center gap-2">
             <Badge>{tagCount}</Badge>
-            <IconButton label="Manage tags" onClick={onOpenTags}>
-              <TagIcon className="h-4 w-4" />
-            </IconButton>
+            {onOpenTags ? (
+              <IconButton label="Manage tags" onClick={onOpenTags}>
+                <TagIcon className="h-4 w-4" />
+              </IconButton>
+            ) : null}
           </div>
-          <IconButton label="Download JSON" onClick={onDownloadJson}>
-            <Download className="h-4 w-4" />
-          </IconButton>
-          <IconButton label="Download EML" onClick={onDownloadEml}>
-            <Download className="h-4 w-4" />
-          </IconButton>
-          {detail.review?.flagged ? (
-            <IconButton label="Clear flag" className="icon-button-danger" onClick={onClearReview}>
-              <Flag className="h-4 w-4" />
+          {isArchiveItem && onDownloadItem ? (
+            <IconButton label="Download file" onClick={onDownloadItem}>
+              <Download className="h-4 w-4" />
             </IconButton>
-          ) : (
+          ) : null}
+          {!isArchiveItem ? (
+            <>
+              {onDownloadJson ? (
+                <IconButton label="Download JSON" onClick={onDownloadJson}>
+                  <Download className="h-4 w-4" />
+                </IconButton>
+              ) : null}
+              {onDownloadEml ? (
+                <IconButton label="Download EML" onClick={onDownloadEml}>
+                  <Download className="h-4 w-4" />
+                </IconButton>
+              ) : null}
+            </>
+          ) : null}
+          {detail.review?.flagged ? (
+            onClearReview ? (
+              <IconButton label="Clear flag" className="icon-button-danger" onClick={onClearReview}>
+                <Flag className="h-4 w-4" />
+              </IconButton>
+            ) : null
+          ) : onToggleFlag ? (
             <IconButton label="Flag message" onClick={onToggleFlag}>
               <Flag className="h-4 w-4" />
             </IconButton>
-          )}
+          ) : null}
         </div>
       </div>
     </div>

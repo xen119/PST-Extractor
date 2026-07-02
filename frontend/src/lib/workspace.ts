@@ -11,6 +11,7 @@ const STORAGE_KEYS = {
   messageId: 'pst-mail-explorer.messageId',
   query: 'pst-mail-explorer.query',
   searchScope: 'pst-mail-explorer.searchScope',
+  sourceType: 'pst-mail-explorer.sourceType',
   mailOnly: 'pst-mail-explorer.mailOnly',
   sort: 'pst-mail-explorer.sort',
   reviewFlaggedOnly: 'pst-mail-explorer.reviewFlaggedOnly',

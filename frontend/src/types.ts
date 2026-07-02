@@ -3,6 +3,8 @@ export interface AuthUser {
   assignedCasePaths: string[]
 }
 
+export type SearchSourceType = 'mailbox' | 'teams' | 'sharepoint'
+
 export interface AuthStatus {
   authenticated: boolean
   enabled: boolean
@@ -80,6 +82,7 @@ export interface SessionOpenResponse {
 
 export interface MessageSummary {
   id: string
+  sourceType?: SearchSourceType
   messageId?: string
   descriptorId?: string
   folderId?: string
@@ -114,6 +117,16 @@ export interface MessageSummary {
   fileName?: string
   mailboxName?: string
   parseError?: string
+  archivePath?: string
+  archiveEntryPath?: string
+  archiveEntryChain?: string[]
+  archiveEntryName?: string
+  contentType?: string
+  downloadFilename?: string
+  previewKind?: 'text' | 'html' | 'binary'
+  previewText?: string
+  previewHtml?: string
+  downloadUrl?: string
 }
 
 export interface ReviewFilters {
@@ -137,6 +150,8 @@ export interface PageResponse<TItem> {
   query: string
   mailOnly: boolean
   sort: string
+  sourceType?: SearchSourceType | 'all'
+  sourceCounts?: Record<SearchSourceType, number>
   reviewFilters?: ReviewFilters
 }
 
@@ -149,6 +164,7 @@ export interface SearchResponse {
   scope: 'all' | 'search' | 'pst'
   scopePath: string
   scopeLabel: string
+  sourceType?: SearchSourceType | 'all'
   page: PageResponse<MessageSummary>
 }
 
@@ -172,6 +188,7 @@ export interface AttachmentDetail {
 
 export interface MessageDetail {
   id?: string
+  sourceType?: SearchSourceType
   subject?: string
   senderName?: string
   senderEmailAddress?: string
@@ -195,6 +212,16 @@ export interface MessageDetail {
   folderId?: string
   folderPath?: string
   mailboxName?: string
+  archivePath?: string
+  archiveEntryPath?: string
+  archiveEntryChain?: string[]
+  archiveEntryName?: string
+  contentType?: string
+  downloadFilename?: string
+  previewKind?: 'text' | 'html' | 'binary'
+  previewText?: string
+  previewHtml?: string
+  downloadUrl?: string
 }
 
 export interface MessageDetailResponse {

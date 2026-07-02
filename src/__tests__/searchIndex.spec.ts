@@ -1,4 +1,14 @@
-import { MemorySearchIndexStore, type SearchIndexDocument } from '../searchIndex'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
+import AdmZip from 'adm-zip'
+import {
+  MemorySearchIndexStore,
+  refreshSearchIndexFromCatalog,
+  type SearchIndexDocument
+} from '../searchIndex'
+import type { ReviewStore } from '../reviewStore'
+import { extractArchiveBundleItems, listArchiveBundleFiles } from '../archiveBundles'
 
 function makeDocument(overrides: Partial<SearchIndexDocument> = {}): SearchIndexDocument {
   const now = new Date('2024-01-01T00:00:00.000Z').toISOString()
@@ -51,6 +61,7 @@ function makeDocument(overrides: Partial<SearchIndexDocument> = {}): SearchIndex
     reviewStates: [],
     reviewTagValues: [],
     updatedAt: now,
+    sourceType: 'mailbox',
     ...overrides
   }
 
@@ -339,5 +350,155 @@ describe('search index cache', () => {
     })
     expect(bobResults.total).toBe(0)
     expect(bobResults.items).toHaveLength(0)
+  })
+
+  it('discovers and indexes top-level items bundles as searchable archive corpora', async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pst-extractor-archive-index-'))
+    try {
+      const scopeDir = path.join(rootDir, 'Case1', 'Search1')
+      fs.mkdirSync(scopeDir, { recursive: true })
+
+      const bundlePath = path.join(
+        scopeDir,
+        'Items.1.001.BONUS_AND_COMMISSION_DECISION_MAKING.zip'
+      )
+
+      const nestedZip = new AdmZip()
+      nestedZip.addFile(
+        'Exchange/Thread/TeamsMessagesData/chat.txt',
+        Buffer.from('Teams chat about the launch plan', 'utf8')
+      )
+
+      const bundleZip = new AdmZip()
+      bundleZip.addFile(
+        'SharePoint/Docs/report.txt',
+        Buffer.from('SharePoint quarterly report', 'utf8')
+      )
+      bundleZip.addFile('Exchange/Team/nested.zip', nestedZip.toBuffer())
+      bundleZip.writeZip(bundlePath)
+
+      const catalog = listArchiveBundleFiles(rootDir)
+      expect(catalog.scopes).toHaveLength(1)
+      expect(catalog.scopes[0].fileCount).toBe(1)
+
+      const items = await extractArchiveBundleItems(bundlePath, 'Case1/Search1')
+      expect(items).toHaveLength(2)
+      expect(items.some((item) => item.sourceType === 'teams')).toBe(true)
+      expect(items.some((item) => item.sourceType === 'sharepoint')).toBe(true)
+
+      const reviewStore = {
+        kind: 'memory' as const,
+        isPersistent: false,
+        async listReviews() {
+          return []
+        }
+      } as ReviewStore
+
+      const store = new MemorySearchIndexStore()
+      const summary = await refreshSearchIndexFromCatalog(rootDir, reviewStore, store)
+      expect(summary.messageCount).toBe(2)
+
+      const teamsResults = await store.search({
+        scope: 'all',
+        sourceType: 'teams',
+        query: 'launch',
+        mode: 'and',
+        mailOnly: false,
+        sort: 'date-desc',
+        page: 1,
+        pageSize: 20,
+        reviewFlaggedOnly: false,
+        reviewTaggedOnly: false,
+        reviewTag: ''
+      })
+      expect(teamsResults.total).toBe(1)
+      expect(teamsResults.items[0].sourceType).toBe('teams')
+      expect(teamsResults.sourceCounts.teams).toBe(1)
+
+      const sharepointResults = await store.search({
+        scope: 'all',
+        sourceType: 'sharepoint',
+        query: 'quarterly',
+        mode: 'and',
+        mailOnly: false,
+        sort: 'date-desc',
+        page: 1,
+        pageSize: 20,
+        reviewFlaggedOnly: false,
+        reviewTaggedOnly: false,
+        reviewTag: ''
+      })
+      expect(sharepointResults.total).toBe(1)
+      expect(sharepointResults.items[0].sourceType).toBe('sharepoint')
+      expect(sharepointResults.sourceCounts.sharepoint).toBe(1)
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true })
+    }
+  })
+
+  it('pretty prints JSON preview text from Teams archives', async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pst-extractor-archive-json-'))
+    try {
+      const scopeDir = path.join(rootDir, 'Case1', 'Search1')
+      fs.mkdirSync(scopeDir, { recursive: true })
+
+      const bundlePath = path.join(scopeDir, 'Items.1.001.TEAMS.zip')
+      const bundleZip = new AdmZip()
+      bundleZip.addFile(
+        'Exchange/Thread/TeamsMessagesData/chat.json',
+        Buffer.from(JSON.stringify({ subject: 'Launch', body: 'Teams chat' }), 'utf8')
+      )
+      bundleZip.writeZip(bundlePath)
+
+      const items = await extractArchiveBundleItems(bundlePath, 'Case1/Search1')
+      expect(items).toHaveLength(1)
+      expect(items[0].sourceType).toBe('teams')
+      expect(items[0].contentType).toBe('application/json; charset=utf-8')
+      expect(items[0].previewText).toBe('{\n  "subject": "Launch",\n  "body": "Teams chat"\n}')
+      expect(items[0].searchText).toBe(items[0].previewText)
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true })
+    }
+  })
+
+  it('falls back to tolerant archive reading when trailing bytes break strict zip parsing', async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pst-extractor-archive-fallback-'))
+    try {
+      const scopeDir = path.join(rootDir, 'Case1', 'Search1')
+      fs.mkdirSync(scopeDir, { recursive: true })
+
+      const bundlePath = path.join(scopeDir, 'Items.1.001.BROKEN.zip')
+      const bundleZip = new AdmZip()
+      bundleZip.addFile('SharePoint/Docs/good.txt', Buffer.from('good content', 'utf8'))
+      bundleZip.writeZip(bundlePath)
+      fs.appendFileSync(bundlePath, Buffer.from('JUNKJUNKJUNK'))
+
+      const items = await extractArchiveBundleItems(bundlePath, 'Case1/Search1')
+      expect(items).toHaveLength(1)
+      expect(items[0].entryName).toBe('good.txt')
+      expect(items[0].previewText).toBe('good content')
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true })
+    }
+  })
+
+  it('skips unreadable archive entries instead of failing the whole bundle', async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pst-extractor-archive-skip-'))
+    try {
+      const scopeDir = path.join(rootDir, 'Case1', 'Search1')
+      fs.mkdirSync(scopeDir, { recursive: true })
+
+      const bundlePath = path.join(scopeDir, 'Items.1.001.FAILSAFE.zip')
+      const bundleZip = new AdmZip()
+      bundleZip.addFile('SharePoint/Docs/good.txt', Buffer.from('good content', 'utf8'))
+      bundleZip.addFile('SharePoint/Docs/bad.zip', Buffer.from('not a zip archive', 'utf8'))
+      bundleZip.writeZip(bundlePath)
+
+      const items = await extractArchiveBundleItems(bundlePath, 'Case1/Search1')
+      expect(items).toHaveLength(1)
+      expect(items[0].entryName).toBe('good.txt')
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true })
+    }
   })
 })

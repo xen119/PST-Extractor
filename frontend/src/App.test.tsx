@@ -258,9 +258,12 @@ describe('auth shell', () => {
     expect(await screen.findByText('Reindexing')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Refresh search index' })).toBeDisabled()
 
-    await waitFor(() => {
-      expect(screen.queryByText('Reindexing')).not.toBeInTheDocument()
-    })
+    await waitFor(
+      () => {
+        expect(screen.queryByText('Reindexing')).not.toBeInTheDocument()
+      },
+      { timeout: 5000 }
+    )
     expect(screen.getByRole('button', { name: 'Refresh search index' })).toBeEnabled()
   })
 
@@ -330,9 +333,12 @@ describe('auth shell', () => {
     await user.click(await screen.findByRole('button', { name: 'Refresh search index' }))
 
     expect(await screen.findByText('Reindexing')).toBeInTheDocument()
-    await waitFor(() => {
-      expect(screen.getByText('Reindex failed')).toBeInTheDocument()
-    })
+    await waitFor(
+      () => {
+        expect(screen.getByText('Reindex failed')).toBeInTheDocument()
+      },
+      { timeout: 5000 }
+    )
     expect(screen.getByText('Refresh failed')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Refresh search index' })).toBeEnabled()
   })
@@ -522,6 +528,8 @@ describe('shell and preview', () => {
           ]}
           selectedCasePath="Case Alpha"
           selectedScopePath="Case Alpha/Search One"
+          sourceType="mailbox"
+          sourceCounts={{ mailbox: 1, teams: 0, sharepoint: 0 }}
           searchOptions={[
             { label: 'Search One', value: 'Case Alpha/Search One', count: 2 },
             { label: 'Search Two', value: 'Case Alpha/Search Two', count: 1 }
@@ -538,8 +546,11 @@ describe('shell and preview', () => {
           onCaseChange={vi.fn()}
           onScopeChange={vi.fn()}
           canRefreshSearchIndex
+          searchIndexRefreshStatus={null}
+          searchIndexRefreshBusy={false}
           onRefreshSearchIndex={vi.fn()}
           onOpenMailbox={vi.fn()}
+          onSourceTypeChange={vi.fn()}
           folderTree={null}
           currentFolderId=""
           onSelectFolder={vi.fn()}
@@ -564,14 +575,19 @@ describe('shell and preview', () => {
           caseOptions={[{ label: 'Case Alpha', value: 'Case Alpha', count: 1 }]}
           selectedCasePath="Case Alpha"
           selectedScopePath="Case Alpha/Search One"
+          sourceType="mailbox"
+          sourceCounts={{ mailbox: 0, teams: 0, sharepoint: 0 }}
           searchOptions={[{ label: 'Search One', value: 'Case Alpha/Search One', count: 1 }]}
           catalogFiles={[]}
           selectedPstFileName=""
           onCaseChange={vi.fn()}
           onScopeChange={vi.fn()}
           canRefreshSearchIndex={false}
+          searchIndexRefreshStatus={null}
+          searchIndexRefreshBusy={false}
           onRefreshSearchIndex={vi.fn()}
           onOpenMailbox={vi.fn()}
+          onSourceTypeChange={vi.fn()}
           folderTree={null}
           currentFolderId=""
           onSelectFolder={vi.fn()}
@@ -615,6 +631,8 @@ describe('shell and preview', () => {
           caseOptions={[{ label: 'Case Alpha', value: 'Case Alpha', count: 1 }]}
           selectedCasePath="Case Alpha"
           selectedScopePath="Case Alpha/Search One"
+          sourceType="mailbox"
+          sourceCounts={{ mailbox: 1, teams: 0, sharepoint: 0 }}
           searchOptions={[{ label: 'Search One', value: 'Case Alpha/Search One', count: 1 }]}
           catalogFiles={[
             {
@@ -629,8 +647,11 @@ describe('shell and preview', () => {
           onCaseChange={vi.fn()}
           onScopeChange={vi.fn()}
           canRefreshSearchIndex
+          searchIndexRefreshStatus={null}
+          searchIndexRefreshBusy={false}
           onRefreshSearchIndex={vi.fn()}
           onOpenMailbox={vi.fn()}
+          onSourceTypeChange={vi.fn()}
           folderTree={tree}
           currentFolderId="inbox"
           onSelectFolder={vi.fn()}
@@ -657,15 +678,16 @@ describe('shell and preview', () => {
     render(
       <div style={{ width: 1600, height: 1000 }}>
         <MessageList
-        page={{
-          items: [sampleRow],
-          total: 1,
-          page: 1,
-          totalPages: 1,
-          query: ''
-        }}
+          page={{
+            items: [sampleRow],
+            total: 1,
+            page: 1,
+            totalPages: 1,
+            query: ''
+          }}
           loading={false}
           query=""
+          sourceType="mailbox"
           searchScope="pst"
           mailOnly={false}
           sort="date-desc"
@@ -715,6 +737,51 @@ describe('shell and preview', () => {
     expect(onOpenFullView).toHaveBeenCalled()
     await user.click(screen.getByLabelText('Download JSON'))
     expect(screen.getByLabelText('Recipients')).toBeInTheDocument()
+  })
+
+  it('shows archive document previews with a download fallback', () => {
+    render(
+      <div style={{ width: 1200, height: 900 }}>
+        <EmailPreview
+          detail={{
+            ...sampleDetail,
+            subject: 'Quarterly report',
+            bodyText: '',
+            archivePath: 'Case1/Search1/Items.1.001.BONUS_AND_COMMISSION_DECISION_MAKING.zip',
+            archiveEntryPath: 'SharePoint/Docs/report.docx',
+            archiveEntryChain: ['SharePoint/Docs/report.zip', 'SharePoint/Docs/report.docx'],
+            archiveEntryName: 'report.docx',
+            contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            downloadFilename: 'report.docx',
+            previewKind: 'text',
+            previewText: 'Quarterly report',
+            previewHtml: '',
+            downloadUrl: '/api/items/archive-1/content'
+          }}
+          theme="light"
+          onDownloadJson={vi.fn()}
+          onDownloadEml={vi.fn()}
+          onDownloadItem={vi.fn()}
+          onToggleFlag={vi.fn()}
+          onClearReview={vi.fn()}
+          onOpenTags={vi.fn()}
+          onOpenFullView={vi.fn()}
+          tagCount={0}
+          onOpenAttachment={vi.fn()}
+          onOpenPrev={vi.fn()}
+          onOpenNext={vi.fn()}
+          canNavigatePrev={false}
+          canNavigateNext={false}
+        />
+      </div>
+    )
+
+    expect(screen.getByText('Document preview')).toBeInTheDocument()
+    expect(screen.getByText('Teams or document preview')).toBeInTheDocument()
+    expect(screen.getByText('Quarterly report')).toBeInTheDocument()
+    expect(screen.getByText('No inline preview is available for this file type.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Clear flag' })).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Download file' })).toHaveLength(2)
   })
 
   it('opens a search result from a different mailbox in the reading pane', async () => {

@@ -1,6 +1,7 @@
 import type {
   ActivityLogResponse,
   AuthStatus,
+  MessageDetail,
   HiddenRulesResponse,
   InviteAcceptResponse,
   InviteLookupResponse,
@@ -217,6 +218,7 @@ export const api = {
   },
   search: (params: {
     scope: 'all' | 'search' | 'pst'
+    sourceType?: 'mailbox' | 'teams' | 'sharepoint'
     query: string
     mode: 'and' | 'or'
     page: number
@@ -231,6 +233,7 @@ export const api = {
   }) => {
     const query = buildQuery({
       scope: params.scope,
+      sourceType: params.sourceType,
       query: params.query,
       mode: params.mode,
       page: params.page,
@@ -246,6 +249,27 @@ export const api = {
     return requestJson<SearchResponse>(query ? `/api/search?${query}` : '/api/search', {
       cache: 'no-store'
     })
+  },
+  item: {
+    detail: (itemId: string) =>
+      requestJson<{ detail: MessageDetail }>(`/api/items/${encodeURIComponent(itemId)}`, {
+        cache: 'no-store'
+      }),
+    review: (itemId: string) =>
+      requestJson<ReviewUpdateResponse>(`/api/items/${encodeURIComponent(itemId)}/review`, {
+        cache: 'no-store'
+      }),
+    updateReview: (itemId: string, payload: { flagged?: boolean; tags?: string[] | string }) =>
+      requestJson<ReviewUpdateResponse>(`/api/items/${encodeURIComponent(itemId)}/review`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }),
+    clearReview: (itemId: string) =>
+      requestJson<ReviewUpdateResponse>(`/api/items/${encodeURIComponent(itemId)}/review`, {
+        method: 'DELETE'
+      }),
+    contentUrl: (itemId: string) => `/api/items/${encodeURIComponent(itemId)}/content`
   },
   session: {
     summary: (sessionId: string) =>

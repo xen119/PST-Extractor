@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import * as http from 'http'
 import * as os from 'os'
 import * as path from 'path'
+import AdmZip from 'adm-zip'
 import { AddressInfo } from 'net'
 import { generateTotpCode } from '../authSecurity'
 import { createMemoryAuthUserStore, type AuthUserStore } from '../authUsers'
@@ -35,6 +36,14 @@ function stageFixture(sourcePath: string, targetPath: string): void {
   } catch {
     fs.copyFileSync(sourcePath, targetPath)
   }
+}
+
+function stageArchiveBundle(targetPath: string, entries: Array<[string, string]>): void {
+  const zip = new AdmZip()
+  for (const [entryName, content] of entries) {
+    zip.addFile(entryName, Buffer.from(content, 'utf8'))
+  }
+  zip.writeZip(targetPath)
 }
 
 function findMailFolder(node: {
@@ -641,6 +650,7 @@ describe('pst review api', () => {
     const openApi = await requestJson(`${started.baseUrl}/api/openapi.json`)
     expect(openApi.paths['/api/psts/open']).toBeDefined()
     expect(openApi.paths['/api/sessions/{sessionId}/messages/{messageId}/review']).toBeDefined()
+    expect(openApi.paths['/api/items/{itemId}/review']).toBeDefined()
     expect(openApi.paths['/api/exports/flagged.zip']).toBeDefined()
     expect(openApi.paths['/api/auth/users/{username}/mfa/enforce']).toBeDefined()
     expect(openApi.paths['/api/auth/users/{username}/access']).toBeDefined()
@@ -1186,6 +1196,133 @@ describe('pst review api', () => {
     expect(allManifest.items).toHaveLength(2)
     expect([...allEntries.keys()].some((name) => name.includes('first.ost'))).toBe(true)
     expect([...allEntries.keys()].some((name) => name.includes('second.ost'))).toBe(true)
+  })
+
+  it('flags archive items and exports them in the flagged bundle', async () => {
+    rootDir = makeTempDir('pst-review-api-archive-bundle-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
+    stageArchiveBundle(path.join(pstDir, 'Case1', 'Search1', 'Items.1.001.BONUS_AND_COMMISSION_DECISION_MAKING.zip'), [
+      ['Exchange/Thread/TeamsMessagesData/chat.json', JSON.stringify({ subject: 'Launch', body: 'Teams chat' })],
+      ['SharePoint/Docs/report.txt', 'Quarterly report']
+    ])
+    fs.mkdirSync(path.join(pstDir, 'Case2', 'Search2'), { recursive: true })
+    stageArchiveBundle(path.join(pstDir, 'Case2', 'Search2', 'Items.1.001.OTHER.zip'), [
+      ['Exchange/Thread/TeamsMessagesData/chat.json', JSON.stringify({ subject: 'Launch', body: 'Other teams chat' })]
+    ])
+
+    const started = await startApp(pstDir)
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const scopedTeamsSearch = await requestJson(
+      `${started.baseUrl}/api/search?scope=all&scopePath=${encodeURIComponent(
+        'Case1/Search1'
+      )}&sourceType=teams&query=launch&mode=and&page=1&pageSize=20&mailOnly=0&sort=date-desc`
+    )
+    expect(scopedTeamsSearch.page.items).toHaveLength(1)
+    expect(scopedTeamsSearch.page.scopePath).toBe('Case1/Search1')
+    expect(scopedTeamsSearch.page.items[0].scopePath).toBe('Case1/Search1')
+
+    const teamsSearch = await requestJson(
+      `${started.baseUrl}/api/search?scope=search&scopePath=${encodeURIComponent(
+        'Case1/Search1'
+      )}&sourceType=teams&query=launch&mode=and&page=1&pageSize=20&mailOnly=0&sort=date-desc`
+    )
+    expect(teamsSearch.page.items).toHaveLength(1)
+    expect(teamsSearch.page.items[0].sourceType).toBe('teams')
+
+    const teamsReview = await requestJson(
+      `${started.baseUrl}/api/items/${encodeURIComponent(teamsSearch.page.items[0].id)}/review`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          flagged: true,
+          tags: ['Teams']
+        })
+      }
+    )
+    expect(teamsReview.review.flagged).toBe(true)
+    expect(teamsReview.review.tags).toEqual(['Teams'])
+
+    const sharepointSearch = await requestJson(
+      `${started.baseUrl}/api/search?scope=search&scopePath=${encodeURIComponent(
+        'Case1/Search1'
+      )}&sourceType=sharepoint&query=quarterly&mode=and&page=1&pageSize=20&mailOnly=0&sort=date-desc`
+    )
+    expect(sharepointSearch.page.items).toHaveLength(1)
+    expect(sharepointSearch.page.items[0].sourceType).toBe('sharepoint')
+
+    const sharepointReview = await requestJson(
+      `${started.baseUrl}/api/items/${encodeURIComponent(sharepointSearch.page.items[0].id)}/review`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          flagged: true,
+          tags: ['SharePoint']
+        })
+      }
+    )
+    expect(sharepointReview.review.flagged).toBe(true)
+    expect(sharepointReview.review.tags).toEqual(['SharePoint'])
+
+    const { response, buffer } = await requestBuffer(
+      `${started.baseUrl}/api/exports/flagged.zip?scope=search&scopePath=${encodeURIComponent(
+        'Case1/Search1'
+      )}`
+    )
+    expect(response.headers.get('content-type')).toContain('application/zip')
+    const entries = parseStoredZipEntries(buffer)
+    const manifest = JSON.parse(entries.get('manifest.json')!.toString('utf8'))
+    expect(manifest.counts.total).toBe(2)
+    expect(manifest.counts.exported).toBe(2)
+    expect(manifest.items.every((item: { sourceType: string }) => item.sourceType === 'archive')).toBe(
+      true
+    )
+    expect(manifest.items.every((item: { outputType: string }) => item.outputType === 'raw')).toBe(true)
+    expect([...entries.keys()].some((name) => name.endsWith('chat.json'))).toBe(true)
+    expect([...entries.keys()].some((name) => name.endsWith('report.txt'))).toBe(true)
+    expect([...entries.keys()].some((name) => name.endsWith('.eml'))).toBe(false)
+    expect([...entries.keys()].some((name) => name.endsWith('.ics'))).toBe(false)
+  })
+
+  it('does not leak archive search results across case/search scopes', async () => {
+    rootDir = makeTempDir('pst-review-api-archive-scope-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
+    fs.mkdirSync(path.join(pstDir, 'Case2', 'Search2'), { recursive: true })
+    stageArchiveBundle(path.join(pstDir, 'Case2', 'Search2', 'Items.1.001.OTHER.zip'), [
+      ['Exchange/Thread/TeamsMessagesData/chat.json', JSON.stringify({ subject: 'Launch', body: 'Scoped chat' })]
+    ])
+
+    const started = await startApp(pstDir)
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const scopedTeamsSearch = await requestJson(
+      `${started.baseUrl}/api/search?scope=search&scopePath=${encodeURIComponent(
+        'Case1/Search1'
+      )}&sourceType=teams&query=launch&mode=and&page=1&pageSize=20&mailOnly=0&sort=date-desc`
+    )
+    expect(scopedTeamsSearch.page.total).toBe(0)
+    expect(scopedTeamsSearch.page.items).toHaveLength(0)
+
+    const exactTeamsSearch = await requestJson(
+      `${started.baseUrl}/api/search?scope=search&scopePath=${encodeURIComponent(
+        'Case2/Search2'
+      )}&sourceType=teams&query=launch&mode=and&page=1&pageSize=20&mailOnly=0&sort=date-desc`
+    )
+    expect(exactTeamsSearch.page.total).toBe(1)
+    expect(exactTeamsSearch.page.items).toHaveLength(1)
+    expect(exactTeamsSearch.page.items[0].scopePath).toBe('Case2/Search2')
   })
 
   it('isolates review state and flagged bundles per authenticated user', async () => {
