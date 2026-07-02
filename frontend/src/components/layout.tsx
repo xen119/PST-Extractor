@@ -45,6 +45,38 @@ import {
   Separator
 } from '@/components/ui'
 
+const OFFICE_PREVIEW_CONTENT_TYPES = new Set([
+  'application/msword',
+  'application/vnd.ms-excel',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+])
+
+function isOfficePreviewDocument(contentType?: string, fileName = ''): boolean {
+  const normalizedType = (contentType || '').toLowerCase().split(';')[0].trim()
+  if (normalizedType && OFFICE_PREVIEW_CONTENT_TYPES.has(normalizedType)) {
+    return true
+  }
+  const extension = fileName.toLowerCase().split('.').pop() || ''
+  return ['doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx'].includes(extension)
+}
+
+function getMessagePreviewTitle(detail: MessageDetail | null): string {
+  if (!detail) {
+    return 'Message preview'
+  }
+  return (
+    detail.archiveEntryName ||
+    detail.downloadFilename ||
+    detail.subject ||
+    detail.archivePath ||
+    detail.id ||
+    'Message preview'
+  )
+}
+
 export interface AppShellProps {
   userName: string
   authenticated: boolean
@@ -849,8 +881,14 @@ export function EmailPreview({
   const bodyFrame = hasHtml ? buildHtmlFrameSrcDoc(bodyHtml, theme === 'dark') : ''
   const isArchiveItem = Boolean(detail.archivePath)
   const downloadUrl = detail.downloadUrl || ''
+  const previewUrl = detail.previewUrl || ''
   const isImagePreview = Boolean(detail.contentType && detail.contentType.startsWith('image/'))
   const isPdfPreview = Boolean(detail.contentType === 'application/pdf')
+  const isOfficePreview = Boolean(
+    isArchiveItem &&
+      previewUrl &&
+      isOfficePreviewDocument(detail.contentType, detail.downloadFilename || detail.archiveEntryName || detail.subject || '')
+  )
 
   return (
     <div className="panel-surface flex h-full min-h-0 flex-col overflow-hidden">
@@ -910,6 +948,12 @@ export function EmailPreview({
                   srcDoc={bodyFrame}
                   title="Message body"
                 />
+              ) : isOfficePreview && previewUrl ? (
+                <iframe
+                  className="h-[42rem] w-full rounded-2xl border border-[color:var(--line)] bg-white"
+                  src={previewUrl}
+                  title="Document preview"
+                />
               ) : isImagePreview && downloadUrl ? (
                 <img
                   alt={getMessagePreviewTitle(detail)}
@@ -927,7 +971,7 @@ export function EmailPreview({
                   {bodyText || 'No message body is available.'}
                 </pre>
               )}
-              {isArchiveItem && !hasHtml && !bodyText && downloadUrl ? (
+              {isArchiveItem && !hasHtml && !bodyText && downloadUrl && !isOfficePreview && !isImagePreview && !isPdfPreview ? (
                 <div className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-4 py-3 text-sm text-[color:var(--muted)]">
                   <span>No inline preview is available for this file type.</span>
                   {onDownloadItem ? (

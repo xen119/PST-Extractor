@@ -524,6 +524,8 @@ function inferContentType(entryPath: string): string {
       return 'application/pdf'
     case '.png':
       return 'image/png'
+    case '.bmp':
+      return 'image/bmp'
     case '.jpg':
     case '.jpeg':
       return 'image/jpeg'

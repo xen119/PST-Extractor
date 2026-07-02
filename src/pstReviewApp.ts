@@ -88,6 +88,10 @@ import {
   listArchiveBundleFiles,
   readArchiveBundleItemContent
 } from './archiveBundles'
+import {
+  buildOfficePreview,
+  isOfficePreviewable
+} from './officePreview'
 import type { ReviewRecord } from './reviewTypes'
 import { createZipStreamWriter } from './zipWriter'
 
@@ -4236,6 +4240,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         previewKind: item.previewKind,
         previewText: item.previewText,
         previewHtml: item.previewHtml,
+        previewUrl: item.archivePath ? `/api/items/${encodeURIComponent(item.id || item.messageId)}/preview` : '',
         downloadUrl: item.archivePath ? `/api/items/${encodeURIComponent(item.id || item.messageId)}/content` : ''
       }
 
@@ -4365,6 +4370,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         previewKind: item.previewKind,
         previewText: item.previewText,
         previewHtml: item.previewHtml,
+        previewUrl: item.archivePath ? `/api/items/${encodeURIComponent(item.id || item.messageId)}/preview` : '',
         downloadUrl: item.archivePath ? `/api/items/${encodeURIComponent(item.id || item.messageId)}/content` : ''
       }
 
@@ -4419,6 +4425,62 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       res.setHeader('Content-Length', String(buffer.length))
       res.setHeader('Content-Disposition', `inline; filename="${downloadName}"`)
       res.send(buffer)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.itemPreview, async (req, res) => {
+    try {
+      const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      const currentUser = authSession ? await authUserStore.getUser(authSession.username) : null
+      const allowAllCases = !authConfig.enabled || isAdminAuthSession(authSession, authConfig)
+      const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
+      const item = await searchIndexStore.findDocumentById(req.params.itemId)
+      if (!item || !item.archivePath || !item.archiveEntryChain?.length) {
+        responseJson(res, 404, { error: 'Item not found' })
+        return
+      }
+      if (!isScopePathAllowed(item.scopePath, allowedCasePaths, allowAllCases)) {
+        responseJson(res, 403, { error: 'Case access required' })
+        return
+      }
+
+      const { buffer, contentType, fileName } = await readArchiveBundleItemContent(item.archivePath, item.archiveEntryChain)
+      const responseFileName = sanitizeFileNameForDownload(item.downloadFilename || fileName, fileName)
+      const sourceContentType = contentType || item.contentType || 'application/octet-stream'
+      let responseBuffer = buffer
+      let responseContentType = sourceContentType
+      let responseDownloadName = responseFileName
+
+      if (isOfficePreviewable(sourceContentType, responseFileName)) {
+        const preview = await buildOfficePreview({
+          cacheKey: item.id || item.messageId || `${item.archivePath}:${item.archiveEntryPath || ''}`,
+          fileName: responseFileName,
+          contentType: sourceContentType,
+          buffer,
+          previewText: item.previewText || ''
+        })
+        responseBuffer = preview.buffer
+        responseContentType = preview.contentType
+        responseDownloadName = preview.fileName
+      }
+
+      res.status(200)
+      res.setHeader('Content-Type', responseContentType)
+      res.setHeader('Content-Length', String(responseBuffer.length))
+      res.setHeader(
+        'Content-Disposition',
+        `inline; filename="${sanitizeFileNameForDownload(responseDownloadName, responseDownloadName)}"`
+      )
+      res.send(responseBuffer)
     } catch (error) {
       createRouteErrorHandler(res, error)
     }

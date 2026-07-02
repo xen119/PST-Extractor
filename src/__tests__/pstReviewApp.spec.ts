@@ -1204,7 +1204,8 @@ describe('pst review api', () => {
     fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
     stageArchiveBundle(path.join(pstDir, 'Case1', 'Search1', 'Items.1.001.BONUS_AND_COMMISSION_DECISION_MAKING.zip'), [
       ['Exchange/Thread/TeamsMessagesData/chat.json', JSON.stringify({ subject: 'Launch', body: 'Teams chat' })],
-      ['SharePoint/Docs/report.txt', 'Quarterly report']
+      ['SharePoint/Docs/report.txt', 'Quarterly report'],
+      ['SharePoint/Docs/deck.docx', 'Quarterly deck']
     ])
     fs.mkdirSync(path.join(pstDir, 'Case2', 'Search2'), { recursive: true })
     stageArchiveBundle(path.join(pstDir, 'Case2', 'Search2', 'Items.1.001.OTHER.zip'), [
@@ -1252,10 +1253,37 @@ describe('pst review api', () => {
     const sharepointSearch = await requestJson(
       `${started.baseUrl}/api/search?scope=search&scopePath=${encodeURIComponent(
         'Case1/Search1'
-      )}&sourceType=sharepoint&query=quarterly&mode=and&page=1&pageSize=20&mailOnly=0&sort=date-desc`
+      )}&sourceType=sharepoint&query=report&mode=and&page=1&pageSize=20&mailOnly=0&sort=date-desc`
     )
     expect(sharepointSearch.page.items).toHaveLength(1)
     expect(sharepointSearch.page.items[0].sourceType).toBe('sharepoint')
+
+    const officeSearch = await requestJson(
+      `${started.baseUrl}/api/search?scope=search&scopePath=${encodeURIComponent(
+        'Case1/Search1'
+      )}&sourceType=sharepoint&query=deck&mode=and&page=1&pageSize=20&mailOnly=0&sort=date-desc`
+    )
+    const officeItem = officeSearch.page.items.find((item: { contentType?: string }) =>
+      String(item.contentType || '').includes('openxmlformats')
+    )
+    expect(officeItem).toBeTruthy()
+    if (!officeItem) {
+      throw new Error('Expected an office archive item')
+    }
+
+    const officeDetail = await requestJson(
+      `${started.baseUrl}/api/items/${encodeURIComponent(officeItem.id)}`
+    )
+    expect(officeDetail.detail.previewUrl).toContain('/api/items/')
+    expect(officeDetail.detail.previewUrl).toContain('/preview')
+
+    const officePreview = await fetch(`${started.baseUrl}${officeDetail.detail.previewUrl}`)
+    const officePreviewBody = await officePreview.text()
+    expect(officePreview.status).toBe(200)
+    expect(['application/pdf', 'text/html; charset=utf-8']).toContain(
+      officePreview.headers.get('content-type')
+    )
+    expect(officePreviewBody.length).toBeGreaterThan(0)
 
     const sharepointReview = await requestJson(
       `${started.baseUrl}/api/items/${encodeURIComponent(sharepointSearch.page.items[0].id)}/review`,

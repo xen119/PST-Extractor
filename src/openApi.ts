@@ -128,6 +128,7 @@ function messageSummarySchema(): Record<string, unknown> {
       previewKind: { type: 'string', enum: ['text', 'html', 'binary'] },
       previewText: { type: 'string' },
       previewHtml: { type: 'string' },
+      previewUrl: { type: 'string' },
       downloadUrl: { type: 'string' },
       review: {
         type: 'object',
@@ -188,6 +189,7 @@ function messageDetailSchema(): Record<string, unknown> {
       previewKind: { type: 'string', enum: ['text', 'html', 'binary'] },
       previewText: { type: 'string' },
       previewHtml: { type: 'string' },
+      previewUrl: { type: 'string' },
       downloadUrl: { type: 'string' },
       review: reviewStateSchema(),
       attachments: {
@@ -1689,6 +1691,37 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
                   schema: { type: 'string', format: 'binary' }
                 },
                 'text/plain': {
+                  schema: { type: 'string', format: 'binary' }
+                }
+              }
+            },
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Case access required'),
+            ...errorResponse(404, 'Item not found')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.itemPreview)]: {
+        get: {
+          tags: ['Extraction'],
+          summary: 'Load a browser-friendly preview for a Teams or SharePoint/OneDrive item',
+          parameters: [
+            { name: 'itemId', in: 'path', required: true, schema: { type: 'string' } }
+          ],
+          responses: {
+            200: {
+              description: 'PDF, HTML, or inline preview stream',
+              content: {
+                'application/pdf': {
+                  schema: { type: 'string', format: 'binary' }
+                },
+                'text/html': {
+                  schema: { type: 'string', format: 'binary' }
+                },
+                'text/plain': {
+                  schema: { type: 'string', format: 'binary' }
+                },
+                'application/octet-stream': {
                   schema: { type: 'string', format: 'binary' }
                 }
               }

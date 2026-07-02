@@ -739,7 +739,7 @@ describe('shell and preview', () => {
     expect(screen.getByLabelText('Recipients')).toBeInTheDocument()
   })
 
-  it('shows archive document previews with a download fallback', () => {
+  it('shows archive office document previews through the preview url', () => {
     render(
       <div style={{ width: 1200, height: 900 }}>
         <EmailPreview
@@ -756,6 +756,7 @@ describe('shell and preview', () => {
             previewKind: 'text',
             previewText: 'Quarterly report',
             previewHtml: '',
+            previewUrl: '/api/items/archive-1/preview',
             downloadUrl: '/api/items/archive-1/content'
           }}
           theme="light"
@@ -778,10 +779,10 @@ describe('shell and preview', () => {
 
     expect(screen.getByText('Document preview')).toBeInTheDocument()
     expect(screen.getByText('Teams or document preview')).toBeInTheDocument()
-    expect(screen.getByText('Quarterly report')).toBeInTheDocument()
-    expect(screen.getByText('No inline preview is available for this file type.')).toBeInTheDocument()
+    expect(screen.getByTitle('Document preview')).toHaveAttribute('src', '/api/items/archive-1/preview')
+    expect(screen.queryByText('No inline preview is available for this file type.')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Clear flag' })).toBeInTheDocument()
-    expect(screen.getAllByRole('button', { name: 'Download file' })).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: 'Download file' })).toHaveLength(1)
   })
 
   it('opens a search result from a different mailbox in the reading pane', async () => {

@@ -126,6 +126,7 @@ export interface MessageSummary {
   previewKind?: 'text' | 'html' | 'binary'
   previewText?: string
   previewHtml?: string
+  previewUrl?: string
   downloadUrl?: string
 }
 

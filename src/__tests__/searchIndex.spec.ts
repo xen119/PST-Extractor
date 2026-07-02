@@ -461,6 +461,27 @@ describe('search index cache', () => {
     }
   })
 
+  it('classifies bmp archives as images for preview delivery', async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pst-extractor-archive-bmp-'))
+    try {
+      const scopeDir = path.join(rootDir, 'Case1', 'Search1')
+      fs.mkdirSync(scopeDir, { recursive: true })
+
+      const bundlePath = path.join(scopeDir, 'Items.1.001.IMAGES.zip')
+      const bundleZip = new AdmZip()
+      bundleZip.addFile('SharePoint/Images/diagram.bmp', Buffer.from('bmp-bytes', 'utf8'))
+      bundleZip.writeZip(bundlePath)
+
+      const items = await extractArchiveBundleItems(bundlePath, 'Case1/Search1')
+      expect(items).toHaveLength(1)
+      expect(items[0].contentType).toBe('image/bmp')
+      expect(items[0].previewKind).toBe('binary')
+      expect(items[0].downloadFilename).toBe('diagram.bmp')
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true })
+    }
+  })
+
   it('falls back to tolerant archive reading when trailing bytes break strict zip parsing', async () => {
     const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pst-extractor-archive-fallback-'))
     try {
