@@ -824,7 +824,6 @@ export function App() {
     searchQuery,
     searchScope,
     selectedCasePath,
-    selectedMessageId,
     selectedScopePath,
     sessionId,
     sort,
@@ -2432,7 +2431,7 @@ export function App() {
 
   if (!authenticated || inviteFlowActive) {
     return (
-      <div className="min-h-screen bg-[color:var(--bg)] text-[color:var(--text)]">
+      <div className="h-screen overflow-hidden bg-[color:var(--bg)] text-[color:var(--text)]">
         <AuthScreen
           view={inviteFlowActive ? 'invite' : authView}
           busy={authBusy || inviteLoading || selfMfaLoading}

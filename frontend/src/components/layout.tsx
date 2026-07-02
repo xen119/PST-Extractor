@@ -49,6 +49,7 @@ const OFFICE_PREVIEW_CONTENT_TYPES = new Set([
   'application/msword',
   'application/vnd.ms-excel',
   'application/vnd.ms-powerpoint',
+  'text/csv',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -60,7 +61,7 @@ function isOfficePreviewDocument(contentType?: string, fileName = ''): boolean {
     return true
   }
   const extension = fileName.toLowerCase().split('.').pop() || ''
-  return ['doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx'].includes(extension)
+  return ['csv', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx'].includes(extension)
 }
 
 function getMessagePreviewTitle(detail: MessageDetail | null): string {
@@ -131,8 +132,8 @@ export function AppShell({
   ) : null
 
   return (
-    <div className="flex min-h-screen flex-col">
-      <header className="glass-bar sticky top-0 z-40">
+    <div className="flex h-screen flex-col overflow-hidden">
+      <header className="glass-bar sticky top-0 z-40 shrink-0">
         <div className="mx-auto flex w-full max-w-[1800px] items-center gap-3 px-4 py-3 lg:px-6">
           <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-strong)] text-[color:var(--accent)] shadow-sm">
             <Mail className="h-5 w-5" aria-hidden="true" />
@@ -157,25 +158,25 @@ export function AppShell({
         </div>
       </header>
 
-      <main className="mx-auto flex w-full max-w-[1800px] flex-1 gap-3 p-3 lg:p-4">
+      <main className="mx-auto flex w-full max-w-[1800px] flex-1 min-h-0 gap-3 overflow-hidden p-3 lg:p-4">
         <PanelGroup
           autoSaveId="pst-mail-explorer.layout"
           direction="horizontal"
-          className="flex min-h-0 flex-1 gap-3"
+          className="flex min-h-0 flex-1 gap-3 overflow-hidden"
         >
           <Panel
             defaultSize={22}
             minSize={16}
             collapsible
             collapsedSize={0}
-            className={cn('min-h-0', sidebarCollapsed && 'hidden lg:block')}
+            className={cn('min-h-0 overflow-hidden', sidebarCollapsed && 'hidden lg:block')}
           >
             {sidebar}
           </Panel>
 
           <PanelResizeHandle className="hidden w-1 rounded-full bg-transparent transition hover:bg-[color:var(--accent-soft)] lg:block" />
 
-          <Panel defaultSize={previewCollapsed ? 100 : 42} minSize={28} className="min-h-0">
+          <Panel defaultSize={previewCollapsed ? 100 : 42} minSize={28} className="min-h-0 overflow-hidden">
             {messagePanel}
           </Panel>
 
@@ -186,7 +187,7 @@ export function AppShell({
             minSize={26}
             collapsible
             collapsedSize={0}
-            className={cn('min-h-0', previewCollapsed && 'hidden xl:block')}
+            className={cn('min-h-0 overflow-hidden', previewCollapsed && 'hidden xl:block')}
           >
             {preview}
           </Panel>
@@ -304,138 +305,142 @@ export function Sidebar({
         </div>
       ) : null}
 
-      <div className="space-y-3 border-t border-[color:var(--line)] px-4 py-4">
-        <div className="space-y-2">
-          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">Source</div>
-          <div className="grid grid-cols-3 gap-2">
-            {sourceTabs.map((tab) => {
-              const active = sourceType === tab.key
-              const count = tab.key === 'mailbox' ? catalogFiles.length : tabCounts[tab.key] || 0
-              return (
-                <button
-                  key={tab.key}
-                  type="button"
-                  className={cn(
-                    'inline-flex items-center justify-center gap-2 rounded-2xl border px-3 py-2 text-xs font-semibold transition focus:outline-none focus:ring-2 focus:ring-[color:var(--focus-ring)]',
-                    active
-                      ? 'border-[color:var(--accent)] bg-[color:var(--accent-soft)] text-[color:var(--accent)]'
-                      : 'border-[color:var(--line)] bg-[color:var(--surface-strong)] text-[color:var(--text)] hover:border-[color:var(--accent-soft)] hover:bg-[color:var(--surface-soft)]'
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="flex min-h-0 flex-col">
+          <div className="space-y-3 border-t border-[color:var(--line)] px-4 py-4">
+            <div className="space-y-2">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">Source</div>
+              <div className="grid grid-cols-3 gap-2">
+                {sourceTabs.map((tab) => {
+                  const active = sourceType === tab.key
+                  const count = tab.key === 'mailbox' ? catalogFiles.length : tabCounts[tab.key] || 0
+                  return (
+                    <button
+                      key={tab.key}
+                      type="button"
+                      className={cn(
+                        'inline-flex items-center justify-center gap-2 rounded-2xl border px-3 py-2 text-xs font-semibold transition focus:outline-none focus:ring-2 focus:ring-[color:var(--focus-ring)]',
+                        active
+                          ? 'border-[color:var(--accent)] bg-[color:var(--accent-soft)] text-[color:var(--accent)]'
+                          : 'border-[color:var(--line)] bg-[color:var(--surface-strong)] text-[color:var(--text)] hover:border-[color:var(--accent-soft)] hover:bg-[color:var(--surface-soft)]'
+                      )}
+                      onClick={() => onSourceTypeChange(tab.key)}
+                    >
+                      {tab.icon}
+                      <span className="truncate">{tab.label}</span>
+                      <span className="rounded-full border border-[color:var(--line)] bg-[color:var(--surface)] px-2 py-0.5 text-[10px] font-medium text-[color:var(--muted)]">
+                        {count}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+
+            <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
+              Case
+              <select
+                className="select mt-2"
+                value={selectedCasePath}
+                onChange={(event) => onCaseChange(event.target.value)}
+              >
+                {caseOptions.length ? (
+                  caseOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">No cases found</option>
+                )}
+              </select>
+            </label>
+
+            <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
+              Search
+              <select
+                className="select mt-2"
+                value={selectedScopePath}
+                onChange={(event) => onScopeChange(event.target.value)}
+              >
+                {searchOptions.length ? (
+                  searchOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))
+                ) : (
+                  <option value={selectedCasePath}>{selectedCasePath || 'PST root'}</option>
+                )}
+              </select>
+            </label>
+            {catalogMessage ? <div className="text-xs leading-5 text-[color:var(--muted)]">{catalogMessage}</div> : null}
+          </div>
+
+          <Separator />
+
+          <div className="flex min-h-0 flex-1 flex-col">
+            {sourceType === 'mailbox' ? (
+              <>
+                <div className="px-4 py-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-semibold text-[color:var(--text)]">Mailboxes</div>
+                    <Badge>{catalogFiles.length}</Badge>
+                  </div>
+                  {catalogFiles.length ? (
+                    <div className="mt-2 flex items-center gap-2">
+                      <select
+                        className="select flex-1"
+                        aria-label="Mailbox selector"
+                        value={selectedMailbox?.fileName || ''}
+                        onChange={(event) => {
+                          const nextMailbox = catalogFiles.find((file) => file.fileName === event.target.value)
+                          if (nextMailbox) {
+                            onOpenMailbox(nextMailbox.fileName, nextMailbox.scopePath || '')
+                          }
+                        }}
+                      >
+                        {catalogFiles.map((file) => (
+                          <option key={`${file.scopePath || ''}/${file.fileName}`} value={file.fileName}>
+                            {file.fileName}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : (
+                    <div className="mt-2 empty-state min-h-[112px]">No PST files are available in the current scope.</div>
                   )}
-                  onClick={() => onSourceTypeChange(tab.key)}
-                >
-                  {tab.icon}
-                  <span className="truncate">{tab.label}</span>
-                  <span className="rounded-full border border-[color:var(--line)] bg-[color:var(--surface)] px-2 py-0.5 text-[10px] font-medium text-[color:var(--muted)]">
-                    {count}
-                  </span>
-                </button>
-              )
-            })}
+                </div>
+
+                <Separator />
+
+                <div className="flex min-h-0 flex-1 flex-col">
+                  <div className="panel-heading">
+                    <div>
+                      <div className="panel-title">Folders</div>
+                      <div className="text-sm text-[color:var(--muted)]">Navigate mailbox structure</div>
+                    </div>
+                    <Badge>{folderTree ? 'loaded' : 'empty'}</Badge>
+                  </div>
+                  <div className="min-h-0 flex-1 px-4 pb-4 pt-1">
+                    {folderTree ? (
+                      <FolderList node={folderTree} currentFolderId={currentFolderId} onSelectFolder={onSelectFolder} />
+                    ) : (
+                      <div className="empty-state">Open a PST to see folders.</div>
+                    )}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="px-4 pb-4 pt-3">
+                <div className="empty-state min-h-[180px]">
+                  Search results in {sourceType === 'teams' ? 'Teams' : 'SharePoint/OneDrive'} will appear here.
+                </div>
+              </div>
+            )}
           </div>
         </div>
-
-        <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
-          Case
-          <select
-            className="select mt-2"
-            value={selectedCasePath}
-            onChange={(event) => onCaseChange(event.target.value)}
-          >
-            {caseOptions.length ? (
-              caseOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))
-            ) : (
-              <option value="">No cases found</option>
-            )}
-          </select>
-        </label>
-
-        <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
-          Search
-          <select
-            className="select mt-2"
-            value={selectedScopePath}
-            onChange={(event) => onScopeChange(event.target.value)}
-          >
-            {searchOptions.length ? (
-              searchOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))
-            ) : (
-              <option value={selectedCasePath}>{selectedCasePath || 'PST root'}</option>
-            )}
-          </select>
-        </label>
-        {catalogMessage ? <div className="text-xs leading-5 text-[color:var(--muted)]">{catalogMessage}</div> : null}
-      </div>
-
-      <Separator />
-
-      <div className="flex min-h-0 flex-1 flex-col">
-        {sourceType === 'mailbox' ? (
-          <>
-            <div className="px-4 py-3">
-              <div className="flex items-center justify-between">
-                <div className="text-sm font-semibold text-[color:var(--text)]">Mailboxes</div>
-                <Badge>{catalogFiles.length}</Badge>
-              </div>
-              {catalogFiles.length ? (
-                <div className="mt-2 flex items-center gap-2">
-                  <select
-                    className="select flex-1"
-                    aria-label="Mailbox selector"
-                    value={selectedMailbox?.fileName || ''}
-                    onChange={(event) => {
-                      const nextMailbox = catalogFiles.find((file) => file.fileName === event.target.value)
-                      if (nextMailbox) {
-                        onOpenMailbox(nextMailbox.fileName, nextMailbox.scopePath || '')
-                      }
-                    }}
-                  >
-                    {catalogFiles.map((file) => (
-                      <option key={`${file.scopePath || ''}/${file.fileName}`} value={file.fileName}>
-                        {file.fileName}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              ) : (
-                <div className="mt-2 empty-state min-h-[112px]">No PST files are available in the current scope.</div>
-              )}
-            </div>
-
-            <Separator />
-
-            <div className="flex min-h-0 flex-1 flex-col">
-              <div className="panel-heading">
-                <div>
-                  <div className="panel-title">Folders</div>
-                  <div className="text-sm text-[color:var(--muted)]">Navigate mailbox structure</div>
-                </div>
-                <Badge>{folderTree ? 'loaded' : 'empty'}</Badge>
-              </div>
-              <ScrollArea className="min-h-0 flex-1 px-4 pb-4 pt-1">
-                {folderTree ? (
-                  <FolderList node={folderTree} currentFolderId={currentFolderId} onSelectFolder={onSelectFolder} />
-                ) : (
-                  <div className="empty-state">Open a PST to see folders.</div>
-                )}
-              </ScrollArea>
-            </div>
-          </>
-        ) : (
-          <div className="px-4 pb-4 pt-3">
-            <div className="empty-state min-h-[180px]">
-              Search results in {sourceType === 'teams' ? 'Teams' : 'SharePoint/OneDrive'} will appear here.
-            </div>
-          </div>
-        )}
-      </div>
+      </ScrollArea>
     </div>
   )
 }
@@ -577,80 +582,81 @@ export function MessageList({
         </div>
       </div>
 
-      <div className="border-t border-[color:var(--line)] px-4 py-4">
-        <MessageSearchBar
-          query={query}
-          sourceType={sourceType}
-          searchScope={searchScope}
-          mailOnly={mailOnly}
-          sort={sort}
-          reviewFlaggedOnly={reviewFlaggedOnly}
-          reviewTaggedOnly={reviewTaggedOnly}
-          onQueryChange={onQueryChange}
-          onSearch={onSearch}
-          onSearchScopeChange={onSearchScopeChange}
-          onMailOnlyChange={onMailOnlyChange}
-          onSortChange={onSortChange}
-          onReviewFlaggedChange={onReviewFlaggedChange}
-          onReviewTaggedChange={onReviewTaggedChange}
-        />
-      </div>
-
-      <div className="flex min-h-0 flex-1 flex-col border-t border-[color:var(--line)]">
-        <div className="flex items-center justify-between border-b border-[color:var(--line)] px-4 py-2 text-xs text-[color:var(--muted)]">
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" className="px-2 py-1 text-xs" onClick={onPrevPage} disabled={!page || activePage <= 1}>
-              <ChevronLeft className="mr-1 h-4 w-4" />
-              Prev
-            </Button>
-            <Button variant="ghost" className="px-2 py-1 text-xs" onClick={onNextPage} disabled={!page || activePage >= totalPages}>
-              Next
-              <ChevronRight className="ml-1 h-4 w-4" />
-            </Button>
-          </div>
-          <span>
-            Page {activePage} of {totalPages}
-          </span>
+            <div className="flex min-h-0 flex-1 flex-col">
+        <div className="border-t border-[color:var(--line)] px-4 py-4">
+          <MessageSearchBar
+            query={query}
+            sourceType={sourceType}
+            searchScope={searchScope}
+            mailOnly={mailOnly}
+            sort={sort}
+            reviewFlaggedOnly={reviewFlaggedOnly}
+            reviewTaggedOnly={reviewTaggedOnly}
+            onQueryChange={onQueryChange}
+            onSearch={onSearch}
+            onSearchScopeChange={onSearchScopeChange}
+            onMailOnlyChange={onMailOnlyChange}
+            onSortChange={onSortChange}
+            onReviewFlaggedChange={onReviewFlaggedChange}
+            onReviewTaggedChange={onReviewTaggedChange}
+          />
         </div>
-        <ScrollArea ref={parentRef} className="min-h-0 flex-1">
-          {loading ? (
-            <div className="empty-state m-4">Loading messages...</div>
-          ) : page ? (
-            rows.length ? (
-              <div
-                className="relative w-full"
-                style={{
-                  height: `${virtualizer.getTotalSize()}px`
-                }}
-              >
-                {virtualizer.getVirtualItems().map((virtualRow) => {
-                  const item = rows[virtualRow.index]
-                  return (
-                    <div
-                      key={item.id}
-                      ref={virtualizer.measureElement}
-                      data-index={virtualRow.index}
-                      className="absolute left-0 top-0 w-full px-4 py-2"
-                      style={{
-                        transform: `translateY(${virtualRow.start}px)`
-                      }}
-                    >
-                      <MessageRow
-                        item={item}
-                        active={item.id === selectedMessageId}
-                        onSelect={() => onSelectMessage(item)}
-                      />
-                    </div>
-                  )
-                })}
-              </div>
+        <div className="flex min-h-0 flex-1 flex-col border-t border-[color:var(--line)]">
+          <div className="flex items-center justify-between border-b border-[color:var(--line)] px-4 py-2 text-xs text-[color:var(--muted)]">
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" className="px-2 py-1 text-xs" onClick={onPrevPage} disabled={!page || activePage <= 1}>
+                <ChevronLeft className="mr-1 h-4 w-4" />
+                Prev
+              </Button>
+              <Button variant="ghost" className="px-2 py-1 text-xs" onClick={onNextPage} disabled={!page || activePage >= totalPages}>
+                Next
+                <ChevronRight className="ml-1 h-4 w-4" />
+              </Button>
+            </div>
+            <span>
+              Page {activePage} of {totalPages}
+            </span>
+          </div>
+          <ScrollArea ref={parentRef} className="min-h-0 flex-1">
+            {loading ? (
+              <div className="empty-state m-4">Loading messages...</div>
+            ) : page ? (
+              rows.length ? (
+                <div
+                  className="relative w-full"
+                  style={{
+                    height: `${virtualizer.getTotalSize()}px`
+                  }}
+                >
+                  {virtualizer.getVirtualItems().map((virtualRow) => {
+                    const item = rows[virtualRow.index]
+                    return (
+                      <div
+                        key={item.id}
+                        ref={virtualizer.measureElement}
+                        data-index={virtualRow.index}
+                        className="absolute left-0 top-0 w-full px-4 py-2"
+                        style={{
+                          transform: `translateY(${virtualRow.start}px)`
+                        }}
+                      >
+                        <MessageRow
+                          item={item}
+                          active={item.id === selectedMessageId}
+                          onSelect={() => onSelectMessage(item)}
+                        />
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="empty-state m-4">No messages match the current filters.</div>
+              )
             ) : (
-              <div className="empty-state m-4">No messages match the current filters.</div>
-            )
-          ) : (
-            <div className="empty-state m-4">Select a folder to begin.</div>
-          )}
-        </ScrollArea>
+              <div className="empty-state m-4">Select a folder to begin.</div>
+            )}
+          </ScrollArea>
+        </div>
       </div>
     </div>
   )
@@ -1275,3 +1281,4 @@ export function EmptyState({ title, description }: { title: string; description:
     </div>
   )
 }
+

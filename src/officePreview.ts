@@ -22,12 +22,13 @@ const OFFICE_CONTENT_TYPES = new Set([
   'application/msword',
   'application/vnd.ms-excel',
   'application/vnd.ms-powerpoint',
+  'text/csv',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 ])
 
-const OFFICE_EXTENSIONS = new Set(['.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx'])
+const OFFICE_EXTENSIONS = new Set(['.csv', '.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx'])
 
 const previewCache = new Map<string, Promise<OfficePreviewOutput>>()
 
