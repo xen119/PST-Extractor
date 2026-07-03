@@ -179,6 +179,14 @@ export interface SearchIndexStore {
 
 interface SearchIndexCollectionLike {
   createIndex?: (index: Record<string, 1 | -1>, options?: { unique?: boolean; name?: string }) => Promise<unknown>
+  aggregate?: (
+    pipeline: Record<string, unknown>[]
+  ) => {
+    toArray: () => Promise<Array<{
+      total?: Array<{ value?: number }>
+      sourceCounts?: Array<{ _id?: unknown; count?: number }>
+    }>>
+  }
   insertMany: (documents: SearchIndexDocument[]) => Promise<unknown>
   deleteMany: (filter: Record<string, unknown>) => Promise<{ deletedCount?: number }>
   findOne: (filter: Record<string, unknown>) => Promise<SearchIndexDocument | null>
@@ -1598,7 +1606,58 @@ export class MongoSearchIndexStore implements SearchIndexStore {
       },
       hiddenRules
     )
-    const total = await this.documents.countDocuments(filter)
+    const sourceTypeFilter =
+      options.sourceType && options.sourceType !== 'all' ? normalizeSourceType(options.sourceType) : null
+    const aggregateCursor = this.documents.aggregate?.([
+      { $match: countFilter },
+      {
+        $facet: {
+          total: sourceTypeFilter
+            ? [{ $match: { sourceType: sourceTypeFilter } }, { $count: 'value' }]
+            : [{ $count: 'value' }],
+          sourceCounts: [
+            {
+              $group: {
+                _id: '$sourceType',
+                count: { $sum: 1 }
+              }
+            }
+          ]
+        }
+      }
+    ])
+
+    let total = 0
+    let sourceCounts: Record<SearchSourceType, number> = {
+      mailbox: 0,
+      teams: 0,
+      sharepoint: 0
+    }
+
+    if (aggregateCursor) {
+      const [facetResult] = await aggregateCursor.toArray()
+      total = facetResult?.total?.[0]?.value || 0
+      sourceCounts = (facetResult?.sourceCounts || []).reduce<Record<SearchSourceType, number>>(
+        (acc, entry) => {
+          const sourceType = normalizeSourceType(entry._id)
+          acc[sourceType] = typeof entry.count === 'number' && Number.isFinite(entry.count) ? entry.count : 0
+          return acc
+        },
+        {
+          mailbox: 0,
+          teams: 0,
+          sharepoint: 0
+        }
+      )
+    } else {
+      total = await this.documents.countDocuments(filter)
+      sourceCounts = {
+        mailbox: await this.documents.countDocuments({ ...countFilter, sourceType: 'mailbox' }),
+        teams: await this.documents.countDocuments({ ...countFilter, sourceType: 'teams' }),
+        sharepoint: await this.documents.countDocuments({ ...countFilter, sourceType: 'sharepoint' })
+      }
+    }
+
     const totalPages = Math.max(1, Math.ceil(total / options.pageSize))
     const page = Math.min(Math.max(options.page, 1), totalPages)
     const start = (page - 1) * options.pageSize
@@ -1610,11 +1669,6 @@ export class MongoSearchIndexStore implements SearchIndexStore {
       .toArray()
     const resolvedItems = items.map((record) => resolveSearchIndexDocument(record, options.reviewerUsername))
     const parsed = parseSearchTerms(options.query, options.mode)
-    const sourceCounts = {
-      mailbox: await this.documents.countDocuments({ ...countFilter, sourceType: 'mailbox' }),
-      teams: await this.documents.countDocuments({ ...countFilter, sourceType: 'teams' }),
-      sharepoint: await this.documents.countDocuments({ ...countFilter, sourceType: 'sharepoint' })
-    }
     return {
       items: resolvedItems,
       total,

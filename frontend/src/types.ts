@@ -12,9 +12,27 @@ export interface AuthStatus {
   canManageUsers: boolean
   mfaEnabled: boolean
   mfaEnforced: boolean
+  lockedUntil: string | null
+  loginFailedCount: number
+  passwordResetAvailable: boolean
   user: AuthUser | null
   expiresAt: string | null
   mfaRequired?: boolean
+  mfaChallengeExpiresAt?: string | null
+  error?: string
+}
+
+export interface PasswordPolicy {
+  minLength: number
+  requireUppercase: boolean
+  requireLowercase: boolean
+  requireNumber: boolean
+  requireSpecial: boolean
+  forgotPasswordAfterFailures: number
+  lockoutThreshold: number
+  lockoutDurationSeconds: number
+  resetTokenTtlMinutes: number
+  enforceMfa: boolean
 }
 
 export interface ReviewState {
@@ -321,6 +339,22 @@ export interface MfaEnrollmentStartResponse {
 export interface MfaEnrollmentCompleteResponse {
   user: UserInvite
   recoveryCodes: string[]
+}
+
+export interface PasswordResetLookupResponse {
+  reset: {
+    username: string
+    recipientEmail: string
+  }
+}
+
+export interface PasswordResetRequestResponse {
+  sent: boolean
+}
+
+export interface PasswordResetConfirmResponse {
+  user: AuthUser
+  message: string
 }
 
 export interface SmtpSettings {

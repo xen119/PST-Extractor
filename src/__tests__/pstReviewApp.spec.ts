@@ -10,7 +10,7 @@ import { createMemoryAppSettingsStore, type AppSettingsStore } from '../appSetti
 import { buildOpenApiDocument } from '../openApi'
 import { createPstReviewApp, type ApiSecurityConfig, type AppAuthConfig } from '../pstReviewApp'
 import { MemoryReviewStore } from '../reviewStore'
-import { MemorySearchIndexStore } from '../searchIndex'
+import { MemorySearchIndexStore, type SearchIndexDocument, type SearchIndexFileFingerprint } from '../searchIndex'
 
 const resolve = path.resolve
 
@@ -183,6 +183,78 @@ function parseStoredZipEntries(buffer: Buffer): Map<string, Buffer> {
     offset += 1
   }
   return entries
+}
+
+function makeSearchIndexDocument(overrides: Partial<SearchIndexDocument> = {}): SearchIndexDocument {
+  const now = new Date('2024-01-01T00:00:00.000Z').toISOString()
+  return {
+    mailboxKey: 'C:/PST/Case1/Search1/alpha.pst',
+    scopePath: 'Case1/Search1',
+    scopeLabel: 'Case1 / Search1',
+    fileName: 'alpha.pst',
+    mailboxName: 'Alpha',
+    messageId: 'message:1',
+    descriptorId: '1',
+    folderId: 'folder:1',
+    folderPath: 'Inbox',
+    order: 1,
+    messageClass: 'IPM.Note',
+    kind: 'mail',
+    subject: 'Project Alpha',
+    originalSubject: 'Re: Project Alpha',
+    senderName: 'Alice Example',
+    senderEmailAddress: 'alice@example.com',
+    recipientText: 'Bob Example <bob@example.com>',
+    displayTo: 'Bob Example <bob@example.com>',
+    displayCC: '',
+    displayBCC: '',
+    resolvedDisplayTo: 'Bob Example <bob@example.com>',
+    resolvedDisplayCC: '',
+    resolvedDisplayBCC: '',
+    clientSubmitTime: now,
+    creationTime: now,
+    modificationTime: now,
+    messageDeliveryTime: now,
+    sortDate: now,
+    sortDateMs: Date.parse(now),
+    importance: 1,
+    hasAttachments: false,
+    isRead: true,
+    isMailLike: true,
+    bodySearchText: 'project alpha signature',
+    searchText: 'project alpha alice example alice@example.com bob example bob@example.com signature ipm.note mail',
+    searchTokens: ['project', 'alpha', 'signature'],
+    addressValues: ['alice@example.com', 'bob@example.com'],
+    subjectValues: ['project alpha', 're: project alpha'],
+    review: {
+      flagged: false,
+      tags: [],
+      createdAt: '',
+      updatedAt: ''
+    },
+    reviewStates: [],
+    reviewTagValues: [],
+    updatedAt: now,
+    sourceType: 'mailbox',
+    ...overrides
+  }
+}
+
+function makeSearchIndexFingerprint(
+  overrides: Partial<SearchIndexFileFingerprint> & { source: SearchIndexFileFingerprint['source'] }
+): SearchIndexFileFingerprint {
+  const now = new Date('2024-01-01T00:00:00.000Z').toISOString()
+  return {
+    source: overrides.source,
+    mailboxKey: 'C:/PST/Case1/Search1/alpha.pst',
+    fileName: 'alpha.pst',
+    scopePath: 'Case1/Search1',
+    scopeLabel: 'Case1 / Search1',
+    size: 1024,
+    modifiedAt: now,
+    updatedAt: now,
+    ...overrides
+  }
 }
 
 async function startApp(
@@ -663,8 +735,15 @@ describe('pst review api', () => {
     expect(openApi.paths['/api/sessions/{sessionId}/messages/{messageId}/review']).toBeDefined()
     expect(openApi.paths['/api/items/{itemId}/review']).toBeDefined()
     expect(openApi.paths['/api/exports/flagged.zip']).toBeDefined()
+    expect(openApi.paths['/api/auth/password-reset/request']).toBeDefined()
+    expect(openApi.paths['/api/auth/password-reset/{token}']).toBeDefined()
+    expect(openApi.paths['/api/auth/password-reset/{token}/confirm']).toBeDefined()
     expect(openApi.paths['/api/auth/users/{username}/mfa/enforce']).toBeDefined()
     expect(openApi.paths['/api/auth/users/{username}/access']).toBeDefined()
+    const authStatusSchema = (openApi.components as { schemas?: Record<string, { properties?: Record<string, unknown> }> } | undefined)?.schemas?.AuthStatus
+    expect(authStatusSchema?.properties?.passwordResetAvailable).toBeDefined()
+    expect(authStatusSchema?.properties?.loginFailedCount).toBeDefined()
+    expect(authStatusSchema?.properties?.lockedUntil).toBeDefined()
 
     const docsResponse = await fetch(`${started.baseUrl}/api/docs`)
     const docsHtml = await docsResponse.text()
@@ -2804,6 +2883,121 @@ describe('pst review api', () => {
     const disallowedSearchPayload = await readJson(disallowedSearchResponse)
     expect(disallowedSearchResponse.status).toBe(403)
     expect(disallowedSearchPayload.error).toBe('Case access required')
+  })
+
+  it('searches from persisted fingerprints without crawling the PST tree', async () => {
+    rootDir = makeTempDir('pst-review-api-search-fingerprints-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(pstDir, { recursive: true })
+
+    const fingerprintStore = new MemorySearchIndexStore()
+    const mailboxKey = path.resolve(pstDir, 'Case1', 'Search1', 'alpha.pst')
+    const teamsKey = path.resolve(pstDir, 'Case1', 'Search1', 'Items.1.001.TEAMS.zip')
+
+    await fingerprintStore.replaceMailboxDocuments(mailboxKey, [
+      makeSearchIndexDocument({
+        mailboxKey,
+        fileName: 'alpha.pst',
+        mailboxName: 'Alpha',
+        messageId: 'message:mail-1',
+        descriptorId: 'mail-1',
+        folderId: 'folder:mail-1',
+        folderPath: 'Inbox',
+        subject: 'Signature note',
+        originalSubject: 'Signature note',
+        senderName: 'Alice Example',
+        senderEmailAddress: 'alice@example.com',
+        recipientText: 'Bob Example <bob@example.com>',
+        displayTo: 'Bob Example <bob@example.com>',
+        resolvedDisplayTo: 'Bob Example <bob@example.com>',
+        bodySearchText: 'signature note',
+        searchText: 'signature note alice example alice@example.com bob example bob@example.com ipm.note mail',
+        searchTokens: ['signature', 'note'],
+        addressValues: ['alice@example.com', 'bob@example.com'],
+        subjectValues: ['signature note'],
+        sourceType: 'mailbox'
+      })
+    ])
+    await fingerprintStore.replaceMailboxDocuments(teamsKey, [
+      makeSearchIndexDocument({
+        mailboxKey: teamsKey,
+        fileName: 'Items.1.001.TEAMS.zip',
+        mailboxName: 'Teams Bundle',
+        messageId: 'message:teams-1',
+        descriptorId: 'teams-1',
+        folderId: 'folder:teams-1',
+        folderPath: 'Teams',
+        subject: 'Launch plan',
+        originalSubject: 'Launch plan',
+        senderName: 'Team Bot',
+        senderEmailAddress: 'bot@example.com',
+        recipientText: '',
+        displayTo: '',
+        resolvedDisplayTo: '',
+        bodySearchText: 'launch plan',
+        searchText: 'launch plan team bot bot@example.com ipm.note mail',
+        searchTokens: ['launch', 'plan'],
+        addressValues: ['bot@example.com'],
+        subjectValues: ['launch plan'],
+        sourceType: 'teams',
+        kind: 'other'
+      })
+    ])
+    await fingerprintStore.replaceFileFingerprints('mailboxes', [
+      makeSearchIndexFingerprint({
+        source: 'mailboxes',
+        mailboxKey,
+        fileName: 'alpha.pst',
+        scopePath: 'Case1/Search1',
+        scopeLabel: 'Case1 / Search1',
+        size: 1024,
+        modifiedAt: null
+      })
+    ])
+    await fingerprintStore.replaceFileFingerprints('items', [
+      makeSearchIndexFingerprint({
+        source: 'items',
+        mailboxKey: teamsKey,
+        fileName: 'Items.1.001.TEAMS.zip',
+        scopePath: 'Case1/Search1',
+        scopeLabel: 'Case1 / Search1',
+        size: 1024,
+        modifiedAt: null
+      })
+    ])
+
+    const started = await startApp(pstDir, undefined, undefined, undefined, undefined, undefined, {
+      searchIndexStore: fingerprintStore,
+      skipInitialRefresh: true
+    })
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const mailboxSearch = await requestJson(
+      `${started.baseUrl}/api/search?scope=all&query=signature&mailOnly=1&pageSize=20`
+    )
+    expect(mailboxSearch.scope).toBe('all')
+    expect(mailboxSearch.page.total).toBe(1)
+    expect(mailboxSearch.page.sourceCounts.mailbox).toBe(1)
+    expect(mailboxSearch.page.sourceCounts.teams).toBe(0)
+    expect(mailboxSearch.page.items[0].messageId).toBe('message:mail-1')
+    expect(mailboxSearch.page.items[0].scopePath).toBe('Case1/Search1')
+    expect(mailboxSearch.page.items[0].previewText).toBeUndefined()
+
+    const teamsSearch = await requestJson(
+      `${started.baseUrl}/api/search?scope=search&scopePath=${encodeURIComponent(
+        'Case1/Search1'
+      )}&sourceType=teams&query=launch&pageSize=20`
+    )
+    expect(teamsSearch.scope).toBe('search')
+    expect(teamsSearch.page.scopePath).toBe('Case1/Search1')
+    expect(teamsSearch.page.scopeLabel).toBe('Case1 / Search1')
+    expect(teamsSearch.page.total).toBe(1)
+    expect(teamsSearch.page.sourceCounts.teams).toBe(1)
+    expect(teamsSearch.page.items[0].sourceType).toBe('teams')
+    expect(teamsSearch.page.items[0].messageId).toBe('message:teams-1')
+    expect(teamsSearch.page.items[0].previewHtml).toBeUndefined()
   })
 
   it('builds invite links from the request origin when no public base url is configured', async () => {

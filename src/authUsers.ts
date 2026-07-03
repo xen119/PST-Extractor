@@ -15,6 +15,15 @@ import {
   verifyTotpCode,
   type RecoveryCodeRecord
 } from './authSecurity'
+import {
+  buildPasswordPolicyView,
+  mergePasswordPolicy,
+  normalizePasswordPolicyInput,
+  validatePasswordAgainstPolicy,
+  type PasswordPolicyInput,
+  type PasswordPolicyRecord,
+  type PasswordPolicyView
+} from './passwordPolicy'
 
 export type AuthInviteStatus = 'pending' | 'active' | 'revoked' | 'expired'
 
@@ -39,6 +48,19 @@ export interface AuthInviteResult {
   inviteExpiresAt: string
 }
 
+export interface AuthLoginResult {
+  user: AuthUserListItem | null
+  lockedUntil: string | null
+  passwordResetAvailable: boolean
+  loginFailedCount: number
+}
+
+export interface AuthPasswordResetResult {
+  user: AuthUserListItem
+  resetToken: string
+  resetExpiresAt: string
+}
+
 export interface AuthMfaSetupResult {
   user: AuthUserListItem
   secret: string
@@ -53,7 +75,11 @@ export interface AuthMfaCompletionResult {
 export interface AuthUserStore {
   listUsers(): Promise<AuthUserListItem[]>
   getUser(username: string): Promise<AuthUserListItem | null>
-  authenticate(username: string, password: string): Promise<AuthUserListItem | null>
+  authenticate(
+    username: string,
+    password: string,
+    policy?: PasswordPolicyRecord
+  ): Promise<AuthLoginResult>
   addUser(username: string, password: string): Promise<AuthUserListItem>
   createInvite(
     username: string,
@@ -63,7 +89,18 @@ export interface AuthUserStore {
   resendInvite(username: string, inviteTtlMinutes: number): Promise<AuthInviteResult | null>
   revokeInvite(username: string): Promise<AuthUserListItem | null>
   getInviteByToken(token: string): Promise<AuthUserListItem | null>
-  acceptInvite(token: string, password: string): Promise<AuthUserListItem>
+  acceptInvite(token: string, password: string, policy?: PasswordPolicyRecord): Promise<AuthUserListItem>
+  requestPasswordReset(
+    usernameOrEmail: string,
+    resetTtlMinutes: number,
+    policy?: PasswordPolicyRecord
+  ): Promise<AuthPasswordResetResult | null>
+  getPasswordResetByToken(token: string): Promise<AuthUserListItem | null>
+  resetPassword(
+    token: string,
+    password: string,
+    policy?: PasswordPolicyRecord
+  ): Promise<AuthUserListItem>
   startMfaEnrollment(username: string, issuer?: string): Promise<AuthMfaSetupResult>
   completeMfaEnrollment(username: string, code: string): Promise<AuthMfaCompletionResult>
   verifyMfaChallenge(username: string, code: string): Promise<AuthUserListItem | null>
@@ -88,6 +125,11 @@ interface StoredAuthUserRecord extends AuthUserListItem {
   mfaPendingSecretIssuedAt: string
   mfaRecoveryCodes: RecoveryCodeRecord[]
   assignedCasePaths: string[]
+  loginFailedCount: number
+  lockedUntil: string
+  passwordResetTokenHash: string
+  passwordResetIssuedAt: string
+  passwordResetExpiresAt: string
 }
 
 interface AuthMetaRecord {
@@ -165,6 +207,17 @@ function hashInviteToken(token: string, masterSecret: string): string {
     .digest('hex')
 }
 
+function hashPasswordResetToken(token: string, masterSecret: string): string {
+  return createHmac('sha256', normalizeAuthSecret(masterSecret))
+    .update(`reset:${normalizeToken(token)}`, 'utf8')
+    .digest('hex')
+}
+
+function normalizePositiveInt(value: unknown, fallback = 0): number {
+  const parsed = Number.parseInt(String(value ?? ''), 10)
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback
+}
+
 function normalizeRecoveryCodeRecords(value: unknown): RecoveryCodeRecord[] {
   if (!Array.isArray(value)) {
     return []
@@ -216,6 +269,11 @@ function buildStoredAuthUserRecord(input: {
   mfaPendingSecretIssuedAt?: string
   mfaRecoveryCodes?: RecoveryCodeRecord[]
   assignedCasePaths?: string[]
+  loginFailedCount?: number
+  lockedUntil?: string
+  passwordResetTokenHash?: string
+  passwordResetIssuedAt?: string
+  passwordResetExpiresAt?: string
 }): StoredAuthUserRecord {
   const username = normalizeUsername(input.username)
   const createdAt = normalizeText(input.createdAt) || new Date().toISOString()
@@ -245,7 +303,12 @@ function buildStoredAuthUserRecord(input: {
     mfaPendingSecretNonce: normalizeText(input.mfaPendingSecretNonce),
     mfaPendingSecretIssuedAt: normalizeText(input.mfaPendingSecretIssuedAt),
     mfaRecoveryCodes: Array.isArray(input.mfaRecoveryCodes) ? input.mfaRecoveryCodes : [],
-    assignedCasePaths: normalizeAssignedCasePaths(input.assignedCasePaths)
+    assignedCasePaths: normalizeAssignedCasePaths(input.assignedCasePaths),
+    loginFailedCount: normalizePositiveInt(input.loginFailedCount, 0),
+    lockedUntil: normalizeText(input.lockedUntil),
+    passwordResetTokenHash: normalizeText(input.passwordResetTokenHash),
+    passwordResetIssuedAt: normalizeText(input.passwordResetIssuedAt),
+    passwordResetExpiresAt: normalizeText(input.passwordResetExpiresAt)
   }
 }
 
@@ -286,7 +349,12 @@ function normalizeStoredAuthUserRecord(value: unknown): StoredAuthUserRecord | n
     mfaPendingSecretNonce: normalizeText(source.mfaPendingSecretNonce),
     mfaPendingSecretIssuedAt: normalizeText(source.mfaPendingSecretIssuedAt),
     mfaRecoveryCodes: normalizeRecoveryCodeRecords(source.mfaRecoveryCodes),
-    assignedCasePaths: normalizeAssignedCasePaths(source.assignedCasePaths)
+    assignedCasePaths: normalizeAssignedCasePaths(source.assignedCasePaths),
+    loginFailedCount: normalizePositiveInt(source.loginFailedCount, 0),
+    lockedUntil: normalizeText(source.lockedUntil),
+    passwordResetTokenHash: normalizeText(source.passwordResetTokenHash),
+    passwordResetIssuedAt: normalizeText(source.passwordResetIssuedAt),
+    passwordResetExpiresAt: normalizeText(source.passwordResetExpiresAt)
   }
 }
 
@@ -346,7 +414,12 @@ function buildLegacyUserRecord(username: string, password: string, createdAt = n
     mfaEnabled: false,
     mfaEnforced: false,
     mfaRecoveryCodes: [],
-    assignedCasePaths: []
+    assignedCasePaths: [],
+    loginFailedCount: 0,
+    lockedUntil: '',
+    passwordResetTokenHash: '',
+    passwordResetIssuedAt: '',
+    passwordResetExpiresAt: ''
   })
 }
 
@@ -383,7 +456,12 @@ function buildInviteRecord(
     mfaPendingSecretNonce: '',
     mfaPendingSecretIssuedAt: '',
     mfaRecoveryCodes: [],
-    assignedCasePaths: existing?.assignedCasePaths || []
+    assignedCasePaths: existing?.assignedCasePaths || [],
+    loginFailedCount: existing?.loginFailedCount || 0,
+    lockedUntil: existing?.lockedUntil || '',
+    passwordResetTokenHash: '',
+    passwordResetIssuedAt: '',
+    passwordResetExpiresAt: ''
   })
 
   return {
@@ -407,7 +485,12 @@ function buildDisabledMfaRecord(record: StoredAuthUserRecord): StoredAuthUserRec
     mfaPendingSecretEncrypted: '',
     mfaPendingSecretNonce: '',
     mfaPendingSecretIssuedAt: '',
-    mfaRecoveryCodes: []
+    mfaRecoveryCodes: [],
+    loginFailedCount: 0,
+    lockedUntil: '',
+    passwordResetTokenHash: '',
+    passwordResetIssuedAt: '',
+    passwordResetExpiresAt: ''
   })
 }
 
@@ -428,7 +511,12 @@ function buildCompletedMfaRecord(
     mfaPendingSecretEncrypted: '',
     mfaPendingSecretNonce: '',
     mfaPendingSecretIssuedAt: '',
-    mfaRecoveryCodes: buildRecoveryCodeRecords(recoveryCodes)
+    mfaRecoveryCodes: buildRecoveryCodeRecords(recoveryCodes),
+    loginFailedCount: 0,
+    lockedUntil: '',
+    passwordResetTokenHash: '',
+    passwordResetIssuedAt: '',
+    passwordResetExpiresAt: ''
   })
 }
 
@@ -439,7 +527,12 @@ function buildMfaSetupRecord(record: StoredAuthUserRecord, secret: string, maste
     updatedAt: new Date().toISOString(),
     mfaPendingSecretEncrypted: encrypted.ciphertext,
     mfaPendingSecretNonce: encrypted.nonce,
-    mfaPendingSecretIssuedAt: new Date().toISOString()
+    mfaPendingSecretIssuedAt: new Date().toISOString(),
+    loginFailedCount: record.loginFailedCount,
+    lockedUntil: record.lockedUntil,
+    passwordResetTokenHash: record.passwordResetTokenHash,
+    passwordResetIssuedAt: record.passwordResetIssuedAt,
+    passwordResetExpiresAt: record.passwordResetExpiresAt
   })
 }
 
@@ -450,6 +543,72 @@ function matchesLoginIdentifier(record: StoredAuthUserRecord, identifier: string
   }
 
   return record.usernameKey === normalizedIdentifier || record.recipientEmail === normalizedIdentifier
+}
+
+function getLoginFailedCount(record: StoredAuthUserRecord): number {
+  return normalizePositiveInt(record.loginFailedCount, 0)
+}
+
+function getLockedUntilTime(record: StoredAuthUserRecord): number {
+  const timestamp = Date.parse(record.lockedUntil || '')
+  return Number.isFinite(timestamp) ? timestamp : 0
+}
+
+function isLoginLocked(record: StoredAuthUserRecord): boolean {
+  return getLockedUntilTime(record) > Date.now()
+}
+
+function buildLoginSuccessRecord(record: StoredAuthUserRecord): StoredAuthUserRecord {
+  return buildStoredAuthUserRecord({
+    ...record,
+    updatedAt: new Date().toISOString(),
+    loginFailedCount: 0,
+    lockedUntil: '',
+    passwordResetTokenHash: '',
+    passwordResetIssuedAt: '',
+    passwordResetExpiresAt: ''
+  })
+}
+
+function buildLoginFailureRecord(record: StoredAuthUserRecord, policy?: PasswordPolicyRecord): StoredAuthUserRecord {
+  const nextFailedCount = getLoginFailedCount(record) + 1
+  const lockoutThreshold = Math.max(1, policy?.lockoutThreshold || 5)
+  const shouldLock = nextFailedCount >= lockoutThreshold
+  return buildStoredAuthUserRecord({
+    ...record,
+    updatedAt: new Date().toISOString(),
+    loginFailedCount: nextFailedCount,
+    lockedUntil: shouldLock
+      ? new Date(Date.now() + Math.max(1, policy?.lockoutDurationSeconds || 30) * 1000).toISOString()
+      : record.lockedUntil
+  })
+}
+
+function buildPasswordResetRecord(
+  record: StoredAuthUserRecord,
+  resetToken: string,
+  resetExpiresAt: string,
+  masterSecret: string
+): StoredAuthUserRecord {
+  return buildStoredAuthUserRecord({
+    ...record,
+    updatedAt: new Date().toISOString(),
+    passwordResetTokenHash: hashPasswordResetToken(resetToken, masterSecret),
+    passwordResetIssuedAt: new Date().toISOString(),
+    passwordResetExpiresAt: resetExpiresAt
+  })
+}
+
+function buildPasswordResetClearedRecord(record: StoredAuthUserRecord): StoredAuthUserRecord {
+  return buildStoredAuthUserRecord({
+    ...record,
+    updatedAt: new Date().toISOString(),
+    loginFailedCount: 0,
+    lockedUntil: '',
+    passwordResetTokenHash: '',
+    passwordResetIssuedAt: '',
+    passwordResetExpiresAt: ''
+  })
 }
 
 class MemoryAuthUserStore implements AuthUserStore {
@@ -577,21 +736,60 @@ class MemoryAuthUserStore implements AuthUserStore {
     return record ? toAuthUserListItem(record) : null
   }
 
-  async authenticate(username: string, password: string): Promise<AuthUserListItem | null> {
+  async authenticate(
+    username: string,
+    password: string,
+    policy?: PasswordPolicyRecord
+  ): Promise<AuthLoginResult> {
     const record = this.getRecordByLoginIdentifier(username)
     if (!record || getInviteStatus(record) !== 'active') {
-      return null
+      return {
+        user: null,
+        lockedUntil: null,
+        passwordResetAvailable: false,
+        loginFailedCount: 0
+      }
     }
 
     if (!record.passwordHash || !record.salt) {
-      return null
+      return {
+        user: null,
+        lockedUntil: null,
+        passwordResetAvailable: false,
+        loginFailedCount: 0
+      }
+    }
+
+    if (isLoginLocked(record)) {
+      return {
+        user: null,
+        lockedUntil: record.lockedUntil || null,
+        passwordResetAvailable:
+          getLoginFailedCount(record) >= Math.max(1, policy?.forgotPasswordAfterFailures || 2),
+        loginFailedCount: getLoginFailedCount(record)
+      }
     }
 
     if (!verifyAuthPassword(String(password ?? ''), record.salt, record.passwordHash)) {
-      return null
+      const updated = buildLoginFailureRecord(record, policy)
+      this.setRecord(updated)
+      const failedCount = getLoginFailedCount(updated)
+      return {
+        user: null,
+        lockedUntil: isLoginLocked(updated) ? updated.lockedUntil || null : null,
+        passwordResetAvailable: failedCount >= Math.max(1, policy?.forgotPasswordAfterFailures || 2),
+        loginFailedCount: failedCount
+      }
     }
 
-    return toAuthUserListItem(record)
+    const updated = buildLoginSuccessRecord(record)
+    this.setRecord(updated)
+    return {
+      user: toAuthUserListItem(updated),
+      lockedUntil: null,
+      passwordResetAvailable: false,
+      loginFailedCount: 0
+    }
   }
 
   async addUser(username: string, password: string): Promise<AuthUserListItem> {
@@ -659,7 +857,11 @@ class MemoryAuthUserStore implements AuthUserStore {
     return record && getInviteStatus(record) === 'pending' ? toAuthUserListItem(record) : null
   }
 
-  async acceptInvite(token: string, password: string): Promise<AuthUserListItem> {
+  async acceptInvite(
+    token: string,
+    password: string,
+    policy?: PasswordPolicyRecord
+  ): Promise<AuthUserListItem> {
     const record = this.findRecordByInviteToken(token)
     if (!record) {
       throw createAuthStoreError(404, 'Invite not found')
@@ -680,6 +882,21 @@ class MemoryAuthUserStore implements AuthUserStore {
     if (!normalizedPassword.trim()) {
       throw createAuthStoreError(400, 'Password is required')
     }
+    const policyIssues = validatePasswordAgainstPolicy(normalizedPassword, policy || mergePasswordPolicy(buildPasswordPolicyView({
+      minLength: 12,
+      requireUppercase: true,
+      requireLowercase: true,
+      requireNumber: true,
+      requireSpecial: true,
+      forgotPasswordAfterFailures: 2,
+      lockoutThreshold: 5,
+      lockoutDurationSeconds: 30,
+      resetTokenTtlMinutes: 60,
+      enforceMfa: false
+    }), {}))
+    if (policyIssues.length) {
+      throw createAuthStoreError(400, policyIssues.join(' '))
+    }
 
     const now = new Date().toISOString()
     const salt = randomBytes(16).toString('hex')
@@ -690,7 +907,110 @@ class MemoryAuthUserStore implements AuthUserStore {
       passwordHash: hashAuthPassword(normalizedPassword, salt),
       inviteStatus: 'active',
       inviteAcceptedAt: now,
-      inviteRevokedAt: ''
+      inviteRevokedAt: '',
+      loginFailedCount: 0,
+      lockedUntil: '',
+      passwordResetTokenHash: '',
+      passwordResetIssuedAt: '',
+      passwordResetExpiresAt: ''
+    })
+    this.setRecord(updated)
+    return toAuthUserListItem(updated)
+  }
+
+  async requestPasswordReset(
+    usernameOrEmail: string,
+    resetTtlMinutes: number,
+    policy?: PasswordPolicyRecord
+  ): Promise<AuthPasswordResetResult | null> {
+    const record = this.getRecordByLoginIdentifier(usernameOrEmail)
+    if (!record || getInviteStatus(record) !== 'active' || !record.recipientEmail) {
+      return null
+    }
+
+    const resetThreshold = Math.max(1, policy?.forgotPasswordAfterFailures || 2)
+    if (getLoginFailedCount(record) < resetThreshold) {
+      return null
+    }
+
+    const resetToken = randomBytes(24).toString('hex')
+    const resetExpiresAt = new Date(
+      Date.now() + Math.max(1, resetTtlMinutes || 60) * 60 * 1000
+    ).toISOString()
+    const updated = buildPasswordResetRecord(record, resetToken, resetExpiresAt, this.masterSecret)
+    this.setRecord(updated)
+    return {
+      user: toAuthUserListItem(updated),
+      resetToken,
+      resetExpiresAt
+    }
+  }
+
+  async getPasswordResetByToken(token: string): Promise<AuthUserListItem | null> {
+    const tokenHash = hashPasswordResetToken(token, this.masterSecret)
+    for (const record of this.users.values()) {
+      if (record.passwordResetTokenHash !== tokenHash) {
+        continue
+      }
+      const expiresAt = Date.parse(record.passwordResetExpiresAt || '')
+      if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+        return null
+      }
+      return toAuthUserListItem(record)
+    }
+    return null
+  }
+
+  async resetPassword(
+    token: string,
+    password: string,
+    policy?: PasswordPolicyRecord
+  ): Promise<AuthUserListItem> {
+    const tokenHash = hashPasswordResetToken(token, this.masterSecret)
+    const record = [...this.users.values()].find((entry) => entry.passwordResetTokenHash === tokenHash) || null
+    if (!record) {
+      throw createAuthStoreError(404, 'Password reset token not found')
+    }
+
+    const expiresAt = Date.parse(record.passwordResetExpiresAt || '')
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      throw createAuthStoreError(410, 'Password reset token has expired')
+    }
+
+    const normalizedPassword = String(password ?? '')
+    if (!normalizedPassword.trim()) {
+      throw createAuthStoreError(400, 'Password is required')
+    }
+    const policyIssues = validatePasswordAgainstPolicy(
+      normalizedPassword,
+      policy || buildPasswordPolicyView({
+        minLength: 12,
+        requireUppercase: true,
+        requireLowercase: true,
+        requireNumber: true,
+        requireSpecial: true,
+        forgotPasswordAfterFailures: 2,
+        lockoutThreshold: 5,
+        lockoutDurationSeconds: 30,
+        resetTokenTtlMinutes: 60,
+        enforceMfa: false
+      })
+    )
+    if (policyIssues.length) {
+      throw createAuthStoreError(400, policyIssues.join(' '))
+    }
+
+    const salt = randomBytes(16).toString('hex')
+    const updated = buildStoredAuthUserRecord({
+      ...record,
+      updatedAt: new Date().toISOString(),
+      salt,
+      passwordHash: hashAuthPassword(normalizedPassword, salt),
+      loginFailedCount: 0,
+      lockedUntil: '',
+      passwordResetTokenHash: '',
+      passwordResetIssuedAt: '',
+      passwordResetExpiresAt: ''
     })
     this.setRecord(updated)
     return toAuthUserListItem(updated)
@@ -891,6 +1211,7 @@ export class MongoAuthUserStore implements AuthUserStore {
     await collection.createIndex({ usernameKey: 1 }, { unique: true })
     await collection.createIndex({ recipientEmail: 1 })
     await collection.createIndex({ inviteTokenHash: 1 })
+    await collection.createIndex({ passwordResetTokenHash: 1 })
     await collection.createIndex({ createdAt: 1 })
     await metaCollection.createIndex({ key: 1 }, { unique: true })
     const masterSecret = await MongoAuthUserStore.ensureMasterSecret(metaCollection)
@@ -1058,21 +1379,60 @@ export class MongoAuthUserStore implements AuthUserStore {
     return record ? toAuthUserListItem(record) : null
   }
 
-  async authenticate(username: string, password: string): Promise<AuthUserListItem | null> {
+  async authenticate(
+    username: string,
+    password: string,
+    policy?: PasswordPolicyRecord
+  ): Promise<AuthLoginResult> {
     const record = await this.getRecordByLoginIdentifier(username)
     if (!record || getInviteStatus(record) !== 'active') {
-      return null
+      return {
+        user: null,
+        lockedUntil: null,
+        passwordResetAvailable: false,
+        loginFailedCount: 0
+      }
     }
 
     if (!record.passwordHash || !record.salt) {
-      return null
+      return {
+        user: null,
+        lockedUntil: null,
+        passwordResetAvailable: false,
+        loginFailedCount: 0
+      }
+    }
+
+    if (isLoginLocked(record)) {
+      const failedCount = getLoginFailedCount(record)
+      return {
+        user: null,
+        lockedUntil: record.lockedUntil || null,
+        passwordResetAvailable: failedCount >= Math.max(1, policy?.forgotPasswordAfterFailures || 2),
+        loginFailedCount: failedCount
+      }
     }
 
     if (!verifyAuthPassword(String(password ?? ''), record.salt, record.passwordHash)) {
-      return null
+      const updated = buildLoginFailureRecord(record, policy)
+      await this.setRecord(updated)
+      const failedCount = getLoginFailedCount(updated)
+      return {
+        user: null,
+        lockedUntil: isLoginLocked(updated) ? updated.lockedUntil || null : null,
+        passwordResetAvailable: failedCount >= Math.max(1, policy?.forgotPasswordAfterFailures || 2),
+        loginFailedCount: failedCount
+      }
     }
 
-    return toAuthUserListItem(record)
+    const updated = buildLoginSuccessRecord(record)
+    await this.setRecord(updated)
+    return {
+      user: toAuthUserListItem(updated),
+      lockedUntil: null,
+      passwordResetAvailable: false,
+      loginFailedCount: 0
+    }
   }
 
   async addUser(username: string, password: string): Promise<AuthUserListItem> {
@@ -1140,7 +1500,11 @@ export class MongoAuthUserStore implements AuthUserStore {
     return record && getInviteStatus(record) === 'pending' ? toAuthUserListItem(record) : null
   }
 
-  async acceptInvite(token: string, password: string): Promise<AuthUserListItem> {
+  async acceptInvite(
+    token: string,
+    password: string,
+    policy?: PasswordPolicyRecord
+  ): Promise<AuthUserListItem> {
     const record = await this.findRecordByInviteToken(token)
     if (!record) {
       throw createAuthStoreError(404, 'Invite not found')
@@ -1161,6 +1525,24 @@ export class MongoAuthUserStore implements AuthUserStore {
     if (!normalizedPassword.trim()) {
       throw createAuthStoreError(400, 'Password is required')
     }
+    const policyIssues = validatePasswordAgainstPolicy(
+      normalizedPassword,
+      policy || buildPasswordPolicyView({
+        minLength: 12,
+        requireUppercase: true,
+        requireLowercase: true,
+        requireNumber: true,
+        requireSpecial: true,
+        forgotPasswordAfterFailures: 2,
+        lockoutThreshold: 5,
+        lockoutDurationSeconds: 30,
+        resetTokenTtlMinutes: 60,
+        enforceMfa: false
+      })
+    )
+    if (policyIssues.length) {
+      throw createAuthStoreError(400, policyIssues.join(' '))
+    }
 
     const now = new Date().toISOString()
     const salt = randomBytes(16).toString('hex')
@@ -1171,7 +1553,111 @@ export class MongoAuthUserStore implements AuthUserStore {
       passwordHash: hashAuthPassword(normalizedPassword, salt),
       inviteStatus: 'active',
       inviteAcceptedAt: now,
-      inviteRevokedAt: ''
+      inviteRevokedAt: '',
+      loginFailedCount: 0,
+      lockedUntil: '',
+      passwordResetTokenHash: '',
+      passwordResetIssuedAt: '',
+      passwordResetExpiresAt: ''
+    })
+    await this.setRecord(updated)
+    return toAuthUserListItem(updated)
+  }
+
+  async requestPasswordReset(
+    usernameOrEmail: string,
+    resetTtlMinutes: number,
+    _policy?: PasswordPolicyRecord
+  ): Promise<AuthPasswordResetResult | null> {
+    const record = await this.getRecordByLoginIdentifier(usernameOrEmail)
+    if (!record || getInviteStatus(record) !== 'active' || !record.recipientEmail) {
+      return null
+    }
+
+    const resetThreshold = Math.max(1, _policy?.forgotPasswordAfterFailures || 2)
+    if (getLoginFailedCount(record) < resetThreshold) {
+      return null
+    }
+
+    const resetToken = randomBytes(24).toString('hex')
+    const resetExpiresAt = new Date(
+      Date.now() + Math.max(1, resetTtlMinutes || 60) * 60 * 1000
+    ).toISOString()
+    const updated = buildPasswordResetRecord(record, resetToken, resetExpiresAt, this.masterSecret)
+    await this.setRecord(updated)
+    return {
+      user: toAuthUserListItem(updated),
+      resetToken,
+      resetExpiresAt
+    }
+  }
+
+  async getPasswordResetByToken(token: string): Promise<AuthUserListItem | null> {
+    const tokenHash = hashPasswordResetToken(token, this.masterSecret)
+    const record = await this.collection.findOne({ passwordResetTokenHash: tokenHash })
+    const normalized = normalizeStoredAuthUserRecord(record)
+    if (!normalized) {
+      return null
+    }
+    const expiresAt = Date.parse(normalized.passwordResetExpiresAt || '')
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      return null
+    }
+    return toAuthUserListItem(normalized)
+  }
+
+  async resetPassword(
+    token: string,
+    password: string,
+    policy?: PasswordPolicyRecord
+  ): Promise<AuthUserListItem> {
+    const tokenHash = hashPasswordResetToken(token, this.masterSecret)
+    const record = normalizeStoredAuthUserRecord(
+      await this.collection.findOne({ passwordResetTokenHash: tokenHash })
+    )
+    if (!record) {
+      throw createAuthStoreError(404, 'Password reset token not found')
+    }
+
+    const expiresAt = Date.parse(record.passwordResetExpiresAt || '')
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      throw createAuthStoreError(410, 'Password reset token has expired')
+    }
+
+    const normalizedPassword = String(password ?? '')
+    if (!normalizedPassword.trim()) {
+      throw createAuthStoreError(400, 'Password is required')
+    }
+    const policyIssues = validatePasswordAgainstPolicy(
+      normalizedPassword,
+      policy || buildPasswordPolicyView({
+        minLength: 12,
+        requireUppercase: true,
+        requireLowercase: true,
+        requireNumber: true,
+        requireSpecial: true,
+        forgotPasswordAfterFailures: 2,
+        lockoutThreshold: 5,
+        lockoutDurationSeconds: 30,
+        resetTokenTtlMinutes: 60,
+        enforceMfa: false
+      })
+    )
+    if (policyIssues.length) {
+      throw createAuthStoreError(400, policyIssues.join(' '))
+    }
+
+    const salt = randomBytes(16).toString('hex')
+    const updated = buildStoredAuthUserRecord({
+      ...record,
+      updatedAt: new Date().toISOString(),
+      salt,
+      passwordHash: hashAuthPassword(normalizedPassword, salt),
+      loginFailedCount: 0,
+      lockedUntil: '',
+      passwordResetTokenHash: '',
+      passwordResetIssuedAt: '',
+      passwordResetExpiresAt: ''
     })
     await this.setRecord(updated)
     return toAuthUserListItem(updated)

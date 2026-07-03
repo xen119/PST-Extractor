@@ -37,6 +37,11 @@ import {
   type ExtractionFieldGroup
 } from './extraction'
 import {
+  buildPasswordPolicyDefaultsFromEnv,
+  validatePasswordAgainstPolicy,
+  type PasswordPolicyRecord
+} from './passwordPolicy'
+import {
   buildReviewContext,
   type ReviewStore
 } from './reviewStore'
@@ -44,6 +49,7 @@ import type { ReviewState } from './reviewTypes'
 import {
   type HiddenRuleRecord,
   type SearchIndexDocument,
+  type SearchIndexFileFingerprint,
   type SearchIndexPage,
   type SearchIndexSearchOptions,
   type SearchIndexRefreshSource,
@@ -169,6 +175,9 @@ interface AuthStatusResponse {
   mfaEnforced: boolean
   mfaRequired: boolean
   mfaChallengeExpiresAt: string | null
+  lockedUntil: string | null
+  loginFailedCount: number
+  passwordResetAvailable: boolean
   user: {
     username: string
     assignedCasePaths: string[]
@@ -686,6 +695,8 @@ function isPublicApiPath(pathname: string): boolean {
     pathname === API_ROUTES.authLogin ||
     pathname === API_ROUTES.authMe ||
     pathname === API_ROUTES.authLogout ||
+    pathname === API_ROUTES.authPasswordResetRequest ||
+    pathname.startsWith(`${API_ROUTES.authPasswordResetLookup.split('/:token')[0]}`) ||
     pathname.startsWith(`${API_ROUTES.authInviteLookup.split('/:token')[0]}`) ||
     pathname.startsWith(`${API_ROUTES.authInviteAccept.split('/:token')[0]}`) ||
     pathname === API_ROUTES.authMfaChallenge
@@ -697,6 +708,8 @@ function isAuthApiPath(pathname: string): boolean {
     pathname === API_ROUTES.authLogin ||
     pathname === API_ROUTES.authMe ||
     pathname === API_ROUTES.authLogout ||
+    pathname === API_ROUTES.authPasswordResetRequest ||
+    pathname.startsWith(`${API_ROUTES.authPasswordResetLookup.split('/:token')[0]}`) ||
     pathname === API_ROUTES.authMfaChallenge
   )
 }
@@ -979,6 +992,10 @@ function parseRefreshSource(value: unknown): SearchIndexRefreshSource {
   return normalizeText(value).toLowerCase() === 'items' ? 'items' : 'mailboxes'
 }
 
+function uniqueTextValues(values: string[]): string[] {
+  return [...new Set(values.map((value) => normalizeText(value)).filter(Boolean))]
+}
+
 function collectCatalogMailboxKeys(
   rootPath: string,
   catalog: ReturnType<typeof listPstMailboxFiles>,
@@ -997,8 +1014,166 @@ function buildArchiveMailboxKeys(rootPath: string, catalog: ReturnType<typeof li
   return collectCatalogMailboxKeys(rootPath, catalog, resolveArchiveBundlePath)
 }
 
+interface FingerprintScopeEntry {
+  scopePath: string
+  scopeLabel: string
+  fileCount: number
+  files: SearchIndexFileFingerprint[]
+}
+
+interface FingerprintCatalogSelection {
+  scopes: FingerprintScopeEntry[]
+  scopePath: string
+  scopeLabel: string
+  files: SearchIndexFileFingerprint[]
+}
+
 function getScopeLabel(scopePath: string): string {
   return scopePath ? scopePath.split('/').join(' / ') : 'PST root'
+}
+
+function buildFingerprintScopeEntries(fingerprints: SearchIndexFileFingerprint[]): FingerprintScopeEntry[] {
+  const scopes = new Map<string, FingerprintScopeEntry>()
+
+  for (const fingerprint of fingerprints) {
+    const scopePath = normalizeScopePath(fingerprint.scopePath)
+    const existingScope = scopes.get(scopePath)
+    const normalizedScopeLabel = normalizeText(fingerprint.scopeLabel) || getScopeLabel(scopePath)
+    if (!existingScope) {
+      scopes.set(scopePath, {
+        scopePath,
+        scopeLabel: normalizedScopeLabel,
+        fileCount: 1,
+        files: [
+          {
+            ...fingerprint,
+            scopePath,
+            scopeLabel: normalizedScopeLabel
+          }
+        ]
+      })
+      continue
+    }
+
+    existingScope.fileCount += 1
+    existingScope.files.push({
+      ...fingerprint,
+      scopePath,
+      scopeLabel: existingScope.scopeLabel || normalizedScopeLabel
+    })
+  }
+
+  return [...scopes.values()]
+    .map((scope) => ({
+      ...scope,
+      files: scope.files.sort((left, right) =>
+        left.fileName.localeCompare(right.fileName, undefined, { sensitivity: 'base' })
+      )
+    }))
+    .sort((left, right) => {
+      if (left.scopePath === right.scopePath) {
+        return 0
+      }
+      if (left.scopePath === '') {
+        return -1
+      }
+      if (right.scopePath === '') {
+        return 1
+      }
+      return left.scopeLabel.localeCompare(right.scopeLabel, undefined, { sensitivity: 'base' })
+    })
+}
+
+function chooseFingerprintScopeEntry(
+  scopes: FingerprintScopeEntry[],
+  requestedScopePath: unknown
+): FingerprintScopeEntry | null {
+  const normalizedRequestedScopePath = normalizeScopePath(requestedScopePath)
+  if (normalizedRequestedScopePath) {
+    const requestedScope = scopes.find((scope) => scope.scopePath === normalizedRequestedScopePath)
+    if (requestedScope) {
+      return requestedScope
+    }
+  }
+
+  const rootScope = scopes.find((scope) => scope.scopePath === '')
+  return rootScope || scopes[0] || null
+}
+
+function collectFingerprintMailboxKeys(scopes: FingerprintScopeEntry[]): string[] {
+  return uniqueTextValues(scopes.flatMap((scope) => scope.files.map((file) => file.mailboxKey)))
+}
+
+function resolveAccessibleFingerprintCatalogSelection(
+  requestedScopePath: string,
+  allowedCasePaths: string[],
+  fingerprints: SearchIndexFileFingerprint[],
+  allowAll = false
+): FingerprintCatalogSelection | null {
+  const normalizedRequestedScopePath = normalizeScopePath(requestedScopePath)
+  if (normalizedRequestedScopePath && !isScopePathAllowed(normalizedRequestedScopePath, allowedCasePaths, allowAll)) {
+    throw createAppError(403, 'Case access required')
+  }
+
+  if (!allowAll && !allowedCasePaths.length) {
+    return {
+      scopes: [],
+      scopePath: '',
+      scopeLabel: '',
+      files: []
+    }
+  }
+
+  if (!fingerprints.length) {
+    return null
+  }
+
+  const scopes = buildFingerprintScopeEntries(fingerprints)
+  const accessibleScopes = scopes.filter((scope) => isScopePathAllowed(scope.scopePath, allowedCasePaths, allowAll))
+  if (!accessibleScopes.length) {
+    return {
+      scopes: [],
+      scopePath: '',
+      scopeLabel: '',
+      files: []
+    }
+  }
+
+  if (normalizedRequestedScopePath) {
+    const requestedScope = accessibleScopes.find((scope) => scope.scopePath === normalizedRequestedScopePath)
+    if (!requestedScope) {
+      return null
+    }
+    return {
+      scopes: accessibleScopes,
+      scopePath: requestedScope.scopePath,
+      scopeLabel: requestedScope.scopeLabel || getScopeLabel(requestedScope.scopePath),
+      files: requestedScope.files
+    }
+  }
+
+  const effectiveScopePath = normalizedRequestedScopePath || (allowAll ? '' : allowedCasePaths[0] || '')
+  const selectedScopeCandidate = chooseFingerprintScopeEntry(scopes, effectiveScopePath)
+  const selectedScope =
+    accessibleScopes.find((scope) => scope.scopePath === selectedScopeCandidate?.scopePath) ||
+    accessibleScopes[0] ||
+    null
+
+  if (!selectedScope) {
+    return {
+      scopes: [],
+      scopePath: '',
+      scopeLabel: '',
+      files: []
+    }
+  }
+
+  return {
+    scopes: accessibleScopes,
+    scopePath: selectedScope.scopePath,
+    scopeLabel: selectedScope.scopeLabel || getScopeLabel(selectedScope.scopePath),
+    files: selectedScope.files
+  }
 }
 
 function resolveCatalogScopeSelection(
@@ -1939,6 +2114,50 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     }
   }
 
+  function buildSearchResultSummary(item: SearchIndexDocument) {
+    const id = normalizeText(item.id || item.messageId)
+    const messageId = normalizeText(item.messageId || id)
+    return {
+      id,
+      messageId,
+      sourceType: item.sourceType,
+      descriptorId: item.descriptorId,
+      folderId: item.folderId,
+      folderPath: item.folderPath,
+      order: item.order,
+      messageClass: item.messageClass,
+      kind: item.kind,
+      subject: item.subject,
+      senderName: item.senderName,
+      senderEmailAddress: item.senderEmailAddress,
+      recipientText: item.recipientText,
+      displayTo: item.displayTo,
+      displayCC: item.displayCC,
+      displayBCC: item.displayBCC,
+      resolvedDisplayTo: item.resolvedDisplayTo,
+      resolvedDisplayCC: item.resolvedDisplayCC,
+      resolvedDisplayBCC: item.resolvedDisplayBCC,
+      originalSubject: item.originalSubject,
+      clientSubmitTime: item.clientSubmitTime,
+      creationTime: item.creationTime,
+      modificationTime: item.modificationTime,
+      messageDeliveryTime: item.messageDeliveryTime,
+      sortDate: item.sortDate,
+      sortDateMs: item.sortDateMs,
+      importance: item.importance,
+      hasAttachments: item.hasAttachments,
+      isRead: item.isRead,
+      isMailLike: item.isMailLike,
+      review: item.review,
+      scopePath: item.scopePath,
+      scopeLabel: item.scopeLabel,
+      fileName: item.fileName,
+      mailboxName: item.mailboxName,
+      contentType: item.contentType,
+      downloadFilename: item.downloadFilename
+    }
+  }
+
   function buildLoadedReviewableItemFromFolderSummary(
     session: SessionRecord,
     item: ReviewedMessageSummary
@@ -2373,7 +2592,10 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     challenge: AuthMfaChallengeRecord | null = null,
     user: AuthUserListItem | null = null,
     mfaEnabled = false,
-    mfaEnforced = false
+    mfaEnforced = false,
+    lockedUntil: string | null = null,
+    loginFailedCount = 0,
+    passwordResetAvailable = false
   ): AuthStatusResponse {
     const canManageUsers = isAdminAuthSession(session, authConfig)
     const authUser = user
@@ -2391,6 +2613,9 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         mfaEnforced: false,
         mfaRequired: false,
         mfaChallengeExpiresAt: null,
+        lockedUntil: null,
+        loginFailedCount: 0,
+        passwordResetAvailable: false,
         user: authUser,
         expiresAt: null
       }
@@ -2406,6 +2631,9 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           mfaEnforced: Boolean(mfaEnforced),
           mfaRequired: true,
           mfaChallengeExpiresAt: new Date(challenge.expiresAt).toISOString(),
+          lockedUntil: null,
+          loginFailedCount: 0,
+          passwordResetAvailable: false,
           user: authUser || {
             username: challenge.username,
             assignedCasePaths: []
@@ -2422,6 +2650,9 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         mfaEnforced: false,
         mfaRequired: false,
         mfaChallengeExpiresAt: null,
+        lockedUntil: null,
+        loginFailedCount: 0,
+        passwordResetAvailable: false,
         user: null,
         expiresAt: null
       }
@@ -2435,11 +2666,22 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       mfaEnforced: Boolean(mfaEnforced),
       mfaRequired: false,
       mfaChallengeExpiresAt: null,
+      lockedUntil,
+      loginFailedCount: Math.max(0, Math.floor(loginFailedCount || 0)),
+      passwordResetAvailable: Boolean(passwordResetAvailable),
       user: authUser || {
         username: session.username,
         assignedCasePaths: []
       },
       expiresAt: new Date(session.expiresAt).toISOString()
+    }
+  }
+
+  async function getPasswordPolicy(): Promise<PasswordPolicyRecord> {
+    try {
+      return await appSettingsStore.getPasswordPolicy()
+    } catch {
+      return buildPasswordPolicyDefaultsFromEnv()
     }
   }
 
@@ -2637,6 +2879,17 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     return origin ? `${origin}${path}` : path
   }
 
+  function buildPasswordResetPath(token: string): string {
+    return `/reset/${encodeURIComponent(token)}`
+  }
+
+  function buildPasswordResetUrl(req: express.Request, token: string): string {
+    const origin =
+      normalizeOrigin(authConfig.publicBaseUrl) || getRequestBaseOrigin(req) || canonicalRequestOrigin(req)
+    const path = buildPasswordResetPath(token)
+    return origin ? `${origin}${path}` : path
+  }
+
   function buildInviteEmailText(input: {
     username: string
     inviteUrl: string
@@ -2650,6 +2903,47 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       '',
       `This invite expires at ${input.inviteExpiresAt}.`
     ].join('\n')
+  }
+
+  function buildPasswordResetEmailText(input: {
+    username: string
+    resetUrl: string
+    resetExpiresAt: string
+  }): string {
+    return [
+      `A password reset was requested for ${input.username}.`,
+      '',
+      'Click here to reset your DV PST Mail Explorer password:',
+      input.resetUrl,
+      '',
+      `This reset link expires at ${input.resetExpiresAt}.`
+    ].join('\n')
+  }
+
+  function buildPasswordResetEmailHtml(input: {
+    username: string
+    resetUrl: string
+    resetExpiresAt: string
+  }): string {
+    return [
+      '<!doctype html>',
+      '<html>',
+      '<body style="margin:0;padding:24px;font-family:Arial,Helvetica,sans-serif;background:#f3f4f6;color:#111827;">',
+      '<div style="max-width:640px;margin:0 auto;background:#ffffff;border:1px solid #d1d5db;border-radius:16px;padding:24px;">',
+      `<h1 style="margin:0 0 12px;font-size:20px;line-height:28px;">Password reset requested</h1>`,
+      `<p style="margin:0 0 16px;font-size:16px;line-height:24px;">A password reset was requested for <strong>${escapeHtml(
+        input.username
+      )}</strong>.</p>`,
+      `<p style="margin:0 0 16px;font-size:16px;line-height:24px;"><a href="${escapeHtml(
+        input.resetUrl
+      )}" style="color:#2f6feb;text-decoration:underline;">Click here to reset your DV PST Mail Explorer password</a></p>`,
+      `<p style="margin:0;font-size:14px;line-height:22px;color:#4b5563;">This reset link expires at ${escapeHtml(
+        input.resetExpiresAt
+      )}.</p>`,
+      '</div>',
+      '</body>',
+      '</html>'
+    ].join('')
   }
 
   function escapeHtml(value: string): string {
@@ -2721,6 +3015,52 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
             username: input.username,
             inviteUrl: input.inviteUrl,
             inviteExpiresAt: input.inviteExpiresAt
+          })
+        })
+        return { emailSent: true }
+      } finally {
+        try {
+          await transporter.close?.()
+        } catch {
+          // Ignore transport close failures.
+        }
+      }
+    } catch (error) {
+      return {
+        emailSent: false,
+        error: error instanceof Error ? error.message : String(error)
+      }
+    }
+  }
+
+  async function sendPasswordResetEmail(input: {
+    recipientEmail: string
+    username: string
+    resetUrl: string
+    resetExpiresAt: string
+    req: express.Request
+  }): Promise<{ emailSent: boolean; error?: string }> {
+    try {
+      const settings = await appSettingsStore.getSmtpSettings()
+      if (!settings.enabled || !normalizeText(settings.host) || !normalizeText(settings.fromAddress)) {
+        return { emailSent: false, error: 'SMTP is not configured' }
+      }
+
+      const transporter = smtpTransportFactory(settings)
+      try {
+        await transporter.sendMail({
+          from: buildSmtpFromAddress(settings),
+          to: input.recipientEmail,
+          subject: 'DV PST Mail Explorer password reset',
+          text: buildPasswordResetEmailText({
+            username: input.username,
+            resetUrl: input.resetUrl,
+            resetExpiresAt: input.resetExpiresAt
+          }),
+          html: buildPasswordResetEmailHtml({
+            username: input.username,
+            resetUrl: input.resetUrl,
+            resetExpiresAt: input.resetExpiresAt
           })
         })
         return { emailSent: true }
@@ -2848,11 +3188,16 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     res.status(200).sendFile(path.join(publicDir, 'index.html'))
   })
 
+  app.get('/reset/:token', (_req, res) => {
+    res.status(200).sendFile(path.join(publicDir, 'index.html'))
+  })
+
   app.get(API_ROUTES.authMe, async (req, res) => {
     try {
       res.set('Cache-Control', 'no-store')
       const session = getAuthSessionFromRequest(req)
       const challenge = session ? null : getAuthMfaChallengeFromRequest(req)
+      const passwordPolicy = await getPasswordPolicy()
       if (!authConfig.enabled && !session && !challenge) {
         responseJson(res, 200, buildAuthStatus(null))
         return
@@ -2879,7 +3224,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           challenge,
           currentUser,
           session?.mfaEnabled ?? Boolean(currentUser?.mfaEnabled),
-          Boolean(currentUser?.mfaEnforced)
+          Boolean(currentUser?.mfaEnforced || passwordPolicy.enforceMfa)
         )
       )
     } catch (error) {
@@ -2902,8 +3247,10 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       const body = (req.body || {}) as { username?: string; email?: string; password?: string }
       const username = normalizeAuthUsername(body.username || body.email)
       const password = String(body.password ?? '')
-      const user = await authUserStore.authenticate(username, password)
-      if (!user) {
+      const passwordPolicy = await getPasswordPolicy()
+      const result = await authUserStore.authenticate(username, password, passwordPolicy)
+      if (!result.user) {
+        const statusCode = result.lockedUntil ? 423 : 401
         recordAuditEvent({
           req,
           actor: {
@@ -2915,15 +3262,29 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           target: username || 'anonymous',
           outcome: 'denied',
           metadata: {
-            reason: 'Invalid username or password'
+            reason: result.lockedUntil ? 'Account temporarily locked' : 'Invalid username or password',
+            lockedUntil: result.lockedUntil || undefined,
+            loginFailedCount: result.loginFailedCount
           }
         })
-        responseJson(res, 401, {
-          ...buildAuthStatus(null),
-          error: 'Invalid username or password'
+        responseJson(res, statusCode, {
+          ...buildAuthStatus(
+            null,
+            null,
+            null,
+            false,
+            false,
+            result.lockedUntil,
+            result.loginFailedCount,
+            result.passwordResetAvailable
+          ),
+          error: result.lockedUntil ? 'Account temporarily locked. Try again later.' : 'Invalid username or password'
         })
         return
       }
+
+      const user = result.user
+      const mfaEnforced = Boolean(user.mfaEnforced || passwordPolicy.enforceMfa)
 
       if (user.mfaEnabled) {
         const challenge = createAuthMfaChallenge(user.username)
@@ -2936,10 +3297,10 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           outcome: 'success',
           metadata: {
             mfaRequired: true,
-            mfaEnforced: Boolean(user.mfaEnforced)
+            mfaEnforced
           }
         })
-        responseJson(res, 200, buildAuthStatus(null, challenge, user, false, Boolean(user.mfaEnforced)))
+        responseJson(res, 200, buildAuthStatus(null, challenge, user, false, mfaEnforced))
         return
       }
 
@@ -2952,10 +3313,10 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         target: user.username,
         outcome: 'success',
         metadata: {
-          mfaEnforced: Boolean(user.mfaEnforced)
+          mfaEnforced
         }
       })
-      responseJson(res, 200, buildAuthStatus(session, null, user, Boolean(user.mfaEnabled), Boolean(user.mfaEnforced)))
+      responseJson(res, 200, buildAuthStatus(session, null, user, Boolean(user.mfaEnabled), mfaEnforced))
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
@@ -3684,7 +4045,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         return
       }
 
-      const user = await authUserStore.acceptInvite(token, password)
+      const passwordPolicy = await getPasswordPolicy()
+      const user = await authUserStore.acceptInvite(token, password, passwordPolicy)
       const session = createAuthSession(user.username, Boolean(user.mfaEnabled))
       setAuthCookie(res, req, session)
       recordAuditEvent({
@@ -3702,6 +4064,143 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         user,
         mfaAvailable: !Boolean(user.mfaEnabled)
       } satisfies AuthInviteAcceptResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.post(API_ROUTES.authPasswordResetRequest, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        responseJson(res, 200, { sent: true })
+        return
+      }
+
+      const body = (req.body || {}) as { usernameOrEmail?: string }
+      const usernameOrEmail = normalizeText(body.usernameOrEmail)
+      const passwordPolicy = await getPasswordPolicy()
+      const result = await authUserStore.requestPasswordReset(
+        usernameOrEmail,
+        passwordPolicy.resetTokenTtlMinutes,
+        passwordPolicy
+      )
+      if (result) {
+        const resetUrl = buildPasswordResetUrl(req, result.resetToken)
+        const emailResult = await sendPasswordResetEmail({
+          recipientEmail: result.user.recipientEmail,
+          username: result.user.username,
+          resetUrl,
+          resetExpiresAt: result.resetExpiresAt,
+          req
+        })
+        recordAuditEvent({
+          req,
+          actor: buildAuditActor(null, result.user.username),
+          action: 'auth.password.reset.request',
+          target: result.user.username,
+          outcome: 'success',
+          metadata: {
+            emailSent: emailResult.emailSent,
+            resetExpiresAt: result.resetExpiresAt
+          }
+        })
+      } else {
+        recordAuditEvent({
+          req,
+          actor: buildAuditActor(null, usernameOrEmail || 'anonymous'),
+          action: 'auth.password.reset.request',
+          target: usernameOrEmail || 'anonymous',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Account not found or reset unavailable'
+          }
+        })
+      }
+
+      responseJson(res, 200, {
+        sent: true
+      })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.authPasswordResetLookup, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        responseJson(res, 400, {
+          error: 'Authentication is disabled'
+        })
+        return
+      }
+
+      const token = normalizeText(req.params.token)
+      if (!token) {
+        responseJson(res, 400, {
+          error: 'Password reset token is required'
+        })
+        return
+      }
+
+      const user = await authUserStore.getPasswordResetByToken(token)
+      if (!user) {
+        responseJson(res, 404, {
+          error: 'Password reset token not found'
+        })
+        return
+      }
+
+      responseJson(res, 200, {
+        reset: {
+          username: user.username,
+          recipientEmail: user.recipientEmail
+        }
+      })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.post(API_ROUTES.authPasswordResetConfirm, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        throw createAppError(400, 'Authentication is disabled')
+      }
+
+      const token = normalizeText(req.params.token)
+      if (!token) {
+        responseJson(res, 400, {
+          error: 'Password reset token is required'
+        })
+        return
+      }
+
+      const body = (req.body || {}) as { password?: string; confirmPassword?: string }
+      const password = String(body.password ?? '')
+      const confirmPassword = String(body.confirmPassword ?? '')
+      if (confirmPassword && password !== confirmPassword) {
+        responseJson(res, 400, {
+          error: 'Passwords do not match'
+        })
+        return
+      }
+
+      const passwordPolicy = await getPasswordPolicy()
+      const user = await authUserStore.resetPassword(token, password, passwordPolicy)
+      recordAuditEvent({
+        req,
+        actor: buildAuditActor(null, user.username),
+        action: 'auth.password.reset.complete',
+        target: user.username,
+        outcome: 'success'
+      })
+      responseJson(res, 200, {
+        user,
+        message: 'Password updated'
+      })
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
@@ -3751,6 +4250,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       setAuthCookie(res, req, session)
       clearAuthMfaChallenge(req)
       clearAuthMfaChallengeCookie(res)
+      const passwordPolicy = await getPasswordPolicy()
       recordAuditEvent({
         req,
         actor: buildAuditActor(session, user.username),
@@ -3758,7 +4258,17 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         target: user.username,
         outcome: 'success'
       })
-      responseJson(res, 200, buildAuthStatus(session, null, user, Boolean(user.mfaEnabled), Boolean(user.mfaEnforced)))
+      responseJson(
+        res,
+        200,
+        buildAuthStatus(
+          session,
+          null,
+          user,
+          Boolean(user.mfaEnabled),
+          Boolean(user.mfaEnforced || passwordPolicy.enforceMfa)
+        )
+      )
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
@@ -4488,6 +4998,12 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       let scopeLabel = 'All cases/searches'
       let mailboxKey = ''
       let allowedMailboxKeys: string[] = []
+      const mailboxSearchFingerprints =
+        sourceType === 'mailbox' && scope !== 'pst'
+          ? await searchIndexStore.listFileFingerprints('mailboxes')
+          : []
+      const archiveSearchFingerprints =
+        sourceType === 'mailbox' ? [] : await searchIndexStore.listFileFingerprints('items')
 
       if (sourceType === 'mailbox' && scope === 'pst') {
         if (!sessionId) {
@@ -4517,47 +5033,73 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         mailboxKey = session.filePath
         allowedMailboxKeys = [mailboxKey]
       } else if (sourceType === 'mailbox' && scope === 'search') {
-        const catalog = resolveAccessibleCatalogSelection(
-          pstRootDir,
+        const fingerprintSelection = resolveAccessibleFingerprintCatalogSelection(
           requestedScopePath,
           allowedCasePaths,
-          listPstMailboxFiles,
+          mailboxSearchFingerprints,
           allowAllCases
         )
-        scopePath = catalog.scopePath
-        scopeLabel = catalog.scopeLabel
-        const selectedCatalog = scopePath
-          ? resolveAccessibleCatalogSelection(
-              pstRootDir,
-              scopePath,
-              allowedCasePaths,
-              listPstMailboxFiles,
-              allowAllCases
-            )
-          : resolveAccessibleCatalogSelection(pstRootDir, '', allowedCasePaths, listPstMailboxFiles, allowAllCases)
-        allowedMailboxKeys = selectedCatalog.files
-          .map((file) => resolvePstMailboxPath(pstRootDir, selectedCatalog.scopePath, file.fileName))
+        if (fingerprintSelection) {
+          scopePath = fingerprintSelection.scopePath
+          scopeLabel = fingerprintSelection.scopeLabel
+          allowedMailboxKeys = fingerprintSelection.files.map((file) => file.mailboxKey)
+        } else {
+          const catalog = resolveAccessibleCatalogSelection(
+            pstRootDir,
+            requestedScopePath,
+            allowedCasePaths,
+            listPstMailboxFiles,
+            allowAllCases
+          )
+          scopePath = catalog.scopePath
+          scopeLabel = catalog.scopeLabel
+          allowedMailboxKeys = catalog.files.map((file) =>
+            resolvePstMailboxPath(pstRootDir, catalog.scopePath, file.fileName)
+          )
+        }
       } else if (sourceType === 'mailbox' && scope === 'all') {
-        const activeCatalog = resolveAccessibleCatalogSelection(
-          pstRootDir,
+        const fingerprintSelection = resolveAccessibleFingerprintCatalogSelection(
           '',
           allowedCasePaths,
-          listPstMailboxFiles,
+          mailboxSearchFingerprints,
           allowAllCases
         )
-        allowedMailboxKeys = activeCatalog.scopes.flatMap((entry) =>
-          entry.files.map((file) => resolvePstMailboxPath(pstRootDir, entry.scopePath, file.fileName))
-        )
+        if (fingerprintSelection) {
+          allowedMailboxKeys = collectFingerprintMailboxKeys(fingerprintSelection.scopes)
+        } else {
+          const activeCatalog = resolveAccessibleCatalogSelection(
+            pstRootDir,
+            '',
+            allowedCasePaths,
+            listPstMailboxFiles,
+            allowAllCases
+          )
+          allowedMailboxKeys = activeCatalog.scopes.flatMap((entry) =>
+            entry.files.map((file) => resolvePstMailboxPath(pstRootDir, entry.scopePath, file.fileName))
+          )
+        }
       } else {
-        const archiveCatalog = resolveAccessibleArchiveCatalogSelection(
-          pstRootDir,
+        const fingerprintSelection = resolveAccessibleFingerprintCatalogSelection(
           requestedScopePath,
           allowedCasePaths,
+          archiveSearchFingerprints,
           allowAllCases
         )
-        scopePath = archiveCatalog.scopePath
-        scopeLabel = archiveCatalog.scopeLabel
-        allowedMailboxKeys = buildArchiveMailboxKeys(pstRootDir, archiveCatalog)
+        if (fingerprintSelection) {
+          scopePath = fingerprintSelection.scopePath
+          scopeLabel = fingerprintSelection.scopeLabel
+          allowedMailboxKeys = collectFingerprintMailboxKeys(fingerprintSelection.scopes)
+        } else {
+          const archiveCatalog = resolveAccessibleArchiveCatalogSelection(
+            pstRootDir,
+            requestedScopePath,
+            allowedCasePaths,
+            allowAllCases
+          )
+          scopePath = archiveCatalog.scopePath
+          scopeLabel = archiveCatalog.scopeLabel
+          allowedMailboxKeys = buildArchiveMailboxKeys(pstRootDir, archiveCatalog)
+        }
       }
 
       const page = await searchIndexStore.search({
@@ -4603,12 +5145,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         sourceType,
         page: {
           ...page,
-          items: page.items.map((item) => {
-            const { reviewStates: _reviewStates, ...rest } = item as SearchIndexDocument & {
-              reviewStates?: unknown
-            }
-            return rest
-          })
+          items: page.items.map((item) => buildSearchResultSummary(item))
         }
       })
     } catch (error) {

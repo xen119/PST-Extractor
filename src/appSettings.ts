@@ -1,4 +1,13 @@
 import { MongoClient, type Collection } from 'mongodb'
+import {
+  buildPasswordPolicyDefaultsFromEnv,
+  buildPasswordPolicyView,
+  mergePasswordPolicy,
+  normalizePasswordPolicyInput,
+  type PasswordPolicyInput,
+  type PasswordPolicyRecord,
+  type PasswordPolicyView
+} from './passwordPolicy'
 
 export interface SmtpSettingsRecord {
   enabled: boolean
@@ -31,6 +40,8 @@ export interface SmtpSettingsInput {
 export interface AppSettingsStore {
   getSmtpSettings(): Promise<SmtpSettingsRecord>
   updateSmtpSettings(input: SmtpSettingsInput): Promise<SmtpSettingsRecord>
+  getPasswordPolicy(): Promise<PasswordPolicyRecord>
+  updatePasswordPolicy(input: PasswordPolicyInput): Promise<PasswordPolicyRecord>
   close(): Promise<void>
 }
 
@@ -40,7 +51,15 @@ interface StoredSmtpSettingsRecord extends SmtpSettingsRecord {
   updatedAt: string
 }
 
+interface StoredPasswordPolicyRecord extends PasswordPolicyRecord {
+  settingsKey: 'password-policy'
+  createdAt: string
+  updatedAt: string
+}
+
 interface SmtpDefaults extends Partial<SmtpSettingsRecord> {}
+
+interface PasswordPolicyDefaults extends Partial<PasswordPolicyRecord> {}
 
 const DEFAULT_COLLECTION_NAME = 'pst_app_settings'
 const DEFAULT_SMTP_PORT = 587
@@ -161,6 +180,43 @@ function toStoredRecord(
   }
 }
 
+function normalizeStoredPasswordPolicyRecord(value: unknown): StoredPasswordPolicyRecord | null {
+  if (!value || typeof value !== 'object') {
+    return null
+  }
+
+  const record = value as Partial<StoredPasswordPolicyRecord>
+  if (normalizeText(record.settingsKey) !== 'password-policy') {
+    return null
+  }
+
+  const createdAt = normalizeText(record.createdAt)
+  const updatedAt = normalizeText(record.updatedAt)
+  const policy = mergePasswordPolicy(
+    buildPasswordPolicyDefaultsFromEnv(),
+    normalizePasswordPolicyInput(record as PasswordPolicyInput)
+  )
+  return {
+    settingsKey: 'password-policy',
+    createdAt: createdAt || new Date().toISOString(),
+    updatedAt: updatedAt || createdAt || new Date().toISOString(),
+    ...policy
+  }
+}
+
+function toStoredPasswordPolicyRecord(
+  policy: PasswordPolicyRecord,
+  createdAt = new Date().toISOString(),
+  updatedAt = createdAt
+): StoredPasswordPolicyRecord {
+  return {
+    settingsKey: 'password-policy',
+    createdAt,
+    updatedAt,
+    ...buildPasswordPolicyView(policy)
+  }
+}
+
 function createSettingsStoreError(
   statusCode: number,
   message: string
@@ -172,13 +228,20 @@ function createSettingsStoreError(
 
 class MemoryAppSettingsStore implements AppSettingsStore {
   private smtp: StoredSmtpSettingsRecord | null
+  private passwordPolicy: StoredPasswordPolicyRecord | null
 
-  constructor(defaults: SmtpDefaults = {}) {
+  constructor(defaults: SmtpDefaults = {}, passwordPolicyDefaults: PasswordPolicyDefaults = {}) {
     this.smtp = null
+    this.passwordPolicy = null
     this.defaults = buildDefaultSmtpSettings(defaults)
+    this.passwordPolicyDefaults = mergePasswordPolicy(
+      buildPasswordPolicyDefaultsFromEnv(),
+      normalizePasswordPolicyInput(passwordPolicyDefaults)
+    )
   }
 
   private readonly defaults: SmtpSettingsRecord
+  private readonly passwordPolicyDefaults: PasswordPolicyRecord
 
   async getSmtpSettings(): Promise<SmtpSettingsRecord> {
     return cloneSmtpSettings(this.smtp || this.defaults)
@@ -192,33 +255,56 @@ class MemoryAppSettingsStore implements AppSettingsStore {
     return cloneSmtpSettings(next)
   }
 
+  async getPasswordPolicy(): Promise<PasswordPolicyRecord> {
+    return { ...(this.passwordPolicy ? this.passwordPolicy : this.passwordPolicyDefaults) }
+  }
+
+  async updatePasswordPolicy(input: PasswordPolicyInput): Promise<PasswordPolicyRecord> {
+    const base = { ...(this.passwordPolicy || this.passwordPolicyDefaults) }
+    const next = mergePasswordPolicy(base, normalizePasswordPolicyInput(input))
+    const now = new Date().toISOString()
+    this.passwordPolicy = toStoredPasswordPolicyRecord(next, this.passwordPolicy?.createdAt || now, now)
+    return { ...next }
+  }
+
   async close(): Promise<void> {
     this.smtp = null
+    this.passwordPolicy = null
   }
 }
 
-export function createMemoryAppSettingsStore(defaults: SmtpDefaults = {}): AppSettingsStore {
-  return new MemoryAppSettingsStore(defaults)
+export function createMemoryAppSettingsStore(
+  defaults: SmtpDefaults = {},
+  passwordPolicyDefaults: PasswordPolicyDefaults = {}
+): AppSettingsStore {
+  return new MemoryAppSettingsStore(defaults, passwordPolicyDefaults)
 }
 
 export class MongoAppSettingsStore implements AppSettingsStore {
   constructor(
-    private readonly collection: Collection<StoredSmtpSettingsRecord>,
+    private readonly collection: Collection<StoredSmtpSettingsRecord | StoredPasswordPolicyRecord>,
     private readonly client: MongoClient,
-    private readonly defaults: SmtpSettingsRecord
+    private readonly defaults: SmtpSettingsRecord,
+    private readonly passwordPolicyDefaults: PasswordPolicyRecord
   ) {}
 
   static async connect(
     uri: string,
     dbName = 'pst-extractor',
     defaults: SmtpDefaults = {},
+    passwordPolicyDefaults: PasswordPolicyDefaults = {},
     collectionName = DEFAULT_COLLECTION_NAME
   ): Promise<MongoAppSettingsStore> {
     const client = new MongoClient(uri)
     await client.connect()
-    const collection = client.db(dbName).collection<StoredSmtpSettingsRecord>(collectionName)
+    const collection = client.db(dbName).collection<StoredSmtpSettingsRecord | StoredPasswordPolicyRecord>(collectionName)
     await collection.createIndex({ settingsKey: 1 }, { unique: true })
-    return new MongoAppSettingsStore(collection, client, buildDefaultSmtpSettings(defaults))
+    return new MongoAppSettingsStore(
+      collection,
+      client,
+      buildDefaultSmtpSettings(defaults),
+      mergePasswordPolicy(buildPasswordPolicyDefaultsFromEnv(), normalizePasswordPolicyInput(passwordPolicyDefaults))
+    )
   }
 
   async getSmtpSettings(): Promise<SmtpSettingsRecord> {
@@ -243,6 +329,30 @@ export class MongoAppSettingsStore implements AppSettingsStore {
       { upsert: true }
     )
     return cloneSmtpSettings(next)
+  }
+
+  async getPasswordPolicy(): Promise<PasswordPolicyRecord> {
+    const record = normalizeStoredPasswordPolicyRecord(
+      await this.collection.findOne({ settingsKey: 'password-policy' })
+    )
+    return { ...(record || this.passwordPolicyDefaults) }
+  }
+
+  async updatePasswordPolicy(input: PasswordPolicyInput): Promise<PasswordPolicyRecord> {
+    const existing = normalizeStoredPasswordPolicyRecord(
+      await this.collection.findOne({ settingsKey: 'password-policy' })
+    )
+    const base = existing ? { ...existing } : { ...this.passwordPolicyDefaults }
+    const next = mergePasswordPolicy(base, normalizePasswordPolicyInput(input))
+    const now = new Date().toISOString()
+    await this.collection.updateOne(
+      { settingsKey: 'password-policy' },
+      {
+        $set: toStoredPasswordPolicyRecord(next, existing?.createdAt || now, now)
+      },
+      { upsert: true }
+    )
+    return { ...next }
   }
 
   async close(): Promise<void> {
@@ -298,13 +408,14 @@ export async function createAppSettingsStoreFromEnv(
   env: NodeJS.ProcessEnv = process.env
 ): Promise<AppSettingsStore> {
   const defaults = buildSmtpDefaultsFromEnv(env)
+  const passwordPolicyDefaults = buildPasswordPolicyDefaultsFromEnv(env)
   const uri = normalizeText(env.MONGODB_URI)
   if (!uri) {
-    return createMemoryAppSettingsStore(defaults)
+    return createMemoryAppSettingsStore(defaults, passwordPolicyDefaults)
   }
 
   const dbName = normalizeText(env.MONGODB_DB) || 'pst-extractor'
-  return MongoAppSettingsStore.connect(uri, dbName, defaults)
+  return MongoAppSettingsStore.connect(uri, dbName, defaults, passwordPolicyDefaults)
 }
 
 export function createAppSettingsStoreError(

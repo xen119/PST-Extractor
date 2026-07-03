@@ -432,6 +432,60 @@ function authInviteAcceptResponseSchema(): Record<string, unknown> {
   }
 }
 
+function passwordResetRequestResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['sent'],
+    properties: {
+      sent: { type: 'boolean' }
+    }
+  }
+}
+
+function passwordResetLookupResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['reset'],
+    properties: {
+      reset: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['username', 'recipientEmail'],
+        properties: {
+          username: { type: 'string' },
+          recipientEmail: { type: 'string' }
+        }
+      }
+    }
+  }
+}
+
+function passwordResetConfirmRequestSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['password'],
+    properties: {
+      password: { type: 'string' },
+      confirmPassword: { type: 'string' }
+    }
+  }
+}
+
+function passwordResetConfirmResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['user', 'message'],
+    properties: {
+      user: authUserSchema(),
+      message: { type: 'string' }
+    }
+  }
+}
+
 function authMfaChallengeRequestSchema(): Record<string, unknown> {
   return {
     type: 'object',
@@ -629,13 +683,29 @@ function authStatusSchema(): Record<string, unknown> {
   return {
     type: 'object',
     additionalProperties: true,
-    required: ['authenticated', 'enabled', 'canManageUsers', 'mfaEnabled', 'mfaEnforced', 'user', 'expiresAt'],
+    required: [
+      'authenticated',
+      'enabled',
+      'canManageUsers',
+      'mfaEnabled',
+      'mfaEnforced',
+      'lockedUntil',
+      'loginFailedCount',
+      'passwordResetAvailable',
+      'user',
+      'expiresAt'
+    ],
     properties: {
       authenticated: { type: 'boolean' },
       enabled: { type: 'boolean' },
       canManageUsers: { type: 'boolean' },
       mfaEnabled: { type: 'boolean' },
       mfaEnforced: { type: 'boolean' },
+      mfaRequired: { type: 'boolean' },
+      mfaChallengeExpiresAt: { type: ['string', 'null'] },
+      lockedUntil: { type: ['string', 'null'] },
+      loginFailedCount: { type: 'integer' },
+      passwordResetAvailable: { type: 'boolean' },
       user: {
         nullable: true,
         ...authUserSchema()
@@ -829,6 +899,70 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
           summary: 'Clear the current auth session cookie',
           responses: {
             200: jsonResponse(authStatusSchema())
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authPasswordResetRequest)]: {
+        post: {
+          tags: ['Auth'],
+          summary: 'Request a password reset link for an eligible account',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['usernameOrEmail'],
+                  properties: {
+                    usernameOrEmail: { type: 'string' }
+                  }
+                }
+              }
+            }
+          },
+          responses: {
+            200: jsonResponse(passwordResetRequestResponseSchema())
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authPasswordResetLookup)]: {
+        get: {
+          tags: ['Auth'],
+          summary: 'Look up a password reset token',
+          parameters: [
+            { name: 'token', in: 'path', required: true, schema: { type: 'string' } }
+          ],
+          responses: {
+            200: jsonResponse(passwordResetLookupResponseSchema()),
+            ...errorResponse(400, 'Authentication is disabled or password reset token is required'),
+            ...errorResponse(404, 'Password reset token not found')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authPasswordResetConfirm)]: {
+        post: {
+          tags: ['Auth'],
+          summary: 'Set a new password using a reset token',
+          parameters: [
+            { name: 'token', in: 'path', required: true, schema: { type: 'string' } }
+          ],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: passwordResetConfirmRequestSchema()
+              }
+            }
+          },
+          responses: {
+            200: jsonResponse(passwordResetConfirmResponseSchema()),
+            ...errorResponse(
+              400,
+              'Authentication is disabled, password reset token is required, passwords do not match, or password is required'
+            ),
+            ...errorResponse(404, 'Password reset token not found'),
+            ...errorResponse(410, 'Password reset token has expired')
           }
         }
       },
@@ -2217,6 +2351,10 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
         AuthManagedUser: authManagedUserSchema(),
         AuthUsersResponse: authUsersResponseSchema(),
         AuthUserDeleteResponse: authUserDeleteResponseSchema(),
+        PasswordResetRequestResponse: passwordResetRequestResponseSchema(),
+        PasswordResetLookupResponse: passwordResetLookupResponseSchema(),
+        PasswordResetConfirmRequest: passwordResetConfirmRequestSchema(),
+        PasswordResetConfirmResponse: passwordResetConfirmResponseSchema(),
         SmtpSettings: smtpSettingsSchema(),
         SmtpSettingsResponse: smtpSettingsResponseSchema(),
         SmtpSettingsUpdateRequest: smtpSettingsUpdateRequestSchema(),

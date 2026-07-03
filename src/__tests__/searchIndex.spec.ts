@@ -4,6 +4,7 @@ import * as path from 'path'
 import AdmZip from 'adm-zip'
 import {
   MemorySearchIndexStore,
+  MongoSearchIndexStore,
   refreshSearchIndexFromCatalog,
   type SearchIndexDocument
 } from '../searchIndex'
@@ -521,5 +522,135 @@ describe('search index cache', () => {
     } finally {
       fs.rmSync(rootDir, { recursive: true, force: true })
     }
+  })
+
+  it('uses aggregate counts and clamps paging in the Mongo search store', async () => {
+    const now = new Date('2024-01-01T00:00:00.000Z').toISOString()
+    const mailboxDocument = makeDocument({
+      messageId: 'message:mailbox-1',
+      descriptorId: 'mailbox-1',
+      folderId: 'folder:mailbox-1',
+      fileName: 'mailbox-a.pst',
+      mailboxName: 'Mailbox A',
+      sortDateMs: Date.parse(now),
+      sortDate: now,
+      updatedAt: now
+    })
+    const teamsDocument = makeDocument({
+      messageId: 'message:teams-1',
+      descriptorId: 'teams-1',
+      folderId: 'folder:teams-1',
+      fileName: 'items.zip',
+      mailboxName: 'Teams Bundle',
+      sourceType: 'teams',
+      kind: 'other',
+      subject: 'Launch plan',
+      originalSubject: 'Launch plan',
+      senderName: 'Team Bot',
+      senderEmailAddress: 'bot@example.com',
+      recipientText: '',
+      displayTo: '',
+      resolvedDisplayTo: '',
+      bodySearchText: 'launch plan',
+      searchText: 'launch plan team bot bot@example.com ipm.note mail',
+      searchTokens: ['launch', 'plan'],
+      addressValues: ['bot@example.com'],
+      subjectValues: ['launch plan'],
+      sortDateMs: Date.parse('2023-12-31T00:00:00.000Z'),
+      sortDate: '2023-12-31T00:00:00.000Z',
+      updatedAt: '2023-12-31T00:00:00.000Z'
+    })
+
+    const cursorState = { skip: 0, limit: 0 }
+    const toArray = jest.fn(async () =>
+      [mailboxDocument, teamsDocument].slice(cursorState.skip, cursorState.skip + cursorState.limit)
+    )
+    const limit = jest.fn((count: number) => {
+      cursorState.limit = count
+      return { toArray }
+    })
+    const skip = jest.fn((count: number) => {
+      cursorState.skip = count
+      return { limit }
+    })
+    const sort = jest.fn(() => ({ skip }))
+    const find = jest.fn(() => ({ sort }))
+    const aggregate = jest.fn(() => ({
+      toArray: jest.fn().mockResolvedValue([
+        {
+          total: [{ value: 2 }],
+          sourceCounts: [
+            { _id: 'mailbox', count: 1 },
+            { _id: 'teams', count: 1 }
+          ]
+        }
+      ])
+    }))
+    const countDocuments = jest.fn().mockResolvedValue(0)
+
+    const documentsCollection = {
+      aggregate,
+      countDocuments,
+      find,
+      findOne: jest.fn().mockResolvedValue(null),
+      updateOne: jest.fn().mockResolvedValue(undefined),
+      insertMany: jest.fn().mockResolvedValue(undefined),
+      deleteMany: jest.fn().mockResolvedValue({ deletedCount: 0 }),
+      createIndex: jest.fn().mockResolvedValue(undefined)
+    } as any
+    const rulesCollection = {
+      find: jest.fn(() => ({
+        sort: jest.fn(() => ({
+          toArray: jest.fn().mockResolvedValue([])
+        }))
+      })),
+      findOne: jest.fn().mockResolvedValue(null),
+      updateOne: jest.fn().mockResolvedValue(undefined),
+      deleteOne: jest.fn().mockResolvedValue({ deletedCount: 0 }),
+      deleteMany: jest.fn().mockResolvedValue({ deletedCount: 0 }),
+      createIndex: jest.fn().mockResolvedValue(undefined)
+    } as any
+    const fingerprintsCollection = {
+      find: jest.fn(() => ({
+        sort: jest.fn(() => ({
+          toArray: jest.fn().mockResolvedValue([])
+        }))
+      })),
+      findOne: jest.fn().mockResolvedValue(null),
+      updateOne: jest.fn().mockResolvedValue(undefined),
+      deleteMany: jest.fn().mockResolvedValue({ deletedCount: 0 }),
+      createIndex: jest.fn().mockResolvedValue(undefined)
+    } as any
+
+    const store = new MongoSearchIndexStore(documentsCollection, rulesCollection, fingerprintsCollection)
+    const results = await store.search({
+      scope: 'all',
+      sourceType: 'all',
+      query: '',
+      mode: 'and',
+      mailOnly: false,
+      sort: 'date-desc',
+      page: 5,
+      pageSize: 1,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: ''
+    })
+
+    expect(aggregate).toHaveBeenCalledTimes(1)
+    expect(countDocuments).not.toHaveBeenCalled()
+    expect(find).toHaveBeenCalledTimes(1)
+    expect(skip).toHaveBeenCalledWith(1)
+    expect(limit).toHaveBeenCalledWith(1)
+    expect(results.total).toBe(2)
+    expect(results.page).toBe(2)
+    expect(results.totalPages).toBe(2)
+    expect(results.items).toHaveLength(1)
+    expect(results.items[0].messageId).toBe('message:teams-1')
+    expect(results.sourceCounts).toEqual({
+      mailbox: 1,
+      teams: 1,
+      sharepoint: 0
+    })
   })
 })

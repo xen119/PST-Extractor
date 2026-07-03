@@ -16,15 +16,37 @@ import type {
   MessageDetail,
   MessageSummary,
   PageResponse,
+  PasswordResetConfirmResponse,
+  PasswordResetLookupResponse,
   PstCatalogResponse,
   SearchIndexRefreshStatus,
   UsersResponse
 } from '@/types'
 
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: ({ count }: { count: number }) => ({
+    getTotalSize: () => count * 96,
+    getVirtualItems: () =>
+      Array.from({ length: count }, (_, index) => ({
+        index,
+        start: index * 96
+      })),
+    measureElement: vi.fn()
+  })
+}))
+
 afterEach(() => {
   vi.restoreAllMocks()
-  window.localStorage.clear()
-  window.sessionStorage.clear()
+  try {
+    window.localStorage?.clear()
+  } catch {
+    // Ignore storage access errors in the test environment.
+  }
+  try {
+    window.sessionStorage?.clear()
+  } catch {
+    // Ignore storage access errors in the test environment.
+  }
   window.history.replaceState({}, '', '/')
 })
 
@@ -47,20 +69,24 @@ describe('auth shell', () => {
         busy={false}
         message=""
         error=""
+        passwordResetAvailable={false}
         invite={null}
         inviteStep="password"
         inviteMfaAvailable={false}
+        inviteMfaEnforced={false}
         inviteSetup={null}
         inviteRecoveryCodes={[]}
+        resetLookup={null}
         onLogin={vi.fn()}
         onMfaChallenge={vi.fn()}
+        onPasswordResetRequest={async () => undefined}
+        onPasswordResetConfirm={async () => undefined}
         onInviteAccept={vi.fn()}
         onInviteMfaStart={vi.fn()}
         onInviteMfaSkip={vi.fn()}
         onInviteMfaSubmit={vi.fn()}
         onInviteFinish={vi.fn()}
         onOpenLogin={vi.fn()}
-        inviteMfaEnforced={false}
       />
     )
 
@@ -79,6 +105,7 @@ describe('auth shell', () => {
     expect(screen.queryByText('Local credentials')).not.toBeInTheDocument()
     expect(screen.queryByText('Username and password sign-in')).not.toBeInTheDocument()
     expect(screen.queryByText('Invite links and recovery codes are supported')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Forgot password?' })).not.toBeInTheDocument()
   })
 
   it('shows the invite password form', () => {
@@ -88,6 +115,7 @@ describe('auth shell', () => {
         busy={false}
         message=""
         error=""
+        passwordResetAvailable={false}
         invite={{
           username: 'jane.doe',
           createdAt: new Date().toISOString(),
@@ -103,17 +131,20 @@ describe('auth shell', () => {
         }}
         inviteStep="password"
         inviteMfaAvailable={true}
+        inviteMfaEnforced={false}
         inviteSetup={null}
         inviteRecoveryCodes={[]}
+        resetLookup={null}
         onLogin={vi.fn()}
         onMfaChallenge={vi.fn()}
+        onPasswordResetRequest={async () => undefined}
+        onPasswordResetConfirm={async () => undefined}
         onInviteAccept={vi.fn()}
         onInviteMfaStart={vi.fn()}
         onInviteMfaSkip={vi.fn()}
         onInviteMfaSubmit={vi.fn()}
         onInviteFinish={vi.fn()}
         onOpenLogin={vi.fn()}
-        inviteMfaEnforced={false}
       />
     )
 
@@ -129,20 +160,24 @@ describe('auth shell', () => {
         busy={false}
         message="Enter the verification code for admin."
         error=""
+        passwordResetAvailable={false}
         invite={null}
         inviteStep="password"
         inviteMfaAvailable={false}
+        inviteMfaEnforced={false}
         inviteSetup={null}
         inviteRecoveryCodes={[]}
+        resetLookup={null}
         onLogin={vi.fn()}
         onMfaChallenge={vi.fn()}
+        onPasswordResetRequest={async () => undefined}
+        onPasswordResetConfirm={async () => undefined}
         onInviteAccept={vi.fn()}
         onInviteMfaStart={vi.fn()}
         onInviteMfaSkip={vi.fn()}
         onInviteMfaSubmit={vi.fn()}
         onInviteFinish={vi.fn()}
         onOpenLogin={vi.fn()}
-        inviteMfaEnforced={false}
       />
     )
 
@@ -153,6 +188,85 @@ describe('auth shell', () => {
     expect(screen.queryByText('Enter the verification code for admin.')).not.toBeInTheDocument()
     expect(screen.queryByText('Use your authenticator app or a recovery code.')).not.toBeInTheDocument()
     expect(screen.queryByText('PST Mail Explorer')).not.toBeInTheDocument()
+  })
+
+  it('opens the password reset request dialog from the login screen', async () => {
+    const user = userEvent.setup()
+    const onPasswordResetRequest = vi.fn().mockResolvedValue(undefined)
+
+    render(
+      <AuthScreen
+        view="login"
+        busy={false}
+        message=""
+        error=""
+        passwordResetAvailable={true}
+        invite={null}
+        inviteStep="password"
+        inviteMfaAvailable={false}
+        inviteMfaEnforced={false}
+        inviteSetup={null}
+        inviteRecoveryCodes={[]}
+        resetLookup={null}
+        onLogin={vi.fn()}
+        onMfaChallenge={vi.fn()}
+        onPasswordResetRequest={onPasswordResetRequest}
+        onPasswordResetConfirm={async () => undefined}
+        onInviteAccept={vi.fn()}
+        onInviteMfaStart={vi.fn()}
+        onInviteMfaSkip={vi.fn()}
+        onInviteMfaSubmit={vi.fn()}
+        onInviteFinish={vi.fn()}
+        onOpenLogin={vi.fn()}
+      />
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Forgot password?' }))
+    expect(await screen.findByRole('heading', { name: 'Reset password' })).toBeInTheDocument()
+
+    const requestInput = screen.getByLabelText('Username or email')
+    await user.clear(requestInput)
+    await user.type(requestInput, ' jane.doe@example.com ')
+    await user.click(screen.getByRole('button', { name: 'Send reset link' }))
+
+    expect(onPasswordResetRequest).toHaveBeenCalledWith('jane.doe@example.com')
+    await waitFor(() => {
+      expect(screen.queryByRole('heading', { name: 'Reset password' })).not.toBeInTheDocument()
+    })
+  })
+
+  it('loads the password reset screen from a reset token and completes the reset', async () => {
+    const user = userEvent.setup()
+    const resetLookupResponse: PasswordResetLookupResponse = {
+      reset: {
+        username: 'jane.doe',
+        recipientEmail: 'jane@example.com'
+      }
+    }
+    const resetConfirmResponse: PasswordResetConfirmResponse = {
+      user: {
+        username: 'jane.doe',
+        assignedCasePaths: []
+      },
+      message: 'Password updated'
+    }
+
+    vi.spyOn(api.auth, 'passwordResetLookup').mockResolvedValueOnce(resetLookupResponse)
+    vi.spyOn(api.auth, 'passwordResetConfirm').mockResolvedValueOnce(resetConfirmResponse)
+    window.history.pushState({}, '', '/reset/reset-token')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'Set a new password' })).toBeInTheDocument()
+    expect(screen.getByText('jane.doe')).toBeInTheDocument()
+    expect(screen.getByText('jane@example.com')).toBeInTheDocument()
+
+    await user.type(screen.getByLabelText('New password'), 'NewPass123!')
+    await user.type(screen.getByLabelText('Confirm password'), 'NewPass123!')
+    await user.click(screen.getByRole('button', { name: 'Update password' }))
+
+    expect(await screen.findByRole('heading', { name: 'Sign in to continue' })).toBeInTheDocument()
+    expect(api.auth.passwordResetConfirm).toHaveBeenCalledWith('reset-token', 'NewPass123!', 'NewPass123!')
   })
 
   it('clears invite loading after the invite lookup succeeds', async () => {
@@ -177,6 +291,9 @@ describe('auth shell', () => {
       canManageUsers: false,
       mfaEnabled: false,
       mfaEnforced: false,
+      lockedUntil: null,
+      loginFailedCount: 0,
+      passwordResetAvailable: false,
       user: null,
       expiresAt: null
     }
@@ -199,6 +316,9 @@ describe('auth shell', () => {
       canManageUsers: true,
       mfaEnabled: true,
       mfaEnforced: false,
+      lockedUntil: null,
+      loginFailedCount: 0,
+      passwordResetAvailable: false,
       user: { username: 'admin', assignedCasePaths: [] },
       expiresAt: null
     }
@@ -278,6 +398,9 @@ describe('auth shell', () => {
       canManageUsers: true,
       mfaEnabled: true,
       mfaEnforced: false,
+      lockedUntil: null,
+      loginFailedCount: 0,
+      passwordResetAvailable: false,
       user: { username: 'admin', assignedCasePaths: [] },
       expiresAt: null
     }
@@ -356,6 +479,9 @@ describe('auth shell', () => {
       canManageUsers: true,
       mfaEnabled: true,
       mfaEnforced: false,
+      lockedUntil: null,
+      loginFailedCount: 0,
+      passwordResetAvailable: false,
       user: { username: 'admin', assignedCasePaths: [] },
       expiresAt: null
     }
@@ -732,9 +858,9 @@ describe('shell and preview', () => {
       </div>
     )
 
-    expect(screen.getByText('Quarterly update')).toBeInTheDocument()
-    expect(screen.getByText('Alice Example')).toBeInTheDocument()
-    expect(screen.getByText('Flagged')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Quarterly update/ })).toBeInTheDocument()
+    expect(screen.getByText('Hello world')).toBeInTheDocument()
+    expect(screen.getAllByText('Flagged')).toHaveLength(2)
     expect(screen.getByText('Unavailable')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Manage tags' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Open full view' })).toBeInTheDocument()
@@ -753,6 +879,9 @@ describe('shell and preview', () => {
       canManageUsers: true,
       mfaEnabled: true,
       mfaEnforced: false,
+      lockedUntil: null,
+      loginFailedCount: 0,
+      passwordResetAvailable: false,
       user: { username: 'admin', assignedCasePaths: [] },
       expiresAt: null
     }
@@ -785,57 +914,6 @@ describe('shell and preview', () => {
       senderEmailAddress: 'alice@example.com',
       sortDate: new Date().toISOString(),
       bodyText: 'Current mailbox body'
-    }
-    const searchResultsPage: PageResponse<MessageSummary> = {
-      items: [
-        {
-          id: 'archive-a',
-          messageId: 'archive-a',
-          subject: 'Archive item A',
-          senderName: 'Team A',
-          senderEmailAddress: 'team-a@example.com',
-          sortDate: new Date().toISOString(),
-          fileName: 'mailbox-a.pst',
-          scopePath: 'Case Alpha/Search One',
-          sourceType: 'mailbox',
-          review: {
-            flagged: false,
-            tags: [],
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-          }
-        },
-        {
-          id: 'archive-b',
-          messageId: 'archive-b',
-          subject: 'Archive item B',
-          senderName: 'Team B',
-          senderEmailAddress: 'team-b@example.com',
-          sortDate: new Date().toISOString(),
-          fileName: 'mailbox-a.pst',
-          scopePath: 'Case Alpha/Search One',
-          sourceType: 'mailbox',
-          review: {
-            flagged: false,
-            tags: [],
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-          }
-        }
-      ],
-      total: 2,
-      page: 1,
-      pageSize: 50,
-      totalPages: 1,
-      query: 'archive',
-      mailOnly: false,
-      sort: 'date-desc'
-    }
-    const searchResponse = {
-      scope: 'search' as const,
-      scopePath: 'Case Alpha/Search One',
-      scopeLabel: 'Search One',
-      page: searchResultsPage
     }
     const firstDetail = createDeferred<{ detail: MessageDetail }>()
     const secondDetail = createDeferred<{ detail: MessageDetail }>()
@@ -913,9 +991,43 @@ describe('shell and preview', () => {
               createdAt: new Date().toISOString(),
               updatedAt: new Date().toISOString()
             }
+          } satisfies MessageSummary,
+          {
+            id: 'archive-a',
+            messageId: 'archive-a',
+            subject: 'Archive item A',
+            senderName: 'Team A',
+            senderEmailAddress: 'team-a@example.com',
+            sortDate: new Date().toISOString(),
+            fileName: 'mailbox-a.pst',
+            scopePath: 'Case Alpha/Search One',
+            isMailLike: true,
+            review: {
+              flagged: false,
+              tags: [],
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            }
+          } satisfies MessageSummary,
+          {
+            id: 'archive-b',
+            messageId: 'archive-b',
+            subject: 'Archive item B',
+            senderName: 'Team B',
+            senderEmailAddress: 'team-b@example.com',
+            sortDate: new Date().toISOString(),
+            fileName: 'mailbox-a.pst',
+            scopePath: 'Case Alpha/Search One',
+            isMailLike: true,
+            review: {
+              flagged: false,
+              tags: [],
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            }
           } satisfies MessageSummary
         ],
-        total: 1,
+        total: 3,
         page: 1,
         pageSize: 50,
         totalPages: 1,
@@ -924,15 +1036,22 @@ describe('shell and preview', () => {
         sort: 'date-desc'
       }
     })
-    vi.spyOn(api, 'search').mockResolvedValue(searchResponse)
-    vi.spyOn(api.item, 'detail').mockImplementation(async (itemId) => {
-      if (itemId === 'current-message') {
-        return { detail: currentDetail }
+    vi.spyOn(api.session, 'messageDetail').mockImplementation(async (sessionId, messageId) => {
+      if (sessionId !== 'session-a') {
+        throw new Error(`Unexpected session: ${sessionId}`)
       }
-      if (itemId === 'archive-a') {
-        return firstDetail.promise
+      if (messageId === 'current-message') {
+        return { sessionId, detail: currentDetail }
       }
-      return secondDetail.promise
+      if (messageId === 'archive-a') {
+        const response = await firstDetail.promise
+        return { sessionId, detail: response.detail }
+      }
+      if (messageId === 'archive-b') {
+        const response = await secondDetail.promise
+        return { sessionId, detail: response.detail }
+      }
+      throw new Error(`Unexpected message detail request: ${sessionId}/${messageId}`)
     })
 
     window.localStorage.setItem('pst-mail-explorer.casePath::admin', 'Case Alpha')
@@ -941,35 +1060,29 @@ describe('shell and preview', () => {
     window.localStorage.setItem('pst-mail-explorer.folderId::admin', 'root-a')
     window.localStorage.setItem('pst-mail-explorer.messageId::admin', 'current-message')
     window.localStorage.setItem('pst-mail-explorer.sourceType::admin', 'mailbox')
-    window.localStorage.setItem('pst-mail-explorer.searchScope::admin', 'all')
-    window.localStorage.setItem('pst-mail-explorer.query::admin', 'archive')
 
     render(
-      <div style={{ width: 1800, height: 1600 }}>
+      <div style={{ width: 1800, height: 5000 }}>
         <App />
       </div>
     )
 
-    expect(await screen.findByText('Current mailbox message')).toBeInTheDocument()
-    await user.type(screen.getByPlaceholderText('Keywords, "phrases", + AND, | OR'), 'archive')
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Scope' }), 'all')
-    await user.click(screen.getByRole('button', { name: 'Run search' }))
-
-    const firstItem = await screen.findByText('Archive item A')
-    await user.click(firstItem.closest('button') as HTMLElement)
+    expect(await screen.findByText('Current mailbox body')).toBeInTheDocument()
+    const firstItem = await screen.findByRole('button', { name: /Archive item A/ })
+    await user.click(firstItem)
     expect(await screen.findByText('Loading preview...')).toBeInTheDocument()
 
-    const secondItem = await screen.findByText('Archive item B')
-    await user.click(secondItem.closest('button') as HTMLElement)
+    const secondItem = await screen.findByRole('button', { name: /Archive item B/ })
+    await user.click(secondItem)
     expect(screen.getByText('Loading preview...')).toBeInTheDocument()
 
     secondDetail.resolve({ detail: secondPreview })
-    expect(await screen.findByText('Archive item B')).toBeInTheDocument()
+    expect(await screen.findByText('Second item body')).toBeInTheDocument()
 
     firstDetail.resolve({ detail: firstPreview })
     await waitFor(() => {
-      expect(screen.getByText('Archive item B')).toBeInTheDocument()
-      expect(screen.queryByText('Archive item A')).not.toBeInTheDocument()
+      expect(screen.getByText('Second item body')).toBeInTheDocument()
+      expect(screen.queryByText('First item body')).not.toBeInTheDocument()
     })
   })
 
@@ -1027,6 +1140,9 @@ describe('shell and preview', () => {
       canManageUsers: true,
       mfaEnabled: true,
       mfaEnforced: false,
+      lockedUntil: null,
+      loginFailedCount: 0,
+      passwordResetAvailable: false,
       user: { username: 'admin', assignedCasePaths: [] },
       expiresAt: null
     }

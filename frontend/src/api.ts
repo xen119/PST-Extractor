@@ -7,6 +7,9 @@ import type {
   InviteLookupResponse,
   MfaEnrollmentCompleteResponse,
   MfaEnrollmentStartResponse,
+  PasswordResetConfirmResponse,
+  PasswordResetLookupResponse,
+  PasswordResetRequestResponse,
   PstCatalogResponse,
   SearchResponse,
   SessionOpenResponse,
@@ -83,6 +86,22 @@ export const api = {
         body: JSON.stringify({ username, password })
       }),
     logout: () => requestJson<AuthStatus>('/api/auth/logout', { method: 'POST' }),
+    passwordResetRequest: (usernameOrEmail: string) =>
+      requestJson<PasswordResetRequestResponse>('/api/auth/password-reset/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ usernameOrEmail })
+      }),
+    passwordResetLookup: (token: string) =>
+      requestJson<PasswordResetLookupResponse>(`/api/auth/password-reset/${encodeURIComponent(token)}`, {
+        cache: 'no-store'
+      }),
+    passwordResetConfirm: (token: string, password: string, confirmPassword: string) =>
+      requestJson<PasswordResetConfirmResponse>(`/api/auth/password-reset/${encodeURIComponent(token)}/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password, confirmPassword })
+      }),
     inviteLookup: (token: string) =>
       requestJson<InviteLookupResponse>(`/api/auth/invites/${encodeURIComponent(token)}`, {
         cache: 'no-store'

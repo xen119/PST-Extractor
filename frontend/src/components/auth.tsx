@@ -1,12 +1,13 @@
 import * as React from 'react'
-import { ShieldCheck, ShieldAlert, ScanLine, Download } from 'lucide-react'
+import { Download, KeyRound, ScanLine, ShieldAlert, ShieldCheck } from 'lucide-react'
 import type {
   MfaEnrollmentStartResponse,
+  PasswordResetLookupResponse,
   UserInvite
 } from '@/types'
 import { Button, Dialog, DialogContent, DialogDescription, DialogTitle, Input } from '@/components/ui'
 
-export type AuthView = 'login' | 'mfa' | 'invite'
+export type AuthView = 'login' | 'mfa' | 'invite' | 'reset'
 export type InviteStep = 'password' | 'prompt' | 'setup' | 'complete'
 
 export interface AuthScreenProps {
@@ -14,14 +15,18 @@ export interface AuthScreenProps {
   busy: boolean
   message: string
   error: string
+  passwordResetAvailable: boolean
   invite: UserInvite | null
   inviteStep: InviteStep
   inviteMfaAvailable: boolean
   inviteMfaEnforced: boolean
   inviteSetup: MfaEnrollmentStartResponse | null
   inviteRecoveryCodes: string[]
+  resetLookup: PasswordResetLookupResponse | null
   onLogin: (username: string, password: string) => void
   onMfaChallenge: (code: string) => void
+  onPasswordResetRequest: (usernameOrEmail: string) => Promise<void>
+  onPasswordResetConfirm: (password: string, confirmPassword: string) => Promise<void>
   onInviteAccept: (password: string) => void
   onInviteMfaStart: () => void
   onInviteMfaSkip: () => void
@@ -35,14 +40,18 @@ export function AuthScreen({
   busy,
   message,
   error,
+  passwordResetAvailable,
   invite,
   inviteStep,
   inviteMfaAvailable,
   inviteMfaEnforced,
   inviteSetup,
   inviteRecoveryCodes,
+  resetLookup,
   onLogin,
   onMfaChallenge,
+  onPasswordResetRequest,
+  onPasswordResetConfirm,
   onInviteAccept,
   onInviteMfaStart,
   onInviteMfaSkip,
@@ -56,14 +65,103 @@ export function AuthScreen({
   const [invitePassword, setInvitePassword] = React.useState('')
   const [inviteConfirmPassword, setInviteConfirmPassword] = React.useState('')
   const [inviteMfaCode, setInviteMfaCode] = React.useState('')
+  const [showPasswordResetRequest, setShowPasswordResetRequest] = React.useState(false)
+  const [passwordResetUsernameOrEmail, setPasswordResetUsernameOrEmail] = React.useState('')
+  const [resetPassword, setResetPassword] = React.useState('')
+  const [resetConfirmPassword, setResetConfirmPassword] = React.useState('')
 
   React.useEffect(() => {
     if (view === 'login') {
       setUsername('')
       setPassword('')
       setMfaCode('')
+      setShowPasswordResetRequest(false)
+      setPasswordResetUsernameOrEmail('')
+    }
+    if (view === 'reset') {
+      setResetPassword('')
+      setResetConfirmPassword('')
     }
   }, [view])
+
+  const passwordResetDialog = (
+    <Dialog
+      open={showPasswordResetRequest}
+      onOpenChange={(open) => {
+        if (!open) {
+          setShowPasswordResetRequest(false)
+        }
+      }}
+    >
+      <DialogContent className="w-[min(96vw,560px)]">
+        <div className="space-y-4 p-6">
+          <div className="flex items-center gap-3">
+            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[color:var(--accent-soft)] text-[color:var(--accent-strong)]">
+              <KeyRound className="h-6 w-6" />
+            </div>
+            <div>
+              <DialogTitle className="text-2xl">Reset password</DialogTitle>
+              <DialogDescription>
+                Enter your username or email address and we will send a reset link if the account is eligible.
+              </DialogDescription>
+            </div>
+          </div>
+          {message ? (
+            <div className="rounded-2xl border border-[color:var(--accent-soft)] bg-[color:var(--accent-soft)] px-4 py-3 text-sm text-[color:var(--accent-strong)]">
+              {message}
+            </div>
+          ) : null}
+          {error ? (
+            <div className="rounded-2xl border border-[color:rgba(220,38,38,0.2)] bg-[color:rgba(220,38,38,0.08)] px-4 py-3 text-sm text-[color:var(--danger)]">
+              {error}
+            </div>
+          ) : null}
+          <form
+            className="space-y-4"
+            onSubmit={async (event) => {
+              event.preventDefault()
+              if (!passwordResetUsernameOrEmail.trim()) {
+                return
+              }
+              try {
+                await onPasswordResetRequest(passwordResetUsernameOrEmail.trim())
+                setShowPasswordResetRequest(false)
+                setPasswordResetUsernameOrEmail('')
+              } catch {
+                // Surface the error via the parent auth state and keep the dialog open.
+              }
+            }}
+          >
+            <label className="block text-sm font-medium text-[color:var(--text)]">
+              Username or email
+              <Input
+                className="mt-2"
+                value={passwordResetUsernameOrEmail}
+                onChange={(event) => setPasswordResetUsernameOrEmail(event.target.value)}
+                autoComplete="username"
+                autoFocus
+              />
+            </label>
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => {
+                  setShowPasswordResetRequest(false)
+                  setPasswordResetUsernameOrEmail('')
+                }}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" disabled={busy || !passwordResetUsernameOrEmail.trim()}>
+                {busy ? 'Sending...' : 'Send reset link'}
+              </Button>
+            </div>
+          </form>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
 
   if (view === 'login') {
     return (
@@ -130,12 +228,135 @@ export function AuthScreen({
                 </Button>
               </form>
 
+              {passwordResetAvailable ? (
+                <div className="pt-1">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    className="px-0 text-sm"
+                    disabled={busy}
+                    onClick={() => {
+                      setPasswordResetUsernameOrEmail(username.trim())
+                      setShowPasswordResetRequest(true)
+                    }}
+                  >
+                    Forgot password?
+                  </Button>
+                </div>
+              ) : null}
+
               <p className="pt-2 text-xs leading-6 text-[color:var(--muted)]">
                 Developed by DigiVectra DevOps
                 <br />
                 For access or investigation support, contact the Compliance Engineering team.
               </p>
             </div>
+          </div>
+          {passwordResetDialog}
+        </div>
+      </section>
+    )
+  }
+
+  if (view === 'reset') {
+    const resetAccount = resetLookup?.reset || null
+    return (
+      <section className="fixed inset-0 z-20 grid place-items-center overflow-auto px-4 py-8">
+        <div className="mx-auto w-full max-w-[560px] panel-surface-strong overflow-hidden">
+          <div className="p-8 sm:p-10">
+            <div className="flex items-center gap-4">
+              <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] text-[color:var(--accent)]">
+                <KeyRound className="h-7 w-7" aria-hidden="true" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-sm font-semibold tracking-[0.18em] text-[color:var(--muted)] uppercase">
+                  Password reset
+                </div>
+                <h1 className="mt-1 text-3xl font-semibold tracking-tight text-[color:var(--text)]">
+                  Set a new password
+                </h1>
+                <p className="mt-2 max-w-xl text-sm leading-6 text-[color:var(--muted)]">
+                  Use the link from your email to replace the current password and regain access.
+                </p>
+              </div>
+            </div>
+
+            {message ? (
+              <div className="mt-6 rounded-2xl border border-[color:var(--accent-soft)] bg-[color:var(--accent-soft)] px-4 py-3 text-sm text-[color:var(--accent-strong)]">
+                {message}
+              </div>
+            ) : null}
+
+            {error ? (
+              <div className="mt-4 rounded-2xl border border-[color:rgba(220,38,38,0.2)] bg-[color:rgba(220,38,38,0.08)] px-4 py-3 text-sm text-[color:var(--danger)]">
+                {error}
+              </div>
+            ) : null}
+
+            {resetAccount ? (
+              <>
+                <p className="mt-6 text-xs leading-6 text-[color:var(--muted)]">
+                  Account: <span className="font-medium text-[color:var(--text)]">{resetAccount.username}</span>
+                  {resetAccount.recipientEmail ? (
+                    <>
+                      {' '}
+                      · <span className="font-medium text-[color:var(--text)]">{resetAccount.recipientEmail}</span>
+                    </>
+                  ) : null}
+                </p>
+
+                <div className="mt-6 space-y-5">
+                  <form
+                    className="space-y-4"
+                    onSubmit={(event) => {
+                      event.preventDefault()
+                      if (!resetPassword || resetPassword !== resetConfirmPassword) {
+                        return
+                      }
+                      void onPasswordResetConfirm(resetPassword, resetConfirmPassword)
+                    }}
+                  >
+                    <label className="block text-sm font-medium text-[color:var(--text)]">
+                      New password
+                      <Input
+                        className="mt-2"
+                        type="password"
+                        value={resetPassword}
+                        onChange={(event) => setResetPassword(event.target.value)}
+                        autoComplete="new-password"
+                        autoFocus
+                      />
+                    </label>
+                    <label className="block text-sm font-medium text-[color:var(--text)]">
+                      Confirm password
+                      <Input
+                        className="mt-2"
+                        type="password"
+                        value={resetConfirmPassword}
+                        onChange={(event) => setResetConfirmPassword(event.target.value)}
+                        autoComplete="new-password"
+                      />
+                    </label>
+                    <Button type="submit" className="w-full justify-center" disabled={busy}>
+                      {busy ? 'Updating...' : 'Update password'}
+                    </Button>
+                    <Button type="button" variant="ghost" className="w-full justify-center" onClick={onOpenLogin}>
+                      Back to sign in
+                    </Button>
+                  </form>
+                </div>
+              </>
+            ) : (
+              <div className="mt-6 rounded-3xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-4">
+                <div className="text-sm font-medium text-[color:var(--text)]">This reset link is not valid anymore.</div>
+                <p className="mt-2 text-sm leading-6 text-[color:var(--muted)]">
+                  Request a new reset link from the sign-in screen, then open the latest email.
+                </p>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <Button onClick={onOpenLogin}>Back to sign in</Button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </section>

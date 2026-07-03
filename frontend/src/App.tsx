@@ -60,6 +60,7 @@ import type {
   MessageSummary,
   MfaEnrollmentCompleteResponse,
   MfaEnrollmentStartResponse,
+  PasswordResetLookupResponse,
   PageResponse,
   PstCatalogResponse,
   SearchSourceType,
@@ -107,6 +108,11 @@ const SEARCH_INDEX_REFRESH_SOURCES: SearchIndexRefreshSource[] = ['mailboxes', '
 
 function getInviteToken(pathname = window.location.pathname): string | null {
   const match = pathname.match(/^\/invite\/([^/?#]+)/i)
+  return match ? decodeURIComponent(match[1]) : null
+}
+
+function getPasswordResetToken(pathname = window.location.pathname): string | null {
+  const match = pathname.match(/^\/reset\/([^/?#]+)/i)
   return match ? decodeURIComponent(match[1]) : null
 }
 
@@ -310,6 +316,7 @@ export function App() {
   const [authError, setAuthError] = React.useState('')
   const [mfaChallengeUsername, setMfaChallengeUsername] = React.useState('')
   const [inviteToken, setInviteToken] = React.useState<string | null>(() => getInviteToken())
+  const [resetToken, setResetToken] = React.useState<string | null>(() => getPasswordResetToken())
   const [invite, setInvite] = React.useState<UserInvite | null>(null)
   const [inviteLoading, setInviteLoading] = React.useState(false)
   const [inviteStep, setInviteStep] = React.useState<InviteStep>('password')
@@ -317,6 +324,8 @@ export function App() {
   const [inviteMfaEnforced, setInviteMfaEnforced] = React.useState(false)
   const [inviteSetup, setInviteSetup] = React.useState<MfaEnrollmentStartResponse | null>(null)
   const [inviteRecoveryCodes, setInviteRecoveryCodes] = React.useState<string[]>([])
+  const [passwordResetAvailable, setPasswordResetAvailable] = React.useState(false)
+  const [resetLookup, setResetLookup] = React.useState<PasswordResetLookupResponse | null>(null)
   const [selfMfaOpen, setSelfMfaOpen] = React.useState(false)
   const [selfMfaLoading, setSelfMfaLoading] = React.useState(false)
   const [selfMfaMessage, setSelfMfaMessage] = React.useState('')
@@ -419,6 +428,8 @@ export function App() {
   const canManageUsers = Boolean(authStatus?.canManageUsers)
   const mfaEnabled = Boolean(authStatus?.mfaEnabled)
   const inviteFlowActive = Boolean(inviteToken)
+  const resetFlowActive = Boolean(resetToken)
+  const authFlowActive = inviteFlowActive || resetFlowActive
   const mfaEnforced = Boolean(authStatus?.mfaEnforced)
   const assignedCasePathsKey = (authStatus?.user?.assignedCasePaths || []).join('|')
   const selectedPageItem = React.useMemo(
@@ -429,10 +440,10 @@ export function App() {
     authenticated &&
     !mfaEnabled &&
     !selfMfaOpen &&
-    !inviteFlowActive &&
+    !authFlowActive &&
     (mfaEnforced || !mfaReminderDismissed)
   const workspaceReady =
-    authenticated && (mfaEnabled || (!mfaEnforced && mfaReminderDismissed) || !authStatus?.enabled)
+    authenticated && !authFlowActive && (mfaEnabled || (!mfaEnforced && mfaReminderDismissed) || !authStatus?.enabled)
   const breadcrumbs = React.useMemo(() => {
     const folderNode = getFolderNode(folderTree, currentFolderId)
     const parts = [
@@ -478,7 +489,35 @@ export function App() {
     async function bootstrap(): Promise<void> {
       try {
         const token = getInviteToken()
+        const passwordResetToken = getPasswordResetToken()
         setInviteToken(token)
+        setResetToken(passwordResetToken)
+        if (passwordResetToken) {
+          try {
+            const response = await api.auth.passwordResetLookup(passwordResetToken)
+            if (cancelled) {
+              return
+            }
+            setResetLookup(response)
+            setAuthError('')
+            setAuthMessage('Create a new password to finish resetting your account.')
+          } catch (error) {
+            if (cancelled) {
+              return
+            }
+            setResetLookup(null)
+            setAuthError(error instanceof Error ? error.message : 'Unable to validate password reset link')
+            setAuthMessage('')
+          }
+          if (cancelled) {
+            return
+          }
+          setAuthStatus(null)
+          setPasswordResetAvailable(false)
+          setAuthReady(true)
+          setAuthView('reset')
+          return
+        }
         if (token) {
           await loadInvite(token)
           if (cancelled) {
@@ -493,6 +532,7 @@ export function App() {
           }
           if (status.authenticated) {
             setAuthStatus(status)
+            setPasswordResetAvailable(Boolean(status.passwordResetAvailable))
             setAuthReady(true)
             setAuthView('login')
             setMfaChallengeUsername('')
@@ -506,11 +546,13 @@ export function App() {
               }
             }
           } else if (status.mfaRequired && status.user?.username) {
+            setPasswordResetAvailable(Boolean(status.passwordResetAvailable))
             setAuthView('mfa')
             setMfaChallengeUsername(status.user.username)
             setAuthMessage('')
           } else {
             setAuthStatus(null)
+            setPasswordResetAvailable(Boolean(status.passwordResetAvailable))
             setAuthReady(true)
             setAuthView(token ? 'invite' : 'login')
           }
@@ -518,11 +560,13 @@ export function App() {
           if (error instanceof ApiError && error.statusCode === 401) {
             const payload = error.payload as AuthStatus | undefined
             if (payload?.mfaRequired && payload?.user?.username) {
+              setPasswordResetAvailable(Boolean(payload.passwordResetAvailable))
               setAuthView('mfa')
               setMfaChallengeUsername(payload.user.username)
               setAuthMessage('')
             } else {
               setAuthStatus(null)
+              setPasswordResetAvailable(Boolean(payload?.passwordResetAvailable))
               setAuthReady(true)
               setAuthView(token ? 'invite' : 'login')
             }
@@ -549,7 +593,7 @@ export function App() {
   }, [])
 
   React.useEffect(() => {
-    if (!authenticated || !username) {
+    if (!authenticated || !username || authFlowActive) {
       return
     }
 
@@ -575,10 +619,10 @@ export function App() {
     setReviewTaggedOnly(readWorkspaceStorageBool('reviewTaggedOnly', true, username, false))
     setActivityFilterUser(readWorkspaceStorageItem('activityFilterUser', true, username, ''))
     setHiddenFiltersOpen(readWorkspaceStorageBool('hiddenFiltersOpen', true, username, hiddenFiltersOpen))
-  }, [authenticated, hiddenFiltersOpen, mfaEnforced, setHiddenFiltersOpen, username])
+  }, [authenticated, authFlowActive, hiddenFiltersOpen, mfaEnforced, setHiddenFiltersOpen, username])
 
   React.useEffect(() => {
-    if (!authenticated || !canManageUsers) {
+    if (!authenticated || !canManageUsers || authFlowActive) {
       setSearchIndexRefreshStatuses({ mailboxes: null, items: null })
       stopSearchIndexRefreshPolling('mailboxes')
       stopSearchIndexRefreshPolling('items')
@@ -631,10 +675,10 @@ export function App() {
     return () => {
       cancelled = true
     }
-  }, [authenticated, canManageUsers])
+  }, [authenticated, authFlowActive, canManageUsers])
 
   React.useEffect(() => {
-    if (!authenticated || !username) {
+    if (!authenticated || !username || authFlowActive) {
       return
     }
 
@@ -655,6 +699,7 @@ export function App() {
   }, [
     activityFilterUser,
     authenticated,
+    authFlowActive,
     currentFolderId,
     hiddenFiltersOpen,
     mailOnly,
@@ -672,7 +717,7 @@ export function App() {
   ])
 
   React.useEffect(() => {
-    if (!authenticated || !username) {
+    if (!authenticated || !username || authFlowActive) {
       return
     }
 
@@ -733,7 +778,7 @@ export function App() {
     return () => {
       cancelled = true
     }
-  }, [assignedCasePathsKey, authenticated, selectedCasePath, selectedScopePath, username])
+  }, [assignedCasePathsKey, authenticated, authFlowActive, selectedCasePath, selectedScopePath, username])
 
   React.useEffect(() => {
     if (!workspaceReady || !authenticated || sourceType !== 'mailbox' || !catalog?.scopes?.length || !activeCatalogScope) {
@@ -1026,6 +1071,7 @@ export function App() {
     setAuthMessage('')
     try {
       const response = await api.auth.login(usernameInput, password)
+      setPasswordResetAvailable(Boolean(response.passwordResetAvailable))
       if (response.mfaRequired && response.user?.username) {
         setAuthView('mfa')
         setMfaChallengeUsername(response.user.username)
@@ -1044,7 +1090,51 @@ export function App() {
         }
       }
     } catch (error) {
+      if (error instanceof ApiError && error.payload && typeof error.payload === 'object') {
+        const payload = error.payload as Partial<AuthStatus>
+        setPasswordResetAvailable(Boolean(payload.passwordResetAvailable))
+      }
       setAuthError(error instanceof Error ? error.message : 'Login failed')
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  async function handlePasswordResetRequest(usernameOrEmail: string): Promise<void> {
+    setAuthBusy(true)
+    setAuthError('')
+    setAuthMessage('')
+    try {
+      await api.auth.passwordResetRequest(usernameOrEmail)
+      setAuthMessage('If the account is eligible, a password reset link has been sent.')
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Unable to request a password reset')
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  async function handlePasswordResetConfirm(password: string, confirmPassword: string): Promise<void> {
+    if (!resetToken) {
+      setAuthError('Password reset link is missing.')
+      return
+    }
+
+    setAuthBusy(true)
+    setAuthError('')
+    setAuthMessage('')
+    try {
+      const response = await api.auth.passwordResetConfirm(resetToken, password, confirmPassword)
+      setAuthStatus(null)
+      setPasswordResetAvailable(false)
+      setResetLookup(null)
+      setResetToken(null)
+      setAuthView('login')
+      setMfaChallengeUsername('')
+      setAuthMessage(`Password updated for ${response.user.username}. Sign in with your new password.`)
+      window.history.replaceState({}, '', '/')
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Unable to update password')
     } finally {
       setAuthBusy(false)
     }
@@ -1056,6 +1146,7 @@ export function App() {
     try {
       const response = await api.auth.mfaChallenge(code)
       setAuthStatus(response)
+      setPasswordResetAvailable(Boolean(response.passwordResetAvailable))
       setAuthView('login')
       setMfaChallengeUsername('')
     } catch (error) {
@@ -1081,6 +1172,9 @@ export function App() {
       setInviteMfaEnforced(false)
       setInviteSetup(null)
       setInviteRecoveryCodes([])
+      setPasswordResetAvailable(false)
+      setResetLookup(null)
+      setResetToken(null)
       setSelfMfaOpen(false)
       setSelfMfaSetup(null)
       setSelfMfaRecoveryCodes([])
@@ -1263,6 +1357,7 @@ export function App() {
     const status = await api.auth.me().catch(() => null)
     if (status?.authenticated) {
       setAuthStatus(status)
+      setPasswordResetAvailable(Boolean(status.passwordResetAvailable))
     }
   }
 
@@ -2603,20 +2698,28 @@ export function App() {
     )
   }
 
-  if (!authenticated || inviteFlowActive) {
+  if (!authenticated || authFlowActive) {
     return (
       <div className="h-screen overflow-hidden bg-[color:var(--bg)] text-[color:var(--text)]">
         <AuthScreen
-          view={inviteFlowActive ? 'invite' : authView}
+          view={resetFlowActive ? 'reset' : inviteFlowActive ? 'invite' : authView}
           busy={authBusy || inviteLoading || selfMfaLoading}
           message={authMessage}
           error={authError}
+          passwordResetAvailable={passwordResetAvailable}
           invite={invite}
           inviteStep={inviteStep}
           inviteMfaAvailable={inviteMfaAvailable}
+          resetLookup={resetLookup}
           inviteMfaEnforced={inviteMfaEnforced}
           inviteSetup={inviteSetup}
           inviteRecoveryCodes={inviteRecoveryCodes}
+          onPasswordResetRequest={(usernameOrEmail) => {
+            void handlePasswordResetRequest(usernameOrEmail)
+          }}
+          onPasswordResetConfirm={(password, confirmPassword) => {
+            void handlePasswordResetConfirm(password, confirmPassword)
+          }}
           onLogin={(user, pass) => {
             void handleLogin(user, pass)
           }}
@@ -2639,6 +2742,9 @@ export function App() {
             void continueInviteToPlatform()
           }}
           onOpenLogin={() => {
+            setResetToken(null)
+            setResetLookup(null)
+            setPasswordResetAvailable(false)
             setAuthView('login')
             setAuthError('')
             setAuthMessage('')
