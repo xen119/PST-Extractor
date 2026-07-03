@@ -410,6 +410,7 @@ export function App() {
     mailboxes: null,
     items: null
   })
+  const messagePreviewRequestRef = React.useRef(0)
 
   const catalogLoadKeyRef = React.useRef('')
 
@@ -458,6 +459,13 @@ export function App() {
       getScopeEntryForPath(catalog.scopes, selectedCasePath)
     )
   }, [catalog?.scopes, selectedCasePath, selectedScopePath])
+
+  function invalidateMessagePreview(loading = true): number {
+    messagePreviewRequestRef.current += 1
+    setSelectedMessage(null)
+    setMessageLoading(loading)
+    return messagePreviewRequestRef.current
+  }
 
   React.useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -884,6 +892,7 @@ export function App() {
     const activeMessageId = selectedMessageId
     if (!workspaceReady || !activeMessageId) {
       setSelectedMessage(null)
+      setMessageLoading(false)
       return
     }
     if (selectedPageItem?.sourceType && selectedPageItem.sourceType !== 'mailbox') {
@@ -892,9 +901,11 @@ export function App() {
     const activeSessionId = sessionId
     if (!activeSessionId) {
       setSelectedMessage(null)
+      setMessageLoading(false)
       return
     }
     const sessionToken = activeSessionId
+    const requestId = messagePreviewRequestRef.current
 
     let cancelled = false
 
@@ -902,17 +913,17 @@ export function App() {
       try {
         setMessageLoading(true)
         const response = await api.session.messageDetail(sessionToken, activeMessageId)
-        if (cancelled) {
+        if (cancelled || messagePreviewRequestRef.current !== requestId) {
           return
         }
         setSelectedMessage(response.detail)
       } catch (error) {
-        if (!cancelled) {
+        if (!cancelled && messagePreviewRequestRef.current === requestId) {
           setSelectedMessage(null)
           setAuthError(error instanceof Error ? error.message : 'Unable to load message detail')
         }
       } finally {
-        if (!cancelled) {
+        if (!cancelled && messagePreviewRequestRef.current === requestId) {
           setMessageLoading(false)
         }
       }
@@ -926,10 +937,10 @@ export function App() {
   }, [selectedMessageId, selectedPageItem?.sourceType, sessionId, workspaceReady])
 
   React.useEffect(() => {
-    if (!workspaceReady || !selectedMessage) {
+    if (!workspaceReady || (!selectedMessage && !messageLoading)) {
       setFullViewOpen(false)
     }
-  }, [selectedMessage, workspaceReady])
+  }, [messageLoading, selectedMessage, workspaceReady])
 
   React.useEffect(() => {
     if (!workspaceReady || !sessionId || !currentPage?.items?.length) {
@@ -1588,6 +1599,7 @@ export function App() {
     catalogResponse?: PstCatalogResponse,
     options: OpenMailboxOptions = {}
   ): Promise<void> {
+    invalidateMessagePreview(Boolean(options.selectedMessageId))
     const effectiveScope = scopePath || selectedScopePath || selectedCasePath || catalogResponse?.scopePath || catalog?.scopePath || ''
     try {
       const response: SessionOpenResponse = await api.pst.open(effectiveScope, fileName)
@@ -1628,22 +1640,31 @@ export function App() {
   }
 
   async function openMessage(messageId: string): Promise<void> {
+    invalidateMessagePreview(true)
     setSelectedMessageId(messageId)
     writeWorkspaceStorageItem('messageId', true, username, messageId)
   }
 
   async function openMessageSummary(message: MessageSummary): Promise<void> {
     if (message.sourceType && message.sourceType !== 'mailbox') {
+      const requestId = invalidateMessagePreview(true)
+      setSelectedMessageId(message.id)
+      writeWorkspaceStorageItem('messageId', true, username, message.id)
+      setWorkspaceMode('search')
       try {
-        setMessageLoading(true)
         const response = await api.item.detail(message.id)
+        if (messagePreviewRequestRef.current !== requestId) {
+          return
+        }
         setSelectedMessage(response.detail)
-        setSelectedMessageId(message.id)
-        setWorkspaceMode('search')
       } catch (error) {
-        setAuthError(error instanceof Error ? error.message : 'Unable to load item detail')
+        if (messagePreviewRequestRef.current === requestId) {
+          setAuthError(error instanceof Error ? error.message : 'Unable to load item detail')
+        }
       } finally {
-        setMessageLoading(false)
+        if (messagePreviewRequestRef.current === requestId) {
+          setMessageLoading(false)
+        }
       }
       return
     }
@@ -2199,6 +2220,7 @@ export function App() {
   const previewNode = workspaceReady ? (
     <EmailPreview
       detail={selectedMessage}
+      loading={messageLoading}
       theme={theme}
       onDownloadJson={() => {
         void downloadJson()
@@ -2268,7 +2290,7 @@ export function App() {
       />
 
       <Dialog
-        open={fullViewOpen && Boolean(selectedMessage)}
+        open={fullViewOpen && (Boolean(selectedMessage) || messageLoading)}
         onOpenChange={(open) => {
           setFullViewOpen(open)
         }}
@@ -2313,6 +2335,7 @@ export function App() {
             </div>
             <EmailPreview
               detail={selectedMessage}
+              loading={messageLoading}
               theme={theme}
               onDownloadJson={() => {
                 void downloadJson()

@@ -23,6 +23,8 @@ import type {
 
 afterEach(() => {
   vi.restoreAllMocks()
+  window.localStorage.clear()
+  window.sessionStorage.clear()
   window.history.replaceState({}, '', '/')
 })
 
@@ -741,6 +743,234 @@ describe('shell and preview', () => {
     expect(onOpenFullView).toHaveBeenCalled()
     await user.click(screen.getByLabelText('Download JSON'))
     expect(screen.getByLabelText('Recipients')).toBeInTheDocument()
+  })
+
+  it('shows a loading placeholder and ignores stale preview responses when selection changes quickly', async () => {
+    const user = userEvent.setup()
+    const authenticatedStatus: AuthStatus = {
+      authenticated: true,
+      enabled: true,
+      canManageUsers: true,
+      mfaEnabled: true,
+      mfaEnforced: false,
+      user: { username: 'admin', assignedCasePaths: [] },
+      expiresAt: null
+    }
+    const catalog: PstCatalogResponse = {
+      rootPath: '',
+      rootExists: true,
+      message: '',
+      scopePath: 'Case Alpha/Search One',
+      scopeLabel: 'Search One',
+      scopes: [
+        {
+          scopePath: 'Case Alpha/Search One',
+          scopeLabel: 'Search One',
+          fileCount: 1,
+          files: [
+            {
+              fileName: 'items.zip',
+              size: 1024,
+              modifiedAt: new Date().toISOString(),
+              scopePath: 'Case Alpha/Search One'
+            }
+          ]
+        }
+      ],
+      files: []
+    }
+    const currentDetail: MessageDetail = {
+      subject: 'Current mailbox message',
+      senderName: 'Alice Example',
+      senderEmailAddress: 'alice@example.com',
+      sortDate: new Date().toISOString(),
+      bodyText: 'Current mailbox body'
+    }
+    const searchResultsPage: PageResponse<MessageSummary> = {
+      items: [
+        {
+          id: 'archive-a',
+          messageId: 'archive-a',
+          subject: 'Archive item A',
+          senderName: 'Team A',
+          senderEmailAddress: 'team-a@example.com',
+          sortDate: new Date().toISOString(),
+          fileName: 'mailbox-a.pst',
+          scopePath: 'Case Alpha/Search One',
+          sourceType: 'mailbox',
+          review: {
+            flagged: false,
+            tags: [],
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          }
+        },
+        {
+          id: 'archive-b',
+          messageId: 'archive-b',
+          subject: 'Archive item B',
+          senderName: 'Team B',
+          senderEmailAddress: 'team-b@example.com',
+          sortDate: new Date().toISOString(),
+          fileName: 'mailbox-a.pst',
+          scopePath: 'Case Alpha/Search One',
+          sourceType: 'mailbox',
+          review: {
+            flagged: false,
+            tags: [],
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          }
+        }
+      ],
+      total: 2,
+      page: 1,
+      pageSize: 50,
+      totalPages: 1,
+      query: 'archive',
+      mailOnly: false,
+      sort: 'date-desc'
+    }
+    const searchResponse = {
+      scope: 'search' as const,
+      scopePath: 'Case Alpha/Search One',
+      scopeLabel: 'Search One',
+      page: searchResultsPage
+    }
+    const firstDetail = createDeferred<{ detail: MessageDetail }>()
+    const secondDetail = createDeferred<{ detail: MessageDetail }>()
+    const firstPreview: MessageDetail = {
+      subject: 'Archive item A',
+      senderName: 'Team A',
+      senderEmailAddress: 'team-a@example.com',
+      sortDate: new Date().toISOString(),
+      bodyText: 'First item body',
+      sourceType: 'sharepoint',
+      archivePath: 'Case Alpha/Search One/items.zip',
+      archiveEntryName: 'archive-a.json',
+      downloadUrl: '/api/items/archive-a/content'
+    }
+    const secondPreview: MessageDetail = {
+      subject: 'Archive item B',
+      senderName: 'Team B',
+      senderEmailAddress: 'team-b@example.com',
+      sortDate: new Date().toISOString(),
+      bodyText: 'Second item body',
+      sourceType: 'sharepoint',
+      archivePath: 'Case Alpha/Search One/items.zip',
+      archiveEntryName: 'archive-b.json',
+      downloadUrl: '/api/items/archive-b/content'
+    }
+    const hiddenRulesResponse: HiddenRulesResponse = { items: [] }
+    const idleStatus: SearchIndexRefreshStatus = {
+      jobId: null,
+      status: 'idle',
+      trigger: null,
+      startedAt: null,
+      completedAt: null,
+      updatedAt: new Date().toISOString(),
+      summary: null,
+      error: null
+    }
+
+    vi.spyOn(api.auth, 'me').mockResolvedValueOnce(authenticatedStatus)
+    vi.spyOn(api.pst, 'catalog').mockResolvedValueOnce(catalog)
+    vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue(hiddenRulesResponse)
+    vi.spyOn(api.pst, 'refreshSearchIndexStatus').mockResolvedValue({ status: idleStatus })
+    vi.spyOn(api.pst, 'open').mockResolvedValue({
+      sessionId: 'session-a',
+      scopePath: 'Case Alpha/Search One',
+      scopeLabel: 'Search One',
+      fileName: 'mailbox-a.pst',
+      summary: {
+        fileName: 'mailbox-a.pst',
+        mailboxName: 'mailbox-a.pst'
+      },
+      tree: {
+        id: 'root-a',
+        displayName: 'Inbox',
+        path: 'root-a',
+        children: []
+      }
+    })
+    vi.spyOn(api.session, 'folderMessages').mockResolvedValue({
+      sessionId: 'session-a',
+      page: {
+        items: [
+          {
+            id: 'current-message',
+            messageId: 'current-message',
+            subject: 'Current mailbox message',
+            senderName: 'Alice Example',
+            senderEmailAddress: 'alice@example.com',
+            sortDate: new Date().toISOString(),
+            fileName: 'mailbox-a.pst',
+            scopePath: 'Case Alpha/Search One',
+            isMailLike: true,
+            review: {
+              flagged: false,
+              tags: [],
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            }
+          } satisfies MessageSummary
+        ],
+        total: 1,
+        page: 1,
+        pageSize: 50,
+        totalPages: 1,
+        query: '',
+        mailOnly: false,
+        sort: 'date-desc'
+      }
+    })
+    vi.spyOn(api, 'search').mockResolvedValue(searchResponse)
+    vi.spyOn(api.item, 'detail').mockImplementation(async (itemId) => {
+      if (itemId === 'current-message') {
+        return { detail: currentDetail }
+      }
+      if (itemId === 'archive-a') {
+        return firstDetail.promise
+      }
+      return secondDetail.promise
+    })
+
+    window.localStorage.setItem('pst-mail-explorer.casePath::admin', 'Case Alpha')
+    window.localStorage.setItem('pst-mail-explorer.scopePath::admin', 'Case Alpha/Search One')
+    window.localStorage.setItem('pst-mail-explorer.pstFileName::admin', 'mailbox-a.pst')
+    window.localStorage.setItem('pst-mail-explorer.folderId::admin', 'root-a')
+    window.localStorage.setItem('pst-mail-explorer.messageId::admin', 'current-message')
+    window.localStorage.setItem('pst-mail-explorer.sourceType::admin', 'mailbox')
+    window.localStorage.setItem('pst-mail-explorer.searchScope::admin', 'all')
+    window.localStorage.setItem('pst-mail-explorer.query::admin', 'archive')
+
+    render(
+      <div style={{ width: 1800, height: 1600 }}>
+        <App />
+      </div>
+    )
+
+    expect(await screen.findByText('Current mailbox message')).toBeInTheDocument()
+    await user.type(screen.getByPlaceholderText('Keywords, "phrases", + AND, | OR'), 'archive')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Scope' }), 'all')
+    await user.click(screen.getByRole('button', { name: 'Run search' }))
+
+    const firstItem = await screen.findByText('Archive item A')
+    await user.click(firstItem.closest('button') as HTMLElement)
+    expect(await screen.findByText('Loading preview...')).toBeInTheDocument()
+
+    const secondItem = await screen.findByText('Archive item B')
+    await user.click(secondItem.closest('button') as HTMLElement)
+    expect(screen.getByText('Loading preview...')).toBeInTheDocument()
+
+    secondDetail.resolve({ detail: secondPreview })
+    expect(await screen.findByText('Archive item B')).toBeInTheDocument()
+
+    firstDetail.resolve({ detail: firstPreview })
+    await waitFor(() => {
+      expect(screen.getByText('Archive item B')).toBeInTheDocument()
+      expect(screen.queryByText('Archive item A')).not.toBeInTheDocument()
+    })
   })
 
   it('shows archive office document previews through the preview url', () => {

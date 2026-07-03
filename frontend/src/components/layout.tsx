@@ -862,6 +862,7 @@ export function MessageRow({ item, active, onSelect }: MessageRowProps) {
 
 interface EmailPreviewProps {
   detail: MessageDetail | null
+  loading?: boolean
   theme: 'light' | 'dark'
   onDownloadJson: () => void
   onDownloadEml: () => void
@@ -881,6 +882,7 @@ interface EmailPreviewProps {
 
 export function EmailPreview({
   detail,
+  loading = false,
   theme,
   onDownloadJson,
   onDownloadEml,
@@ -897,10 +899,16 @@ export function EmailPreview({
   canNavigatePrev,
   canNavigateNext
 }: EmailPreviewProps) {
-  if (!detail) {
+  if (loading || !detail) {
     return (
       <div className="panel-surface flex h-full min-h-0 items-center justify-center p-6">
-        <EmptyState title="No message selected" description="Select a message from the list to preview it." />
+        <div className="empty-state">
+          {loading ? <RefreshCw className="h-5 w-5 animate-spin text-[color:var(--accent)]" aria-hidden="true" /> : null}
+          <div className="text-base font-semibold text-[color:var(--text)]">
+            {loading ? 'Loading preview...' : 'No message selected'}
+          </div>
+          <div>{loading ? 'Fetching the selected item.' : 'Select a message from the list to preview it.'}</div>
+        </div>
       </div>
     )
   }
