@@ -3,7 +3,12 @@ import * as path from 'path'
 import { MongoClient } from 'mongodb'
 import type { ReviewStore } from './reviewStore'
 import type { ReviewRecord, ReviewState } from './reviewTypes'
-import type { MessageSummary, ViewerSessionIndex } from './viewer'
+import {
+  cloneMessageDetail,
+  type MessageDetail,
+  type MessageSummary,
+  type ViewerSessionIndex
+} from './viewer'
 import type { ArchiveBundleItem, ArchiveBundleSourceType } from './archiveBundles'
 
 export type SearchScope = 'all' | 'search' | 'pst'
@@ -91,6 +96,13 @@ export interface SearchIndexFileFingerprint {
   updatedAt: string
 }
 
+export interface MailboxDetailSnapshotRecord {
+  mailboxKey: string
+  messageId: string
+  detail: MessageDetail
+  updatedAt: string
+}
+
 export interface SearchIndexRefreshPlan {
   source: SearchIndexRefreshSource
   mailboxCount: number
@@ -150,6 +162,10 @@ export interface SearchIndexStore {
   isPersistent: boolean
   replaceMailboxDocuments(mailboxKey: string, documents: SearchIndexDocument[]): Promise<void>
   deleteMailboxDocuments(mailboxKey: string): Promise<void>
+  replaceMailboxDetails(mailboxKey: string, details: MessageDetail[]): Promise<void>
+  upsertMailboxDetail(mailboxKey: string, detail: MessageDetail): Promise<void>
+  deleteMailboxDetails(mailboxKey: string): Promise<void>
+  findMailboxDetail(mailboxKey: string, messageId: string): Promise<MessageDetail | null>
   updateReviewState(
     mailboxKey: string,
     messageId: string,
@@ -171,6 +187,11 @@ export interface SearchIndexStore {
   deleteFileFingerprints(source: SearchIndexRefreshSource, mailboxKeys: string[]): Promise<void>
   promoteStagedDocuments?(
     stagingDocumentsCollectionName: string,
+    changedMailboxKeys?: string[],
+    removedMailboxKeys?: string[]
+  ): Promise<void>
+  promoteStagedMailboxDetails?(
+    stagingMailboxDetailsCollectionName: string,
     changedMailboxKeys?: string[],
     removedMailboxKeys?: string[]
   ): Promise<void>
@@ -205,6 +226,23 @@ interface SearchIndexCollectionLike {
     }
   }
   countDocuments: (filter: Record<string, unknown>) => Promise<number>
+}
+
+interface MailboxDetailCollectionLike {
+  createIndex?: (index: Record<string, 1 | -1>, options?: { unique?: boolean; name?: string }) => Promise<unknown>
+  findOne: (filter: Record<string, unknown>) => Promise<MailboxDetailSnapshotRecord | null>
+  updateOne: (
+    filter: Record<string, unknown>,
+    update: Record<string, unknown>,
+    options?: { upsert?: boolean }
+  ) => Promise<unknown>
+  deleteMany: (filter: Record<string, unknown>) => Promise<{ deletedCount?: number }>
+  find: (filter: Record<string, unknown>) => {
+    sort: (sort: Record<string, 1 | -1>) => {
+      toArray: () => Promise<MailboxDetailSnapshotRecord[]>
+    }
+  }
+  insertMany: (documents: MailboxDetailSnapshotRecord[]) => Promise<unknown>
 }
 
 interface HiddenRuleCollectionLike {
@@ -243,11 +281,14 @@ interface FileFingerprintCollectionLike {
 const DEFAULT_INDEX_COLLECTION = 'pst_search_documents'
 const DEFAULT_RULE_COLLECTION = 'pst_search_hidden_rules'
 const DEFAULT_FINGERPRINT_COLLECTION = 'pst_search_file_fingerprints'
+const DEFAULT_MAILBOX_DETAIL_COLLECTION = 'pst_mailbox_detail_snapshots'
+const MAX_MAILBOX_DETAIL_SNAPSHOT_BYTES = 12 * 1024 * 1024
 
 export interface MongoSearchIndexStoreConnectOptions {
   documentsCollectionName?: string
   rulesCollectionName?: string
   fingerprintsCollectionName?: string
+  mailboxDetailsCollectionName?: string
 }
 
 function normalizeText(value: unknown): string {
@@ -286,6 +327,54 @@ function uniqueStrings(values: string[]): string[] {
 
 function uniqueTextValues(values: string[]): string[] {
   return [...new Set(values.map((value) => normalizeText(value)).filter(Boolean))]
+}
+
+function cloneMailboxDetail(detail: MessageDetail): MessageDetail {
+  return cloneMessageDetail(detail)
+}
+
+function isMailboxDetailSnapshotWithinSizeLimit(detail: MessageDetail): boolean {
+  try {
+    return Buffer.byteLength(JSON.stringify(detail), 'utf8') <= MAX_MAILBOX_DETAIL_SNAPSHOT_BYTES
+  } catch {
+    return false
+  }
+}
+
+function buildMailboxDetailSnapshotRecord(
+  mailboxKey: string,
+  detail: MessageDetail
+): MailboxDetailSnapshotRecord | null {
+  const normalizedMailboxKey = normalizeText(mailboxKey)
+  const messageId = normalizeText(detail.id)
+  if (!normalizedMailboxKey || !messageId) {
+    return null
+  }
+  const clonedDetail = cloneMailboxDetail(detail)
+  if (!isMailboxDetailSnapshotWithinSizeLimit(clonedDetail)) {
+    return null
+  }
+  return {
+    mailboxKey: normalizedMailboxKey,
+    messageId,
+    detail: clonedDetail,
+    updatedAt: new Date().toISOString()
+  }
+}
+
+function dedupeMailboxDetailSnapshots(
+  mailboxKey: string,
+  details: MessageDetail[]
+): MailboxDetailSnapshotRecord[] {
+  const records = new Map<string, MailboxDetailSnapshotRecord>()
+  for (const detail of details) {
+    const record = buildMailboxDetailSnapshotRecord(mailboxKey, detail)
+    if (!record) {
+      continue
+    }
+    records.set(record.messageId, record)
+  }
+  return [...records.values()]
 }
 
 function uniqueFingerprintValues(values: SearchIndexFileFingerprint[]): SearchIndexFileFingerprint[] {
@@ -1019,6 +1108,7 @@ export class MemorySearchIndexStore implements SearchIndexStore {
   public kind: 'memory' = 'memory'
   public isPersistent = false
   private readonly documents = new Map<string, Map<string, SearchIndexDocument>>()
+  private readonly mailboxDetails = new Map<string, Map<string, MessageDetail>>()
   private readonly hiddenRules = new MemoryHiddenRuleStore()
   private readonly fingerprints = new Map<string, SearchIndexFileFingerprint>()
 
@@ -1036,7 +1126,42 @@ export class MemorySearchIndexStore implements SearchIndexStore {
   }
 
   async deleteMailboxDocuments(mailboxKey: string): Promise<void> {
-    this.documents.delete(normalizeText(mailboxKey))
+    const key = normalizeText(mailboxKey)
+    this.documents.delete(key)
+    this.mailboxDetails.delete(key)
+  }
+
+  async replaceMailboxDetails(mailboxKey: string, details: MessageDetail[]): Promise<void> {
+    const key = normalizeText(mailboxKey)
+    const records = new Map<string, MessageDetail>()
+    for (const record of dedupeMailboxDetailSnapshots(key, details)) {
+      records.set(record.messageId, cloneMailboxDetail(record.detail))
+    }
+    this.mailboxDetails.set(key, records)
+  }
+
+  async upsertMailboxDetail(mailboxKey: string, detail: MessageDetail): Promise<void> {
+    const record = buildMailboxDetailSnapshotRecord(mailboxKey, detail)
+    if (!record) {
+      return
+    }
+    const key = normalizeText(mailboxKey)
+    const mailbox = this.mailboxDetails.get(key) || new Map<string, MessageDetail>()
+    mailbox.set(record.messageId, cloneMailboxDetail(record.detail))
+    this.mailboxDetails.set(key, mailbox)
+  }
+
+  async deleteMailboxDetails(mailboxKey: string): Promise<void> {
+    this.mailboxDetails.delete(normalizeText(mailboxKey))
+  }
+
+  async findMailboxDetail(mailboxKey: string, messageId: string): Promise<MessageDetail | null> {
+    const mailbox = this.mailboxDetails.get(normalizeText(mailboxKey))
+    if (!mailbox) {
+      return null
+    }
+    const detail = mailbox.get(normalizeText(messageId))
+    return detail ? cloneMailboxDetail(detail) : null
   }
 
   async updateReviewState(
@@ -1076,6 +1201,7 @@ export class MemorySearchIndexStore implements SearchIndexStore {
 
   async clearAllDocuments(): Promise<void> {
     this.documents.clear()
+    this.mailboxDetails.clear()
   }
 
   async listFileFingerprints(source: SearchIndexRefreshSource): Promise<SearchIndexFileFingerprint[]> {
@@ -1178,6 +1304,7 @@ export class MemorySearchIndexStore implements SearchIndexStore {
 
   async close(): Promise<void> {
     this.documents.clear()
+    this.mailboxDetails.clear()
     this.hiddenRules.clear()
     this.fingerprints.clear()
   }
@@ -1359,11 +1486,13 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     private readonly documents: SearchIndexCollectionLike,
     private readonly rules: HiddenRuleCollectionLike,
     private readonly fingerprints: FileFingerprintCollectionLike,
+    private readonly mailboxDetails?: MailboxDetailCollectionLike,
     private readonly client?: MongoClient,
     private readonly dbName = 'pst-extractor',
     private readonly documentsCollectionName = DEFAULT_INDEX_COLLECTION,
     private readonly rulesCollectionName = DEFAULT_RULE_COLLECTION,
-    private readonly fingerprintsCollectionName = DEFAULT_FINGERPRINT_COLLECTION
+    private readonly fingerprintsCollectionName = DEFAULT_FINGERPRINT_COLLECTION,
+    private readonly mailboxDetailsCollectionName = DEFAULT_MAILBOX_DETAIL_COLLECTION
   ) {}
 
   static async connect(
@@ -1381,6 +1510,9 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     const fingerprints = db.collection<SearchIndexFileFingerprint>(
       options.fingerprintsCollectionName || DEFAULT_FINGERPRINT_COLLECTION
     )
+    const mailboxDetails = db.collection<MailboxDetailSnapshotRecord>(
+      options.mailboxDetailsCollectionName || DEFAULT_MAILBOX_DETAIL_COLLECTION
+    )
     await documents.createIndex?.({ mailboxKey: 1, messageId: 1 }, { unique: true })
     await documents.createIndex?.({ messageId: 1 })
     await documents.createIndex?.({ sourceType: 1, scopePath: 1 })
@@ -1396,15 +1528,19 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     await rules.createIndex?.({ updatedAt: -1 })
     await fingerprints.createIndex?.({ source: 1, mailboxKey: 1 }, { unique: true })
     await fingerprints.createIndex?.({ source: 1, updatedAt: -1 })
+    await mailboxDetails.createIndex?.({ mailboxKey: 1, messageId: 1 }, { unique: true })
+    await mailboxDetails.createIndex?.({ mailboxKey: 1, updatedAt: -1 })
     return new MongoSearchIndexStore(
       documents as unknown as SearchIndexCollectionLike,
       rules as unknown as HiddenRuleCollectionLike,
       fingerprints as unknown as FileFingerprintCollectionLike,
+      mailboxDetails as unknown as MailboxDetailCollectionLike,
       client,
       dbName,
       options.documentsCollectionName || DEFAULT_INDEX_COLLECTION,
       options.rulesCollectionName || DEFAULT_RULE_COLLECTION,
-      options.fingerprintsCollectionName || DEFAULT_FINGERPRINT_COLLECTION
+      options.fingerprintsCollectionName || DEFAULT_FINGERPRINT_COLLECTION,
+      options.mailboxDetailsCollectionName || DEFAULT_MAILBOX_DETAIL_COLLECTION
     )
   }
 
@@ -1425,7 +1561,69 @@ export class MongoSearchIndexStore implements SearchIndexStore {
   }
 
   async deleteMailboxDocuments(mailboxKey: string): Promise<void> {
-    await this.documents.deleteMany({ mailboxKey: normalizeText(mailboxKey) })
+    const key = normalizeText(mailboxKey)
+    await this.documents.deleteMany({ mailboxKey: key })
+    if (this.mailboxDetails) {
+      await this.mailboxDetails.deleteMany({ mailboxKey: key })
+    }
+  }
+
+  async replaceMailboxDetails(mailboxKey: string, details: MessageDetail[]): Promise<void> {
+    if (!this.mailboxDetails) {
+      return
+    }
+
+    const key = normalizeText(mailboxKey)
+    await this.mailboxDetails.deleteMany({ mailboxKey: key })
+    const uniqueDetails = dedupeMailboxDetailSnapshots(key, details)
+    if (!uniqueDetails.length) {
+      return
+    }
+    await this.mailboxDetails.insertMany(uniqueDetails)
+  }
+
+  async upsertMailboxDetail(mailboxKey: string, detail: MessageDetail): Promise<void> {
+    if (!this.mailboxDetails) {
+      return
+    }
+
+    const record = buildMailboxDetailSnapshotRecord(mailboxKey, detail)
+    if (!record) {
+      return
+    }
+
+    await this.mailboxDetails.updateOne(
+      {
+        mailboxKey: record.mailboxKey,
+        messageId: record.messageId
+      },
+      {
+        $set: record
+      },
+      { upsert: true }
+    )
+  }
+
+  async deleteMailboxDetails(mailboxKey: string): Promise<void> {
+    if (!this.mailboxDetails) {
+      return
+    }
+    await this.mailboxDetails.deleteMany({ mailboxKey: normalizeText(mailboxKey) })
+  }
+
+  async findMailboxDetail(mailboxKey: string, messageId: string): Promise<MessageDetail | null> {
+    if (!this.mailboxDetails) {
+      return null
+    }
+
+    const record = await this.mailboxDetails.findOne({
+      mailboxKey: normalizeText(mailboxKey),
+      messageId: normalizeText(messageId)
+    })
+    if (!record || !record.detail) {
+      return null
+    }
+    return cloneMailboxDetail(record.detail)
   }
 
   async listFileFingerprints(source: SearchIndexRefreshSource): Promise<SearchIndexFileFingerprint[]> {
@@ -1531,6 +1729,9 @@ export class MongoSearchIndexStore implements SearchIndexStore {
 
   async clearAllDocuments(): Promise<void> {
     await this.documents.deleteMany({})
+    if (this.mailboxDetails) {
+      await this.mailboxDetails.deleteMany({})
+    }
   }
 
   async listHiddenRules(): Promise<HiddenRuleRecord[]> {
@@ -1594,6 +1795,40 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     }
 
     await stagingDocuments.deleteMany({})
+  }
+
+  async promoteStagedMailboxDetails(
+    stagingMailboxDetailsCollectionName: string,
+    changedMailboxKeys: string[] = [],
+    removedMailboxKeys: string[] = []
+  ): Promise<void> {
+    if (!this.client || !this.mailboxDetails) {
+      return
+    }
+
+    const stagingName = normalizeText(stagingMailboxDetailsCollectionName)
+    if (!stagingName || stagingName === this.mailboxDetailsCollectionName) {
+      return
+    }
+
+    const db = this.client.db(this.dbName)
+    const stagingMailboxDetails = db.collection<MailboxDetailSnapshotRecord>(stagingName)
+    const activeMailboxKeys = uniqueTextValues(changedMailboxKeys)
+    const removedKeys = uniqueTextValues(removedMailboxKeys)
+
+    for (const mailboxKey of removedKeys) {
+      await this.mailboxDetails.deleteMany({ mailboxKey })
+    }
+
+    for (const mailboxKey of activeMailboxKeys) {
+      const stagedDetails = await stagingMailboxDetails.find({ mailboxKey }).sort({ messageId: 1 }).toArray()
+      await this.mailboxDetails.deleteMany({ mailboxKey })
+      if (stagedDetails.length) {
+        await this.mailboxDetails.insertMany(stagedDetails)
+      }
+    }
+
+    await stagingMailboxDetails.deleteMany({})
   }
 
   async search(options: SearchIndexSearchOptions): Promise<SearchIndexPage> {
@@ -1823,7 +2058,9 @@ export async function refreshSearchIndexSourceFromCatalog(
     try {
       let documents: SearchIndexDocument[] = []
       if (normalizedSource === 'mailboxes') {
-        const session = openPstMailbox(rootPath, file.scopePath, file.fileName)
+        const session = openPstMailbox(rootPath, file.scopePath, file.fileName, {
+          collectDetailSnapshots: true
+        })
         const reviewRecords = await reviewStore.listReviews(session.filePath)
         documents = buildSearchIndexDocumentsFromSession(
           session,
@@ -1836,6 +2073,14 @@ export async function refreshSearchIndexSourceFromCatalog(
           },
           reviewRecords
         )
+        try {
+          await searchIndexStore.replaceMailboxDetails(
+            fingerprint.mailboxKey,
+            [...session.messageDetailSnapshots.values()]
+          )
+        } catch (error) {
+          warnOnce(file.scopeLabel, file.fileName, error)
+        }
       } else {
         const reviewRecords = await reviewStore.listReviews(fingerprint.mailboxKey)
         const archiveItems = await extractArchiveBundleItems(fingerprint.mailboxKey, file.scopePath, file.fileName)

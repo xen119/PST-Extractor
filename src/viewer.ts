@@ -28,6 +28,11 @@ export interface ViewerSessionIndex {
   folders: Map<string, FolderSummary>
   messages: Map<string, MessageSummary>
   searchTextByMessageId: Map<string, string>
+  messageDetailSnapshots: Map<string, MessageDetail>
+}
+
+export interface ViewerSessionCreationOptions {
+  collectDetailSnapshots?: boolean
 }
 
 const messageDetailCacheBySession = new WeakMap<ViewerSessionIndex, Map<string, MessageDetail>>()
@@ -43,6 +48,10 @@ function getMessageDetailCache(session: ViewerSessionIndex): Map<string, Message
 
 export function clearMessageDetailCache(session: ViewerSessionIndex): void {
   messageDetailCacheBySession.delete(session)
+}
+
+export function cloneMessageDetail(detail: MessageDetail): MessageDetail {
+  return JSON.parse(JSON.stringify(detail)) as MessageDetail
 }
 
 function getMessageDetailCacheKey(messageId: string, embeddedDepth: number): string {
@@ -1755,7 +1764,8 @@ function indexFolder(
   folder: PSTFolder,
   parentFolderId: string | null,
   parentPath: string,
-  visited: Set<string>
+  visited: Set<string>,
+  options: ViewerSessionCreationOptions
 ): void {
   const descriptorId = safeRead(() => folder.descriptorNodeId.toString(), '')
   const folderId = buildFolderId(descriptorId || `${session.folders.size}`)
@@ -1803,7 +1813,7 @@ function indexFolder(
 
   const childFolders = safeLoadSubFolders(folder, session.warnings, pathName)
   for (const childFolder of childFolders) {
-    indexFolder(session, childFolder, folderId, pathName, visited)
+    indexFolder(session, childFolder, folderId, pathName, visited, options)
   }
 
   try {
@@ -1836,6 +1846,25 @@ function indexFolder(
       const summary = buildSummaryFromMessage(child, folderId, pathName, order, messageId)
       session.messages.set(messageId, summary)
       session.searchTextByMessageId.set(messageId, buildBodySearchText(child))
+      if (options.collectDetailSnapshots) {
+        try {
+          session.messageDetailSnapshots.set(
+            messageId,
+            buildMessageDetail(child, summary, {
+              attachmentBaseUrl: ''
+            })
+          )
+        } catch (err) {
+          const parseError = err instanceof Error ? err.message : String(err)
+          session.messageDetailSnapshots.set(
+            messageId,
+            buildEmptyMessageDetail({
+              ...summary,
+              parseError
+            })
+          )
+        }
+      }
       folderSummary.messageIds.push(messageId)
       folderSummary.indexedMessageCount += 1
       if (summary.isMailLike) {
@@ -1879,6 +1908,9 @@ function indexFolder(
       }
       session.messages.set(messageId, fallbackSummary)
       session.searchTextByMessageId.set(messageId, '')
+      if (options.collectDetailSnapshots) {
+        session.messageDetailSnapshots.set(messageId, buildEmptyMessageDetail(fallbackSummary))
+      }
       folderSummary.messageIds.push(messageId)
       folderSummary.indexedMessageCount += 1
     }
@@ -1916,7 +1948,11 @@ function loadMessageById(
   ) as PSTMessage
 }
 
-export function createViewerSession(filePath: string, fileName: string): ViewerSessionIndex {
+export function createViewerSession(
+  filePath: string,
+  fileName: string,
+  options: ViewerSessionCreationOptions = {}
+): ViewerSessionIndex {
   return withPstFile(filePath, (pstFile) => {
     const messageStore = pstFile.getMessageStore()
     const mailboxName = safeFolderName(
@@ -1938,11 +1974,12 @@ export function createViewerSession(filePath: string, fileName: string): ViewerS
       rootFolderId: '',
       folders: new Map<string, FolderSummary>(),
       messages: new Map<string, MessageSummary>(),
-      searchTextByMessageId: new Map<string, string>()
+      searchTextByMessageId: new Map<string, string>(),
+      messageDetailSnapshots: new Map<string, MessageDetail>()
     }
 
     const rootFolder = pstFile.getRootFolder()
-    indexFolder(session, rootFolder, null, mailboxName, new Set<string>())
+    indexFolder(session, rootFolder, null, mailboxName, new Set<string>(), options)
     session.stats = computeStats(session)
     return session
   })
@@ -2039,6 +2076,13 @@ export function buildMessageDetailFromSession(
   const cached = cache.get(cacheKey)
   if (cached) {
     return cached
+  }
+
+  const snapshot = session.messageDetailSnapshots.get(messageId)
+  if (snapshot) {
+    const clonedSnapshot = cloneMessageDetail(snapshot)
+    cache.set(cacheKey, clonedSnapshot)
+    return clonedSnapshot
   }
 
   const summary = getMessageSummary(session, messageId)

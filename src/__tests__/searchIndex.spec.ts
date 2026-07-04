@@ -6,10 +6,13 @@ import {
   MemorySearchIndexStore,
   MongoSearchIndexStore,
   refreshSearchIndexFromCatalog,
+  refreshSearchIndexSourceFromCatalog,
   type SearchIndexDocument
 } from '../searchIndex'
 import type { ReviewStore } from '../reviewStore'
 import { extractArchiveBundleItems, listArchiveBundleFiles } from '../archiveBundles'
+
+const enronPath = path.resolve('./src/__tests__/testdata/enron.pst')
 
 function makeDocument(overrides: Partial<SearchIndexDocument> = {}): SearchIndexDocument {
   const now = new Date('2024-01-01T00:00:00.000Z').toISOString()
@@ -67,6 +70,14 @@ function makeDocument(overrides: Partial<SearchIndexDocument> = {}): SearchIndex
   }
 
   return base
+}
+
+function stageFixture(sourcePath: string, targetPath: string): void {
+  try {
+    fs.linkSync(sourcePath, targetPath)
+  } catch {
+    fs.copyFileSync(sourcePath, targetPath)
+  }
 }
 
 describe('search index cache', () => {
@@ -519,6 +530,101 @@ describe('search index cache', () => {
       const items = await extractArchiveBundleItems(bundlePath, 'Case1/Search1')
       expect(items).toHaveLength(1)
       expect(items[0].entryName).toBe('good.txt')
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true })
+    }
+  })
+
+  it('rebuilds and removes mailbox detail snapshots during refresh', async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pst-extractor-mailbox-snapshot-'))
+    try {
+      const scopeDir = path.join(rootDir, 'Case1', 'Search1')
+      fs.mkdirSync(scopeDir, { recursive: true })
+
+      const mailboxPath = path.join(scopeDir, 'sample.pst')
+      stageFixture(enronPath, mailboxPath)
+
+      const reviewStore = {
+        kind: 'memory' as const,
+        isPersistent: false,
+        async listReviews() {
+          return []
+        }
+      } as ReviewStore
+
+      class TrackingSearchIndexStore extends MemorySearchIndexStore {
+        detailReplaceCount = 0
+        mailboxDeleteCount = 0
+
+        override async replaceMailboxDetails(
+          mailboxKey: string,
+          details: Parameters<MemorySearchIndexStore['replaceMailboxDetails']>[1]
+        ): Promise<void> {
+          this.detailReplaceCount += 1
+          await super.replaceMailboxDetails(mailboxKey, details)
+        }
+
+        override async deleteMailboxDocuments(mailboxKey: string): Promise<void> {
+          this.mailboxDeleteCount += 1
+          await super.deleteMailboxDocuments(mailboxKey)
+        }
+      }
+
+      const store = new TrackingSearchIndexStore()
+      const firstPlan = await refreshSearchIndexSourceFromCatalog(
+        rootDir,
+        'mailboxes',
+        reviewStore,
+        store
+      )
+      expect(firstPlan.mailboxCount).toBeGreaterThan(0)
+      expect(store.detailReplaceCount).toBeGreaterThan(0)
+
+      const initialSearch = await store.search({
+        scope: 'all',
+        query: '',
+        mode: 'and',
+        mailOnly: true,
+        sort: 'date-desc',
+        page: 1,
+        pageSize: 20,
+        reviewFlaggedOnly: false,
+        reviewTaggedOnly: false,
+        reviewTag: ''
+      })
+      const mailboxItem = initialSearch.items.find((item) => item.sourceType === 'mailbox')
+      expect(mailboxItem).toBeTruthy()
+      if (!mailboxItem) {
+        throw new Error('Expected a mailbox search result')
+      }
+
+      const snapshot = await store.findMailboxDetail(mailboxItem.mailboxKey, mailboxItem.messageId)
+      expect(snapshot).toBeTruthy()
+      expect(snapshot?.id).toBe(mailboxItem.messageId)
+
+      const refreshedAt = new Date(Date.now() + 60_000)
+      fs.utimesSync(mailboxPath, refreshedAt, refreshedAt)
+
+      const secondPlan = await refreshSearchIndexSourceFromCatalog(
+        rootDir,
+        'mailboxes',
+        reviewStore,
+        store
+      )
+      expect(secondPlan.changedCount).toBeGreaterThan(0)
+      expect(store.detailReplaceCount).toBeGreaterThan(1)
+      expect(await store.findMailboxDetail(mailboxItem.mailboxKey, mailboxItem.messageId)).toBeTruthy()
+
+      fs.unlinkSync(mailboxPath)
+      const thirdPlan = await refreshSearchIndexSourceFromCatalog(
+        rootDir,
+        'mailboxes',
+        reviewStore,
+        store
+      )
+      expect(thirdPlan.removedCount).toBeGreaterThan(0)
+      expect(store.mailboxDeleteCount).toBeGreaterThan(0)
+      expect(await store.findMailboxDetail(mailboxItem.mailboxKey, mailboxItem.messageId)).toBeNull()
     } finally {
       fs.rmSync(rootDir, { recursive: true, force: true })
     }

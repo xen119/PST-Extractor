@@ -19,6 +19,9 @@ async function main(): Promise<void> {
     const stagingDocumentsCollectionName = normalizeText(
       process.env.PST_SEARCH_INDEX_STAGING_DOCUMENTS_COLLECTION
     )
+    const stagingMailboxDetailsCollectionName = normalizeText(
+      process.env.PST_SEARCH_INDEX_STAGING_MAILBOX_DETAILS_COLLECTION
+    )
     const source = normalizeRefreshSource(process.env.PST_SEARCH_INDEX_REFRESH_SOURCE)
 
     if (!pstRootDir) {
@@ -27,10 +30,14 @@ async function main(): Promise<void> {
     if (!stagingDocumentsCollectionName) {
       throw new Error('Staging documents collection name is required')
     }
+    if (!stagingMailboxDetailsCollectionName) {
+      throw new Error('Staging mailbox detail snapshot collection name is required')
+    }
 
     const reviewStore = await createReviewStoreFromEnv(process.env)
     const searchIndexStore = await createSearchIndexStoreFromEnv(process.env, {
-      documentsCollectionName: stagingDocumentsCollectionName
+      documentsCollectionName: stagingDocumentsCollectionName,
+      mailboxDetailsCollectionName: stagingMailboxDetailsCollectionName
     })
 
     const plan = await refreshSearchIndexSourceFromCatalog(

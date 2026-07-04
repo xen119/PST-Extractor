@@ -751,11 +751,12 @@ describe('pst review api', () => {
     expect(docsHtml).toContain('/api/openapi.json')
   })
 
-  it('caches mailbox detail loads and refreshes them after review changes', async () => {
+  it('serves mailbox detail from snapshots and refreshes them after review changes', async () => {
     rootDir = makeTempDir('pst-review-detail-cache-')
     const pstDir = path.join(rootDir, 'PST')
     fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
-    stageFixture(enronPath, path.join(pstDir, 'Case1', 'Search1', 'sample.pst'))
+    const mailboxPath = path.join(pstDir, 'Case1', 'Search1', 'sample.pst')
+    stageFixture(enronPath, mailboxPath)
 
     const started = await startApp(pstDir)
     server = started.server
@@ -787,6 +788,9 @@ describe('pst review api', () => {
       throw new Error('Expected a mailbox message')
     }
 
+    const snapshotBeforeDetail = await started.searchIndexStore.findMailboxDetail(mailboxPath, message.id)
+    expect(snapshotBeforeDetail).toBeTruthy()
+
     const { PSTUtil } = require('../PSTUtil.class')
     const loadSpy = jest.spyOn(PSTUtil, 'detectAndLoadPSTObject')
     const reviewSpy = jest.spyOn(started.reviewStore, 'getReview')
@@ -805,7 +809,7 @@ describe('pst review api', () => {
 
     expect(detailTwo.detail).toEqual(detailOne.detail)
     expect(extractOne.record.review.flagged).toBe(detailOne.detail.review.flagged)
-    expect(loadSpy).toHaveBeenCalledTimes(1)
+    expect(loadSpy).not.toHaveBeenCalled()
     expect(reviewSpy).toHaveBeenCalledTimes(1)
 
     await requestJson(
@@ -834,8 +838,68 @@ describe('pst review api', () => {
 
     expect(detailAfterUpdate.detail.review.flagged).toBe(true)
     expect(extractAfterUpdate.record.review.flagged).toBe(true)
-    expect(loadSpy).toHaveBeenCalledTimes(1)
+    expect(loadSpy).not.toHaveBeenCalled()
     expect(reviewSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('backfills a missing mailbox snapshot from PST once and reuses it thereafter', async () => {
+    rootDir = makeTempDir('pst-review-detail-backfill-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
+    const mailboxPath = path.join(pstDir, 'Case1', 'Search1', 'sample.pst')
+    stageFixture(enronPath, mailboxPath)
+
+    const started = await startApp(pstDir)
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const opened = await requestJson(`${started.baseUrl}/api/psts/open`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        scopePath: 'Case1/Search1',
+        fileName: 'sample.pst'
+      })
+    })
+
+    const folder = findMailFolder(opened.tree)
+    expect(folder).toBeTruthy()
+
+    const folderPage = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/folders/${encodeURIComponent(
+        folder!.id
+      )}/messages?page=1&pageSize=20`
+    )
+    const message = folderPage.page.items.find((item: { isMailLike: boolean }) => item.isMailLike)
+    expect(message).toBeTruthy()
+    if (!message) {
+      throw new Error('Expected a mailbox message')
+    }
+
+    await started.searchIndexStore.deleteMailboxDetails(mailboxPath)
+
+    const { PSTUtil } = require('../PSTUtil.class')
+    const loadSpy = jest.spyOn(PSTUtil, 'detectAndLoadPSTObject')
+    const upsertSpy = jest.spyOn(started.searchIndexStore, 'upsertMailboxDetail')
+
+    const detailOne = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(message.id)}`
+    )
+    const loadCountAfterFirstDetail = loadSpy.mock.calls.length
+    const upsertCountAfterFirstDetail = upsertSpy.mock.calls.length
+    const detailTwo = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(message.id)}`
+    )
+
+    expect(detailTwo.detail).toEqual(detailOne.detail)
+    expect(loadCountAfterFirstDetail).toBeGreaterThan(0)
+    expect(loadSpy.mock.calls.length).toBe(loadCountAfterFirstDetail)
+    expect(upsertSpy).toHaveBeenCalledTimes(1)
+    expect(upsertCountAfterFirstDetail).toBe(1)
+    expect(await started.searchIndexStore.findMailboxDetail(mailboxPath, message.id)).toBeTruthy()
   })
 
   it('moves PSTs into and out of the removed archive without deleting them', async () => {

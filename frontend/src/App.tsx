@@ -511,6 +511,12 @@ export function App() {
     mailboxDetailInFlightRef.current.delete(cacheKey)
   }
 
+  function clearMailboxPreviewCacheForRefresh(source: SearchIndexRefreshSource): void {
+    if (source === 'mailboxes') {
+      clearMailboxDetailCache()
+    }
+  }
+
   function loadMailboxMessageDetail(messageId: string): Promise<MessageDetail> {
     if (!sessionId) {
       return Promise.reject(new Error('Mailbox session not available'))
@@ -2066,6 +2072,7 @@ export function App() {
           return
         }
         setHiddenRules(hiddenRulesResponse.items || [])
+        clearMailboxPreviewCacheForRefresh(source)
         await refreshCurrentPageRef.current()
         if (searchIndexRefreshPollJobIdRef.current[source] !== jobId) {
           return
@@ -2124,6 +2131,7 @@ export function App() {
       }
       if (status.status === 'succeeded') {
         await api.hiddenFilters.list().then((result) => setHiddenRules(result.items || []))
+        clearMailboxPreviewCacheForRefresh(source)
         await refreshCurrentPage()
         setSearchIndexRefreshStatuses((current) => ({ ...current, [source]: null }))
       }

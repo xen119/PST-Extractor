@@ -1552,6 +1552,27 @@ function createAttachmentBaseUrl(sessionId: string, messageId: string): string {
   )}/attachments/`
 }
 
+function applyMailboxAttachmentDownloadUrls(
+  detail: MessageDetail,
+  sessionId: string
+): MessageDetail {
+  const detailId = normalizeText(detail.id)
+  const attachmentBaseUrl = detailId ? createAttachmentBaseUrl(sessionId, detailId) : ''
+  return {
+    ...detail,
+    attachments: (detail.attachments || []).map((attachment) => ({
+      ...attachment,
+      downloadUrl:
+        attachment.isDownloadable && attachmentBaseUrl
+          ? `${attachmentBaseUrl}${attachment.index}`
+          : '',
+      embeddedMessage: attachment.embeddedMessage
+        ? applyMailboxAttachmentDownloadUrls(attachment.embeddedMessage, sessionId)
+        : null
+    }))
+  }
+}
+
 function normalizeReviewState(review: ReviewState | null): ReviewState {
   return (
     review || {
@@ -1585,6 +1606,39 @@ function buildReviewedDetail(
     ...detail,
     review: normalizeReviewState(review)
   }
+}
+
+async function resolveMailboxMessageDetail(
+  session: SessionRecord,
+  messageId: string,
+  searchIndexStore: SearchIndexStore
+): Promise<MessageDetail> {
+  const summary = session.index.messages.get(messageId) || null
+  const snapshot = await searchIndexStore
+    .findMailboxDetail(session.mailboxKey, messageId)
+    .catch(() => null)
+
+  if (snapshot) {
+    try {
+      return applyMailboxAttachmentDownloadUrls(snapshot, session.id)
+    } catch (error) {
+      if (!summary) {
+        throw error
+      }
+    }
+  }
+
+  if (!summary) {
+    throw createAppError(404, `Unknown message: ${messageId}`)
+  }
+
+  const detail = buildMessageDetailFromSession(session.index, messageId, 1)
+  try {
+    await searchIndexStore.upsertMailboxDetail(session.mailboxKey, detail)
+  } catch {
+    // Ignore snapshot backfill failures and keep serving the live PST detail.
+  }
+  return applyMailboxAttachmentDownloadUrls(detail, session.id)
 }
 
 function buildMailboxDetailCacheKey(messageId: string, reviewerUsername: string): string {
@@ -1685,7 +1739,8 @@ async function buildMessageDetailResponse(
   session: SessionRecord,
   messageId: string,
   reviewStore: ReviewStore,
-  reviewerUsername: string
+  reviewerUsername: string,
+  searchIndexStore: SearchIndexStore
 ): Promise<ReviewedMessageDetail> {
   const cacheKey = buildMailboxDetailCacheKey(messageId, reviewerUsername)
   const cached = session.messageDetailCache.get(cacheKey)
@@ -1694,41 +1749,11 @@ async function buildMessageDetailResponse(
   }
 
   const detailPromise = (async () => {
-    const summary = session.index.messages.get(messageId)
-    if (!summary) {
-      throw createAppError(404, `Unknown message: ${messageId}`)
-    }
-
-    const review = await reviewStore.getReview(session.filePath, messageId, reviewerUsername)
-    if (summary.parseError) {
-      return buildReviewedDetail(buildEmptyMessageDetail(summary), review)
-    }
-
-    try {
-      const detail = buildMessageDetailFromSession(session.index, messageId, 1)
-      return buildReviewedDetail(
-        {
-          ...detail,
-          attachments: detail.attachments.map((attachment) => ({
-            ...attachment,
-            downloadUrl:
-              attachment.isDownloadable
-                ? attachment.downloadUrl || `${createAttachmentBaseUrl(session.id, messageId)}${attachment.index}`
-                : ''
-          }))
-        },
-        review
-      )
-    } catch (error) {
-      const parseError = error instanceof Error ? error.message : String(error)
-      return buildReviewedDetail(
-        buildEmptyMessageDetail({
-          ...summary,
-          parseError
-        }),
-        review
-      )
-    }
+    const [review, detail] = await Promise.all([
+      reviewStore.getReview(session.filePath, messageId, reviewerUsername),
+      resolveMailboxMessageDetail(session, messageId, searchIndexStore)
+    ])
+    return buildReviewedDetail(detail, review)
   })()
 
   session.messageDetailCache.set(cacheKey, detailPromise)
@@ -2561,6 +2586,9 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
             error: refreshStatus.error || undefined
           }
         })
+        if (refreshStatus.source === 'mailboxes' && refreshStatus.status === 'succeeded') {
+          clearOpenMailboxDetailCaches()
+        }
       }
     })
 
@@ -3201,12 +3229,20 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     const normalizedMailboxKey = normalizeText(mailboxKey)
     for (const [sessionId, session] of sessions.entries()) {
       if (session.filePath === normalizedMailboxKey) {
-        session.messageDetailCache.clear()
+        invalidateMailboxDetailCache(session)
+        session.index.messageDetailSnapshots.clear()
         sessions.delete(sessionId)
         closedSessionIds.push(sessionId)
       }
     }
     return closedSessionIds
+  }
+
+  function clearOpenMailboxDetailCaches(): void {
+    for (const session of sessions.values()) {
+      invalidateMailboxDetailCache(session)
+      session.index.messageDetailSnapshots.clear()
+    }
   }
 
   app.disable('x-powered-by')
@@ -5988,7 +6024,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         session,
         messageId,
         reviewStore,
-        reviewerUsername
+        reviewerUsername,
+        searchIndexStore
       )
       recordAuditEvent({
         req,
@@ -6021,7 +6058,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         session,
         messageId,
         reviewStore,
-        reviewerUsername
+        reviewerUsername,
+        searchIndexStore
       )
       const fields = normalizeExtractionFields(req.query.fields)
       recordAuditEvent({
@@ -6064,6 +6102,17 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         reviewerUsername
       )
       const folder = getFolderSummary(session.index, folderId)
+      const detailByMessageId = new Map<string, MessageDetail>()
+      if (!isSummaryOnlyExtraction(fields)) {
+        await Promise.all(
+          page.items.map(async (item) => {
+            detailByMessageId.set(
+              item.id,
+              await resolveMailboxMessageDetail(session, item.id, searchIndexStore)
+            )
+          })
+        )
+      }
       const extraction = buildFolderExtractionPage(
         page,
         new Map(page.items.map((item) => [item.id, item.review])),
@@ -6072,7 +6121,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           if (isSummaryOnlyExtraction(fieldList)) {
             return buildSummaryExtractionRecord(summary, review, fieldList)
           }
-          const detail = buildMessageDetailFromSession(session.index, summary.id, 1)
+          const detail = detailByMessageId.get(summary.id) || buildMessageDetailFromSession(session.index, summary.id, 1)
           return buildMessageExtractionRecord(detail, review, fieldList)
         }
       )
@@ -6118,7 +6167,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         session,
         messageId,
         reviewStore,
-        reviewerUsername
+        reviewerUsername,
+        searchIndexStore
       )
       const fileName = `${safeDownloadName(detail.subject || 'message', 'message')}.json`
       responseBinary(

@@ -1,6 +1,10 @@
 import * as fs from 'fs'
 import * as path from 'path'
-import { createViewerSession, type ViewerSessionIndex } from './viewer'
+import {
+  createViewerSession,
+  type ViewerSessionCreationOptions,
+  type ViewerSessionIndex
+} from './viewer'
 
 export interface PstCatalogEntry {
   fileName: string
@@ -377,28 +381,36 @@ export function restorePstMailboxFromRemoved(
   }
 }
 
-export function openPstMailbox(rootPath: string, fileName: string): ViewerSessionIndex
+export function openPstMailbox(
+  rootPath: string,
+  fileName: string,
+  options?: ViewerSessionCreationOptions
+): ViewerSessionIndex
 export function openPstMailbox(
   rootPath: string,
   scopePath: string,
-  fileName: string
+  fileName: string,
+  options?: ViewerSessionCreationOptions
 ): ViewerSessionIndex
 export function openPstMailbox(
   rootPath: string,
   scopePathOrFileName: string,
-  fileNameMaybe?: string
+  fileNameOrOptions?: string | ViewerSessionCreationOptions,
+  optionsMaybe?: ViewerSessionCreationOptions
 ): ViewerSessionIndex {
+  const hasExplicitFileName = typeof fileNameOrOptions === 'string'
+  const options = (hasExplicitFileName ? optionsMaybe : fileNameOrOptions) || {}
   const resolvedPath =
-    fileNameMaybe === undefined
-      ? resolvePstMailboxPath(rootPath, scopePathOrFileName)
-      : resolvePstMailboxPath(rootPath, scopePathOrFileName, fileNameMaybe)
+    hasExplicitFileName
+      ? resolvePstMailboxPath(rootPath, scopePathOrFileName, fileNameOrOptions)
+      : resolvePstMailboxPath(rootPath, scopePathOrFileName)
   const resolvedFileName = String(
-    fileNameMaybe === undefined ? path.basename(scopePathOrFileName) : fileNameMaybe
+    hasExplicitFileName ? fileNameOrOptions : path.basename(scopePathOrFileName)
   )
 
   if (!fs.existsSync(resolvedPath) || !fs.statSync(resolvedPath).isFile()) {
     throw new Error(`Mailbox not found: ${resolvedFileName}`)
   }
 
-  return createViewerSession(resolvedPath, path.basename(resolvedFileName))
+  return createViewerSession(resolvedPath, path.basename(resolvedFileName), options)
 }
