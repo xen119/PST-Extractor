@@ -425,6 +425,7 @@ export function App() {
   const messagePreviewRequestRef = React.useRef(0)
   const skipNextMessageReloadRef = React.useRef(false)
   const skipNextMailboxOpenRef = React.useRef('')
+  const mailboxOpenTimerRef = React.useRef<number | null>(null)
   const previewRequestKeyRef = React.useRef('')
   const mailboxDetailCacheRef = React.useRef(new Map<string, MessageDetail>())
   const mailboxPreviewCacheRef = React.useRef(new Map<string, MessageDetail>())
@@ -498,6 +499,8 @@ export function App() {
   function invalidateMessagePreview(loading = true): number {
     messagePreviewRequestRef.current += 1
     previewRequestKeyRef.current = ''
+    skipNextMailboxOpenRef.current = ''
+    clearMailboxOpenTimer()
     setSelectedMessage(null)
     setMessageLoading(loading)
     return messagePreviewRequestRef.current
@@ -558,6 +561,13 @@ export function App() {
     }
   }
 
+  function clearMailboxOpenTimer(): void {
+    if (mailboxOpenTimerRef.current !== null) {
+      window.clearTimeout(mailboxOpenTimerRef.current)
+      mailboxOpenTimerRef.current = null
+    }
+  }
+
   function clearMailboxPreviewCacheForRefresh(source: SearchIndexRefreshSource): void {
     if (source === 'mailboxes') {
       clearMailboxDetailCache()
@@ -605,6 +615,21 @@ export function App() {
       throw error
     })
   }
+
+  function scheduleMailboxOpen(
+    fileName: string,
+    scopePath: string,
+    catalogResponse?: PstCatalogResponse,
+    options: OpenMailboxOptions = {}
+  ): void {
+    clearMailboxOpenTimer()
+    mailboxOpenTimerRef.current = window.setTimeout(() => {
+      mailboxOpenTimerRef.current = null
+      void openMailbox(fileName, scopePath, catalogResponse, options)
+    }, 250)
+  }
+
+  React.useEffect(() => () => clearMailboxOpenTimer(), [])
 
   function prefetchMailboxMessageDetail(messageId: string): void {
     void loadMailboxMessageDetail(messageId).catch(() => undefined)
@@ -1232,6 +1257,9 @@ export function App() {
     }
 
     if (!activeSessionId || !mailboxSessionMatchesSelection) {
+      if (skipNextMailboxOpenRef.current === previewKey) {
+        return
+      }
       if (!messageLoading) {
         setSelectedMessage(null)
         setMessageLoading(false)
@@ -2013,6 +2041,7 @@ export function App() {
     catalogResponse?: PstCatalogResponse,
     options: OpenMailboxOptions = {}
   ): Promise<void> {
+    clearMailboxOpenTimer()
     if (!options.preservePreview) {
       invalidateMessagePreview(Boolean(options.selectedMessageId))
     }
@@ -2120,7 +2149,7 @@ export function App() {
           const nextPreviewKey = getMailboxPreviewKey(message.id, nextFileName, nextScopePath)
           previewRequestKeyRef.current = nextPreviewKey
           mailboxPreviewCacheRef.current.set(nextPreviewKey, response.detail)
-          void openMailbox(nextFileName, nextScopePath, catalog || undefined, {
+          scheduleMailboxOpen(nextFileName, nextScopePath, catalog || undefined, {
             preserveWorkspaceMode: true,
             preservePreview: true
           })
