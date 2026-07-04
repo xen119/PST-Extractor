@@ -1406,6 +1406,23 @@ describe('shell and preview', () => {
     const searchResultsPage: PageResponse<MessageSummary> = {
       items: [
         {
+          id: 'search-hit-current',
+          messageId: 'search-hit-current',
+          subject: 'Current mailbox search result',
+          senderName: 'Alice Example',
+          senderEmailAddress: 'alice@example.com',
+          sortDate: new Date().toISOString(),
+          fileName: 'mailbox-a.pst',
+          scopePath: 'Case Alpha/Search One',
+          isMailLike: true,
+          review: {
+            flagged: false,
+            tags: [],
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          }
+        },
+        {
           id: 'search-hit',
           messageId: 'search-hit',
           subject: 'Target search result',
@@ -1514,6 +1531,9 @@ describe('shell and preview', () => {
       if (sessionId === 'session-b' && messageId === 'search-hit') {
         return { sessionId, detail: targetDetail }
       }
+      if (sessionId === 'session-a' && messageId === 'search-hit-current') {
+        return { sessionId, detail: currentDetail }
+      }
       return { sessionId, detail: currentDetail }
     })
 
@@ -1530,8 +1550,15 @@ describe('shell and preview', () => {
     await user.selectOptions(screen.getByRole('combobox', { name: 'Scope' }), 'all')
     await user.click(screen.getByRole('button', { name: 'Run search' }))
 
+    expect(await screen.findByText('Current mailbox body')).toBeInTheDocument()
+    const callsBeforeSecondSelection = vi.mocked(api.search).mock.calls.length
+    await user.click(screen.getByRole('button', { name: /Target search result/ }))
+
     expect(await screen.findByText('Target mailbox body')).toBeInTheDocument()
     expect(api.pst.open).toHaveBeenCalledWith('Case Beta/Search Two', 'mailbox-b.pst')
+    await waitFor(() => {
+      expect(vi.mocked(api.search).mock.calls.length).toBe(callsBeforeSecondSelection)
+    })
     expect(screen.getByText('Target mailbox body')).toBeInTheDocument()
   })
 

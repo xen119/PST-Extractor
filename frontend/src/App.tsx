@@ -339,6 +339,7 @@ export function App() {
   const [caseOptions, setCaseOptions] = React.useState<CatalogScope[]>([])
   const [selectedCasePath, setSelectedCasePath] = React.useState('')
   const [selectedScopePath, setSelectedScopePath] = React.useState('')
+  const [mailboxSearchScopePath, setMailboxSearchScopePath] = React.useState('')
   const [selectedPstFileName, setSelectedPstFileName] = React.useState('')
   const [sessionId, setSessionId] = React.useState<string | null>(null)
   const [sessionSummary, setSessionSummary] = React.useState<SessionOpenResponse['summary'] | null>(null)
@@ -420,6 +421,7 @@ export function App() {
     items: null
   })
   const messagePreviewRequestRef = React.useRef(0)
+  const skipNextSearchReloadRef = React.useRef(false)
   const mailboxDetailCacheRef = React.useRef(new Map<string, MessageDetail>())
   const mailboxDetailInFlightRef = React.useRef(new Map<string, Promise<MessageDetail>>())
 
@@ -462,6 +464,21 @@ export function App() {
     () => getSearchOptionsForCase(caseOptions, selectedCasePath),
     [caseOptions, selectedCasePath]
   )
+  const activeSearchScopePath = React.useMemo(() => {
+    if (sourceType === 'mailbox') {
+      return mailboxSearchScopePath || selectedScopePath || selectedCasePath
+    }
+    return selectedScopePath || selectedCasePath
+  }, [mailboxSearchScopePath, selectedCasePath, selectedScopePath, sourceType])
+  const searchSessionKey = React.useMemo(() => {
+    if (workspaceMode !== 'search') {
+      return sessionId || ''
+    }
+    if (sourceType === 'mailbox' && searchScope === 'pst') {
+      return sessionId || ''
+    }
+    return 'search'
+  }, [searchScope, sessionId, sourceType, workspaceMode])
   const activeCatalogScope = React.useMemo(() => {
     if (!catalog?.scopes?.length) {
       return null
@@ -676,9 +693,11 @@ export function App() {
     setMfaReminderDismissed(mfaEnforced ? false : readReminderDismissed(username))
     const rememberedCasePath = readWorkspaceStorageItem('casePath', true, username, '')
     const rememberedScopePath = readWorkspaceStorageItem('scopePath', true, username, '')
+    const rememberedMailboxSearchScopePath = readWorkspaceStorageItem('searchScopePath', true, username, '')
     const normalizedCasePath = getCasePathFromScopePath(rememberedCasePath || rememberedScopePath)
     setSelectedCasePath(normalizedCasePath)
     setSelectedScopePath(rememberedScopePath || normalizedCasePath)
+    setMailboxSearchScopePath(rememberedMailboxSearchScopePath || rememberedScopePath || normalizedCasePath)
     setSelectedPstFileName(readWorkspaceStorageItem('pstFileName', true, username, ''))
     setCurrentFolderId(readWorkspaceStorageItem('folderId', true, username, ''))
     setSelectedMessageId(readWorkspaceStorageItem('messageId', true, username, ''))
@@ -760,6 +779,7 @@ export function App() {
 
     writeWorkspaceStorageItem('casePath', true, username, selectedCasePath)
     writeWorkspaceStorageItem('scopePath', true, username, selectedScopePath)
+    writeWorkspaceStorageItem('searchScopePath', true, username, mailboxSearchScopePath)
     writeWorkspaceStorageItem('pstFileName', true, username, selectedPstFileName)
     writeWorkspaceStorageItem('folderId', true, username, currentFolderId)
     writeWorkspaceStorageItem('messageId', true, username, selectedMessageId)
@@ -788,6 +808,7 @@ export function App() {
     selectedMessageId,
     selectedPstFileName,
     selectedScopePath,
+    mailboxSearchScopePath,
     sort,
     username
   ])
@@ -834,6 +855,9 @@ export function App() {
         }
         if (nextScopePath !== selectedScopePath) {
           setSelectedScopePath(nextScopePath)
+          if (sourceType === 'mailbox') {
+            setMailboxSearchScopePath(nextScopePath)
+          }
         }
       } catch (error) {
         if (!cancelled) {
@@ -906,6 +930,10 @@ export function App() {
     if (!workspaceReady || (workspaceMode !== 'search' && (!activeSessionId || !activeFolderId))) {
       return
     }
+    if (skipNextSearchReloadRef.current) {
+      skipNextSearchReloadRef.current = false
+      return
+    }
     const sessionToken = activeSessionId
 
     let cancelled = false
@@ -933,7 +961,7 @@ export function App() {
                 sort,
                 reviewFlagged: reviewFlaggedOnly,
                 reviewTagged: reviewTaggedOnly,
-                scopePath: selectedScopePath || selectedCasePath,
+                scopePath: activeSearchScopePath,
                 sessionId: sourceType === 'mailbox' && searchScope === 'pst' && activeSessionId ? sessionToken : undefined
               }
             : null
@@ -999,12 +1027,11 @@ export function App() {
     reviewTaggedOnly,
     searchQuery,
     searchScope,
-    selectedCasePath,
-    selectedScopePath,
-    sessionId,
     sort,
     sourceType,
     username,
+    activeSearchScopePath,
+    searchSessionKey,
     workspaceMode,
     workspaceReady
   ])
@@ -1792,7 +1819,7 @@ export function App() {
         sort,
         reviewFlagged: reviewFlaggedOnly,
         reviewTagged: reviewTaggedOnly,
-        scopePath: selectedScopePath || selectedCasePath,
+        scopePath: activeSearchScopePath,
         sessionId: sourceType === 'mailbox' && effectiveSearchScope === 'pst' && sessionId ? sessionId : undefined
       })
       setCurrentPage(normalizeSearchResultsPage(response.page))
@@ -1888,6 +1915,9 @@ export function App() {
       const nextFileName = message.fileName || currentFileName
       const nextScopePath = message.scopePath || currentScopePath
       if (nextFileName && nextScopePath) {
+        if (workspaceMode === 'search' && sourceType === 'mailbox' && searchScope !== 'pst') {
+          skipNextSearchReloadRef.current = true
+        }
         await openMailbox(nextFileName, nextScopePath, catalog || undefined, {
           preserveWorkspaceMode: true,
           selectedMessageId: message.id
@@ -2188,6 +2218,7 @@ export function App() {
           ? 'all'
           : searchScope
         : 'search'
+    const scopePath = workspaceMode === 'search' ? activeSearchScopePath : selectedScopePath || selectedCasePath
 
     return {
       workspaceMode,
@@ -2199,7 +2230,7 @@ export function App() {
       sort,
       reviewFlagged: reviewFlaggedOnly,
       reviewTagged: reviewTaggedOnly,
-      scopePath: selectedScopePath || selectedCasePath,
+      scopePath,
       sessionId:
         workspaceMode === 'folder'
           ? sessionId || undefined
@@ -2340,6 +2371,9 @@ export function App() {
         const nextScopePath = getDefaultSearchPathForCase(caseOptions, nextCasePath)
         setSelectedCasePath(nextCasePath)
         setSelectedScopePath(nextScopePath)
+        if (sourceType === 'mailbox') {
+          setMailboxSearchScopePath(nextScopePath)
+        }
         writeWorkspaceStorageItem('casePath', true, username, nextCasePath)
         writeWorkspaceStorageItem('scopePath', true, username, nextScopePath)
       }}
@@ -2348,11 +2382,17 @@ export function App() {
         const nextCasePath = getCasePathFromScopePath(nextScopePath)
         setSelectedCasePath(nextCasePath)
         setSelectedScopePath(nextScopePath)
+        if (sourceType === 'mailbox') {
+          setMailboxSearchScopePath(nextScopePath)
+        }
         writeWorkspaceStorageItem('casePath', true, username, nextCasePath)
         writeWorkspaceStorageItem('scopePath', true, username, nextScopePath)
       }}
       onSourceTypeChange={(value) => {
         setSourceType(value)
+        if (value === 'mailbox') {
+          setMailboxSearchScopePath(selectedScopePath || selectedCasePath)
+        }
         writeWorkspaceStorageItem('sourceType', true, username, value)
       }}
       canRefreshSearchIndex={canManageUsers}
@@ -2416,7 +2456,7 @@ export function App() {
         const scope = workspaceMode === 'search' && searchScope !== 'pst' ? searchScope : 'pst'
         const url = api.session.flaggedBundleUrl({
           scope,
-          scopePath: selectedScopePath || selectedCasePath,
+          scopePath: activeSearchScopePath,
           sessionId,
           query: searchQuery,
           mailOnly,
