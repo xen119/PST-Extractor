@@ -1410,17 +1410,27 @@ describe('shell and preview', () => {
       senderName: 'Bob Example',
       senderEmailAddress: 'bob@example.com',
       sortDate: new Date().toISOString(),
-      bodyText: 'Target mailbox body'
+      bodyText: 'Target mailbox body',
+      attachments: [
+        {
+          attachmentId: 'search-hit:attachment:0',
+          index: 0,
+          filename: 'report.txt',
+          longFilename: 'report.txt',
+          downloadFilename: 'report.txt',
+          mimeTag: 'text/plain',
+          size: 12,
+          attachMethod: 1,
+          contentId: '',
+          pathname: '',
+          longPathname: '',
+          isEmbeddedMessage: false,
+          isDownloadable: true,
+          downloadUrl: '/api/items/search-hit/attachments/0'
+        }
+      ]
     }
     const targetItemDetail = createDeferred<{ detail: MessageDetail }>()
-    const openTargetMailbox = createDeferred<{
-      sessionId: string
-      scopePath: string
-      scopeLabel: string
-      fileName: string
-      summary: { fileName: string; mailboxName: string }
-      tree: FolderNode
-    }>()
     const searchResultsPage: PageResponse<MessageSummary> = {
       items: [
         {
@@ -1476,26 +1486,20 @@ describe('shell and preview', () => {
     vi.spyOn(api.auth, 'me').mockResolvedValueOnce(authenticatedStatus)
     vi.spyOn(api.pst, 'catalog').mockResolvedValueOnce(catalog)
     vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue({ items: [] })
-    vi.spyOn(api.pst, 'open').mockImplementation(async (_scopePath, fileName) => {
-      if (fileName === 'mailbox-b.pst') {
-        return openTargetMailbox.promise
-      }
-
-      return {
-        sessionId: 'session-a',
-        scopePath: 'Case Alpha/Search One',
-        scopeLabel: 'Search One',
+    vi.spyOn(api.pst, 'open').mockResolvedValue({
+      sessionId: 'session-a',
+      scopePath: 'Case Alpha/Search One',
+      scopeLabel: 'Search One',
+      fileName: 'mailbox-a.pst',
+      summary: {
         fileName: 'mailbox-a.pst',
-        summary: {
-          fileName: 'mailbox-a.pst',
-          mailboxName: 'mailbox-a.pst'
-        },
-        tree: {
-          id: 'root-a',
-          displayName: 'Inbox',
-          path: 'root-a',
-          children: []
-        }
+        mailboxName: 'mailbox-a.pst'
+      },
+      tree: {
+        id: 'root-a',
+        displayName: 'Inbox',
+        path: 'root-a',
+        children: []
       }
     })
     vi.spyOn(api.session, 'folderMessages').mockResolvedValue({
@@ -1562,6 +1566,7 @@ describe('shell and preview', () => {
 
     expect(await screen.findByText('Current mailbox body')).toBeInTheDocument()
     const openCallCountBeforeTarget = vi.mocked(api.pst.open).mock.calls.length
+    const detailCallCountBeforeTarget = vi.mocked(api.session.messageDetail).mock.calls.length
     await user.click(screen.getByRole('button', { name: /Target search result/ }))
 
     expect(await screen.findByText('Loading preview...')).toBeInTheDocument()
@@ -1571,31 +1576,15 @@ describe('shell and preview', () => {
     })
     targetItemDetail.resolve({ detail: targetDetail })
     expect(await screen.findByText('Target mailbox body')).toBeInTheDocument()
-    await waitFor(() => {
-      expect(api.pst.open).toHaveBeenCalledWith('Case Beta/Search Two', 'mailbox-b.pst')
-    }, { timeout: 3000 })
+    expect(screen.getByRole('link', { name: 'Download' })).toHaveAttribute(
+      'href',
+      '/api/items/search-hit/attachments/0'
+    )
     expect(screen.queryByText('Loading preview...')).not.toBeInTheDocument()
-    const detailCallCountBeforeMailboxOpen = vi.mocked(api.session.messageDetail).mock.calls.length
-    openTargetMailbox.resolve({
-      sessionId: 'session-b',
-      scopePath: 'Case Beta/Search Two',
-      scopeLabel: 'Search Two',
-      fileName: 'mailbox-b.pst',
-      summary: {
-        fileName: 'mailbox-b.pst',
-        mailboxName: 'mailbox-b.pst'
-      },
-      tree: {
-        id: 'root-b',
-        displayName: 'Inbox',
-        path: 'root-b',
-        children: []
-      }
-    })
     await waitFor(() => {
-      expect(vi.mocked(api.session.messageDetail).mock.calls.length).toBe(detailCallCountBeforeMailboxOpen)
+      expect(vi.mocked(api.session.messageDetail).mock.calls.length).toBe(detailCallCountBeforeTarget)
     })
-    expect(vi.mocked(api.pst.open).mock.calls.length).toBe(openCallCountBeforeTarget + 1)
+    expect(vi.mocked(api.pst.open).mock.calls.length).toBe(openCallCountBeforeTarget)
   })
 
   it('shows the tag manager modal', async () => {

@@ -1546,18 +1546,17 @@ function isReviewMatch(
   return true
 }
 
-function createAttachmentBaseUrl(sessionId: string, messageId: string): string {
+function createMailboxAttachmentBaseUrl(sessionId: string, messageId: string): string {
   return `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(
     messageId
   )}/attachments/`
 }
 
-function applyMailboxAttachmentDownloadUrls(
-  detail: MessageDetail,
-  sessionId: string
-): MessageDetail {
-  const detailId = normalizeText(detail.id)
-  const attachmentBaseUrl = detailId ? createAttachmentBaseUrl(sessionId, detailId) : ''
+function createItemAttachmentBaseUrl(itemId: string): string {
+  return `/api/items/${encodeURIComponent(itemId)}/attachments/`
+}
+
+function applyAttachmentDownloadUrls(detail: MessageDetail, attachmentBaseUrl: string): MessageDetail {
   return {
     ...detail,
     attachments: (detail.attachments || []).map((attachment) => ({
@@ -1567,10 +1566,25 @@ function applyMailboxAttachmentDownloadUrls(
           ? `${attachmentBaseUrl}${attachment.index}`
           : '',
       embeddedMessage: attachment.embeddedMessage
-        ? applyMailboxAttachmentDownloadUrls(attachment.embeddedMessage, sessionId)
+        ? applyAttachmentDownloadUrls(attachment.embeddedMessage, attachmentBaseUrl)
         : null
     }))
   }
+}
+
+function applyMailboxAttachmentDownloadUrls(
+  detail: MessageDetail,
+  sessionId: string
+): MessageDetail {
+  const detailId = normalizeText(detail.id)
+  const attachmentBaseUrl = detailId ? createMailboxAttachmentBaseUrl(sessionId, detailId) : ''
+  return applyAttachmentDownloadUrls(detail, attachmentBaseUrl)
+}
+
+function applyItemAttachmentDownloadUrls(detail: MessageDetail, itemId: string): MessageDetail {
+  const detailId = normalizeText(itemId || detail.id || '')
+  const attachmentBaseUrl = detailId ? createItemAttachmentBaseUrl(detailId) : ''
+  return applyAttachmentDownloadUrls(detail, attachmentBaseUrl)
 }
 
 function normalizeReviewState(review: ReviewState | null): ReviewState {
@@ -1642,39 +1656,70 @@ async function resolveMailboxMessageDetail(
 }
 
 async function resolveMailboxItemDetail(
-  pstRootDir: string,
   item: SearchIndexDocument,
   reviewStore: ReviewStore,
   reviewerUsername: string,
-  searchIndexStore: SearchIndexStore,
-  getLiveSessionForMailboxKey?: (mailboxKey: string) => SessionRecord | null,
-  registerMailboxSession?: (
-    sessionIndex: ViewerSessionIndex,
-    mailboxKey: string,
-    scopePath: string,
-    fileName: string
-  ) => SessionRecord
+  searchIndexStore: SearchIndexStore
 ): Promise<MessageDetail> {
   const snapshot = await searchIndexStore.findMailboxDetail(item.mailboxKey, item.messageId).catch(() => null)
-  if (snapshot) {
-    const review = await reviewStore.getReview(item.mailboxKey, item.messageId, reviewerUsername)
-    return buildReviewedDetail(snapshot, review)
-  }
-
-  const liveSession = getLiveSessionForMailboxKey?.(item.mailboxKey) || null
-  const sessionIndex = liveSession?.index || openPstMailbox(pstRootDir, item.scopePath, item.fileName)
-  if (!liveSession && registerMailboxSession) {
-    registerMailboxSession(sessionIndex, item.mailboxKey, item.scopePath, item.fileName)
-  }
-  const detail = buildMessageDetailFromSession(sessionIndex, item.messageId, 1)
-  try {
-    await searchIndexStore.upsertMailboxDetail(item.mailboxKey, detail)
-  } catch {
-    // Ignore snapshot backfill failures and keep serving the live PST detail.
+  if (!snapshot) {
+    throw createAppError(500, 'Mailbox detail snapshot unavailable')
   }
 
   const review = await reviewStore.getReview(item.mailboxKey, item.messageId, reviewerUsername)
-  return buildReviewedDetail(detail, review)
+  return applyItemAttachmentDownloadUrls(buildReviewedDetail(snapshot, review), item.id || item.messageId)
+}
+
+async function resolveSearchItemDetail(
+  item: SearchIndexDocument,
+  reviewStore: ReviewStore,
+  reviewerUsername: string,
+  searchIndexStore: SearchIndexStore
+): Promise<MessageDetail> {
+  if (item.sourceType === 'mailbox') {
+    return resolveMailboxItemDetail(item, reviewStore, reviewerUsername, searchIndexStore)
+  }
+
+  const review = await reviewStore.getReview(item.mailboxKey, item.messageId, reviewerUsername)
+  return buildReviewedDetail(
+    ({
+      id: item.id || item.messageId,
+      subject: item.subject,
+      senderName: item.senderName,
+      senderEmailAddress: item.senderEmailAddress,
+      displayTo: item.displayTo,
+      displayCC: item.displayCC,
+      displayBCC: item.displayBCC,
+      resolvedDisplayTo: item.resolvedDisplayTo,
+      resolvedDisplayCC: item.resolvedDisplayCC,
+      resolvedDisplayBCC: item.resolvedDisplayBCC,
+      clientSubmitTime: item.clientSubmitTime,
+      creationTime: item.creationTime,
+      modificationTime: item.modificationTime,
+      messageDeliveryTime: item.messageDeliveryTime,
+      sortDate: item.sortDate,
+      bodyHtml: item.previewHtml || '',
+      bodyText: item.previewText || '',
+      bodyPrefix: item.previewText || item.previewHtml ? 'Preview from archive item' : '',
+      parseError: '',
+      attachments: [],
+      folderId: item.folderId,
+      folderPath: item.folderPath,
+      mailboxName: item.mailboxName,
+      archivePath: item.archivePath,
+      archiveEntryPath: item.archiveEntryPath,
+      archiveEntryChain: item.archiveEntryChain,
+      archiveEntryName: item.archiveEntryName,
+      contentType: item.contentType,
+      downloadFilename: item.downloadFilename,
+      previewKind: item.previewKind,
+      previewText: item.previewText,
+      previewHtml: item.previewHtml,
+      previewUrl: item.archivePath ? `/api/items/${encodeURIComponent(item.id || item.messageId)}/preview` : '',
+      downloadUrl: item.archivePath ? `/api/items/${encodeURIComponent(item.id || item.messageId)}/content` : ''
+    } as unknown as MessageDetail),
+    review
+  )
 }
 
 function buildMailboxDetailCacheKey(messageId: string, reviewerUsername: string): string {
@@ -5432,56 +5477,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       }
 
       const reviewerUsername = getReviewOwnerUsername(authSession)
-      const detail =
-        item.sourceType === 'mailbox'
-          ? await resolveMailboxItemDetail(
-              pstRootDir,
-              item,
-              reviewStore,
-              reviewerUsername,
-              searchIndexStore,
-              getLiveSessionForMailboxKey,
-              registerMailboxSession
-            )
-          : buildReviewedDetail(
-              ({
-              id: item.id || item.messageId,
-              subject: item.subject,
-              senderName: item.senderName,
-              senderEmailAddress: item.senderEmailAddress,
-              displayTo: item.displayTo,
-              displayCC: item.displayCC,
-              displayBCC: item.displayBCC,
-              resolvedDisplayTo: item.resolvedDisplayTo,
-              resolvedDisplayCC: item.resolvedDisplayCC,
-              resolvedDisplayBCC: item.resolvedDisplayBCC,
-              clientSubmitTime: item.clientSubmitTime,
-              creationTime: item.creationTime,
-              modificationTime: item.modificationTime,
-              messageDeliveryTime: item.messageDeliveryTime,
-              sortDate: item.sortDate,
-              bodyHtml: item.previewHtml || '',
-              bodyText: item.previewText || '',
-              bodyPrefix: item.previewText || item.previewHtml ? 'Preview from archive item' : '',
-              parseError: '',
-              attachments: [],
-              folderId: item.folderId,
-              folderPath: item.folderPath,
-              mailboxName: item.mailboxName,
-              archivePath: item.archivePath,
-              archiveEntryPath: item.archiveEntryPath,
-              archiveEntryChain: item.archiveEntryChain,
-              archiveEntryName: item.archiveEntryName,
-              contentType: item.contentType,
-              downloadFilename: item.downloadFilename,
-              previewKind: item.previewKind,
-              previewText: item.previewText,
-              previewHtml: item.previewHtml,
-              previewUrl: item.archivePath ? `/api/items/${encodeURIComponent(item.id || item.messageId)}/preview` : '',
-              downloadUrl: item.archivePath ? `/api/items/${encodeURIComponent(item.id || item.messageId)}/content` : ''
-              } as unknown as MessageDetail),
-              item.review
-            )
+      const detail = await resolveSearchItemDetail(item, reviewStore, reviewerUsername, searchIndexStore)
 
       recordAuditEvent({
         req,
@@ -5539,7 +5535,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     }
   })
 
-  app.get(API_ROUTES.itemDetail, async (req, res) => {
+  app.get(API_ROUTES.itemAttachment, async (req, res) => {
     try {
       const authSession = getAuthSessionFromRequest(req)
       if (authConfig.enabled && !authSession) {
@@ -5553,88 +5549,45 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       const allowAllCases = !authConfig.enabled || isAdminAuthSession(authSession, authConfig)
       const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
       const item = await searchIndexStore.findDocumentById(req.params.itemId)
-      if (!item) {
+      if (!item || item.sourceType !== 'mailbox') {
         responseJson(res, 404, { error: 'Item not found' })
         return
       }
       if (!isScopePathAllowed(item.scopePath, allowedCasePaths, allowAllCases)) {
-        recordAuditEvent({
-          req,
-          session: authSession,
-          action: 'search.item.view',
-          target: item.subject || item.archiveEntryName || item.messageId,
-          outcome: 'denied',
-          metadata: {
-            reason: 'Case access required',
-            scopePath: item.scopePath,
-            sourceType: item.sourceType
-          }
-        })
         responseJson(res, 403, { error: 'Case access required' })
         return
       }
 
-      const detail = {
-        id: item.id || item.messageId,
-        sourceType: item.sourceType,
-        subject: item.subject,
-        senderName: item.senderName,
-        senderEmailAddress: item.senderEmailAddress,
-        displayTo: item.displayTo,
-        displayCC: item.displayCC,
-        displayBCC: item.displayBCC,
-        resolvedDisplayTo: item.resolvedDisplayTo,
-        resolvedDisplayCC: item.resolvedDisplayCC,
-        resolvedDisplayBCC: item.resolvedDisplayBCC,
-        clientSubmitTime: item.clientSubmitTime,
-        creationTime: item.creationTime,
-        modificationTime: item.modificationTime,
-        messageDeliveryTime: item.messageDeliveryTime,
-        sortDate: item.sortDate,
-        bodyHtml: item.previewHtml || '',
-        bodyText: item.previewText || '',
-        bodyPrefix: item.previewText || item.previewHtml ? 'Preview from archive item' : '',
-        parseError: '',
-        attachments: [],
-        review: item.review,
-        folderId: item.folderId,
-        folderPath: item.folderPath,
-        mailboxName: item.mailboxName,
-        archivePath: item.archivePath,
-        archiveEntryPath: item.archiveEntryPath,
-        archiveEntryChain: item.archiveEntryChain,
-        archiveEntryName: item.archiveEntryName,
-        contentType: item.contentType,
-        downloadFilename: item.downloadFilename,
-        previewKind: item.previewKind,
-        previewText: item.previewText,
-        previewHtml: item.previewHtml,
-        previewUrl: item.archivePath ? `/api/items/${encodeURIComponent(item.id || item.messageId)}/preview` : '',
-        downloadUrl: item.archivePath ? `/api/items/${encodeURIComponent(item.id || item.messageId)}/content` : ''
+      const attachmentIndex = parseZeroBasedInt(req.params.attachmentIndex)
+      if (attachmentIndex < 0) {
+        responseJson(res, 404, { error: 'Attachment not found' })
+        return
       }
 
+      const liveSession = getLiveSessionForMailboxKey(item.mailboxKey)
+      const sessionIndex = liveSession?.index || openPstMailbox(pstRootDir, item.scopePath, item.fileName)
+      const payload = getAttachmentDownloadBuffer(sessionIndex, item.messageId, attachmentIndex)
+      const fileName = safeDownloadName(payload.filename, 'attachment')
+      responseBinary(res, 200, payload.contentType, fileName, payload.buffer)
       recordAuditEvent({
         req,
         session: authSession,
-        action: 'search.item.view',
-        target: detail.subject || detail.archiveEntryName || detail.id || 'item',
+        action: 'item.attachment.download',
+        target: item.subject || item.messageId,
         outcome: 'success',
         metadata: {
-          sourceType: item.sourceType,
           scopePath: item.scopePath,
           fileName: item.fileName,
-          archivePath: item.archivePath || '',
-          entryPath: item.archiveEntryPath || ''
+          attachmentIndex,
+          downloadName: fileName
         }
       })
-
-      responseJson(res, 200, { detail })
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
   })
 
-  app.get(API_ROUTES.itemContent, async (req, res) => {
+  app.get(API_ROUTES.itemExportEml, async (req, res) => {
     try {
       const authSession = getAuthSessionFromRequest(req)
       if (authConfig.enabled && !authSession) {
@@ -5648,7 +5601,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       const allowAllCases = !authConfig.enabled || isAdminAuthSession(authSession, authConfig)
       const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
       const item = await searchIndexStore.findDocumentById(req.params.itemId)
-      if (!item || !item.archivePath || !item.archiveEntryChain?.length) {
+      if (!item || item.sourceType !== 'mailbox') {
         responseJson(res, 404, { error: 'Item not found' })
         return
       }
@@ -5657,13 +5610,26 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         return
       }
 
-      const { buffer, contentType, fileName } = await readArchiveBundleItemContent(item.archivePath, item.archiveEntryChain)
-      const downloadName = sanitizeFileNameForDownload(item.downloadFilename || fileName, fileName)
-      res.status(200)
-      res.setHeader('Content-Type', contentType || item.contentType || 'application/octet-stream')
-      res.setHeader('Content-Length', String(buffer.length))
-      res.setHeader('Content-Disposition', `inline; filename="${downloadName}"`)
-      res.send(buffer)
+      const liveSession = getLiveSessionForMailboxKey(item.mailboxKey)
+      const sessionIndex = liveSession?.index || openPstMailbox(pstRootDir, item.scopePath, item.fileName)
+      const summary = getMessageSummary(sessionIndex, item.messageId)
+      const fileName = `${safeDownloadName(summary.subject || item.subject || 'message', 'message')}.eml`
+      const eml = summary.parseError
+        ? exportMessageAsEml(buildReviewedDetail(buildEmptyMessageDetail(summary), null))
+        : exportMessageAsEmlFromSession(sessionIndex, item.messageId)
+      responseBinary(res, 200, 'message/rfc822; charset=utf-8', fileName, Buffer.from(eml, 'utf8'))
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'item.export.eml',
+        target: item.subject || item.messageId,
+        outcome: 'success',
+        metadata: {
+          scopePath: item.scopePath,
+          fileName: item.fileName,
+          downloadName: fileName
+        }
+      })
     } catch (error) {
       createRouteErrorHandler(res, error)
     }

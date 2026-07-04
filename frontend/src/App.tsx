@@ -146,6 +146,18 @@ function triggerDownload(url: string, fileName?: string): void {
   anchor.remove()
 }
 
+function triggerDownloadText(content: string, fileName: string, mimeType: string): void {
+  const blob = new Blob([content], { type: mimeType })
+  const url = URL.createObjectURL(blob)
+  try {
+    triggerDownload(url, fileName)
+  } finally {
+    window.setTimeout(() => {
+      URL.revokeObjectURL(url)
+    }, 0)
+  }
+}
+
 export function getCasePathFromScopePath(scopePath: string): string {
   const normalized = normalizeText(scopePath)
   if (!normalized) {
@@ -431,6 +443,7 @@ export function App() {
   const mailboxDetailCacheRef = React.useRef(new Map<string, MessageDetail>())
   const mailboxPreviewCacheRef = React.useRef(new Map<string, MessageDetail>())
   const mailboxDetailInFlightRef = React.useRef(new Map<string, Promise<MessageDetail>>())
+  const selectedPreviewOriginRef = React.useRef<'session' | 'search-index' | 'item'>('session')
 
   const catalogLoadKeyRef = React.useRef('')
 
@@ -510,9 +523,10 @@ export function App() {
   function getMailboxPreviewKey(
     messageId: string,
     fileName = selectedPstFileName || sessionSummary?.fileName || '',
-    scopePath = selectedScopePath || selectedCasePath || ''
+    scopePath = selectedScopePath || selectedCasePath || '',
+    prefix = 'session'
   ): string {
-    return `${normalizeText(fileName)}::${normalizeText(scopePath)}::${normalizeText(messageId)}`
+    return `${normalizeText(prefix)}::${normalizeText(fileName)}::${normalizeText(scopePath)}::${normalizeText(messageId)}`
   }
 
   function getMailboxDetailCacheKey(messageId: string): string {
@@ -634,6 +648,16 @@ export function App() {
 
   function prefetchMailboxMessageDetail(messageId: string): void {
     void loadMailboxMessageDetail(messageId).catch(() => undefined)
+  }
+
+  function updateSearchMailboxPreviewCache(messageId: string, detail: MessageDetail): void {
+    const previewKey = getMailboxPreviewKey(
+      messageId,
+      selectedPageItem?.fileName || selectedPstFileName || sessionSummary?.fileName || '',
+      selectedPageItem?.scopePath || selectedScopePath || selectedCasePath || '',
+      'search'
+    )
+    mailboxPreviewCacheRef.current.set(previewKey, detail)
   }
 
   function applyLoadedPage(page: PageResponse<MessageSummary>): void {
@@ -1211,10 +1235,62 @@ export function App() {
     if (selectedPageItem.sourceType && selectedPageItem.sourceType !== 'mailbox') {
       return
     }
+
+    if (workspaceMode === 'search' && selectedPageItem.sourceType === 'mailbox') {
+      const previewKey = getMailboxPreviewKey(
+        activeMessageId,
+        selectedPageItem.fileName || selectedPstFileName || sessionSummary?.fileName || '',
+        selectedPageItem.scopePath || selectedScopePath || selectedCasePath || '',
+        'search'
+      )
+      selectedPreviewOriginRef.current = 'search-index'
+      const cachedPreviewDetail = mailboxPreviewCacheRef.current.get(previewKey)
+      if (cachedPreviewDetail) {
+        previewRequestKeyRef.current = previewKey
+        setSelectedMessage(cachedPreviewDetail)
+        setMessageLoading(false)
+        return
+      }
+
+      if (previewRequestKeyRef.current === previewKey) {
+        return
+      }
+
+      const requestId = invalidateMessagePreview(true)
+      previewRequestKeyRef.current = previewKey
+      let cancelled = false
+
+      async function loadMessage(): Promise<void> {
+        try {
+          const response = await api.item.detail(activeMessageId)
+          if (cancelled || messagePreviewRequestRef.current !== requestId) {
+            return
+          }
+          updateSearchMailboxPreviewCache(activeMessageId, response.detail)
+          setSelectedMessage(response.detail)
+        } catch (error) {
+          if (!cancelled && messagePreviewRequestRef.current === requestId) {
+            setSelectedMessage(null)
+            setAuthError(error instanceof Error ? error.message : 'Unable to load item detail')
+          }
+        } finally {
+          if (!cancelled && messagePreviewRequestRef.current === requestId) {
+            setMessageLoading(false)
+          }
+        }
+      }
+
+      void loadMessage()
+
+      return () => {
+        cancelled = true
+      }
+    }
+
+    const previewKey = getMailboxPreviewKey(activeMessageId)
     const activeSessionId = sessionId
     const mailboxSessionMatchesSelection =
       !selectedPstFileName || !sessionSummary?.fileName || sessionSummary.fileName === selectedPstFileName
-    const previewKey = getMailboxPreviewKey(activeMessageId)
 
     if (previewRequestKeyRef.current === previewKey) {
       return
@@ -1323,6 +1399,7 @@ export function App() {
     selectedPstFileName,
     sessionId,
     sessionSummary?.fileName,
+    workspaceMode,
     workspaceReady
   ])
 
@@ -2042,6 +2119,7 @@ export function App() {
     catalogResponse?: PstCatalogResponse,
     options: OpenMailboxOptions = {}
   ): Promise<void> {
+    selectedPreviewOriginRef.current = 'session'
     clearMailboxOpenTimer()
     if (!options.preservePreview) {
       invalidateMessagePreview(Boolean(options.selectedMessageId))
@@ -2079,6 +2157,7 @@ export function App() {
   }
 
   async function selectFolder(folderId: string): Promise<void> {
+    selectedPreviewOriginRef.current = 'session'
     setCurrentFolderId(folderId)
     writeWorkspaceStorageItem('folderId', true, username, folderId)
     if (workspaceMode === 'search') {
@@ -2090,6 +2169,7 @@ export function App() {
   }
 
   async function openMessage(messageId: string): Promise<void> {
+    selectedPreviewOriginRef.current = 'session'
     invalidateMessagePreview(true)
     setSelectedMessageId(messageId)
     writeWorkspaceStorageItem('messageId', true, username, messageId)
@@ -2097,6 +2177,7 @@ export function App() {
 
   async function openMessageSummary(message: MessageSummary): Promise<void> {
     if (message.sourceType && message.sourceType !== 'mailbox') {
+      selectedPreviewOriginRef.current = 'item'
       const requestId = invalidateMessagePreview(true)
       setSelectedMessageId(message.id)
       writeWorkspaceStorageItem('messageId', true, username, message.id)
@@ -2121,6 +2202,16 @@ export function App() {
 
     const currentFileName = selectedPstFileName || sessionSummary?.fileName || ''
     const currentScopePath = selectedScopePath || selectedCasePath
+
+    if (workspaceMode === 'search' && message.sourceType === 'mailbox') {
+      selectedPreviewOriginRef.current = 'search-index'
+      setSelectedMessageId(message.id)
+      writeWorkspaceStorageItem('messageId', true, username, message.id)
+      setWorkspaceMode('search')
+      return
+    }
+
+    selectedPreviewOriginRef.current = 'session'
 
     if (!isSameMailboxContext(message, currentFileName, currentScopePath)) {
       const nextFileName = message.fileName || currentFileName
@@ -2193,12 +2284,21 @@ export function App() {
   }
 
   async function downloadJson(): Promise<void> {
-    if (sessionId && selectedMessageId) {
-      triggerDownload(api.session.messageJsonUrl(sessionId, selectedMessageId), `${selectedMessageId}.json`)
+    if (!selectedMessage) {
+      return
     }
+    triggerDownloadText(
+      JSON.stringify(selectedMessage, null, 2),
+      `${selectedMessageId || selectedMessage.id || 'message'}.json`,
+      'application/json; charset=utf-8'
+    )
   }
 
   async function downloadEml(): Promise<void> {
+    if (selectedPreviewOriginRef.current === 'search-index' && selectedMessageId) {
+      triggerDownload(api.item.messageEmlUrl(selectedMessageId), `${selectedMessageId}.eml`)
+      return
+    }
     if (sessionId && selectedMessageId) {
       triggerDownload(api.session.messageEmlUrl(sessionId, selectedMessageId), `${selectedMessageId}.eml`)
     }
@@ -2208,7 +2308,7 @@ export function App() {
     if (!selectedMessageId) {
       return
     }
-    if (selectedMessage?.archivePath || !sessionId) {
+    if (selectedPreviewOriginRef.current === 'search-index' || selectedMessage?.archivePath || !sessionId) {
       await api.item.updateReview(selectedMessageId, {
         flagged: !(selectedMessage?.review?.flagged ?? false),
         tags: selectedMessage?.review?.tags || []
@@ -2216,6 +2316,7 @@ export function App() {
       await refreshCurrentPage()
       const response = await api.item.detail(selectedMessageId)
       setSelectedMessage(response.detail)
+      updateSearchMailboxPreviewCache(selectedMessageId, response.detail)
       return
     }
     await api.session.updateReview(sessionId, selectedMessageId, {
@@ -2231,11 +2332,12 @@ export function App() {
     if (!selectedMessageId) {
       return
     }
-    if (selectedMessage?.archivePath || !sessionId) {
+    if (selectedPreviewOriginRef.current === 'search-index' || selectedMessage?.archivePath || !sessionId) {
       await api.item.clearReview(selectedMessageId)
       await refreshCurrentPage()
       const response = await api.item.detail(selectedMessageId)
       setSelectedMessage(response.detail)
+      updateSearchMailboxPreviewCache(selectedMessageId, response.detail)
       return
     }
     await api.session.clearReview(sessionId, selectedMessageId)
@@ -2248,13 +2350,14 @@ export function App() {
     if (!selectedMessageId) {
       return
     }
-    if (selectedMessage?.archivePath || !sessionId) {
+    if (selectedPreviewOriginRef.current === 'search-index' || selectedMessage?.archivePath || !sessionId) {
       await api.item.updateReview(selectedMessageId, {
         tags: Array.from(new Set([...(selectedMessage?.review?.tags || []), tag]))
       })
       await refreshCurrentPage()
       const response = await api.item.detail(selectedMessageId)
       setSelectedMessage(response.detail)
+      updateSearchMailboxPreviewCache(selectedMessageId, response.detail)
       return
     }
     await api.session.updateReview(sessionId, selectedMessageId, {
@@ -2269,13 +2372,14 @@ export function App() {
     if (!selectedMessageId) {
       return
     }
-    if (selectedMessage?.archivePath || !sessionId) {
+    if (selectedPreviewOriginRef.current === 'search-index' || selectedMessage?.archivePath || !sessionId) {
       await api.item.updateReview(selectedMessageId, {
         tags: (selectedMessage?.review?.tags || []).filter((item) => item !== tag)
       })
       await refreshCurrentPage()
       const response = await api.item.detail(selectedMessageId)
       setSelectedMessage(response.detail)
+      updateSearchMailboxPreviewCache(selectedMessageId, response.detail)
       return
     }
     await api.session.updateReview(sessionId, selectedMessageId, {
@@ -2752,7 +2856,7 @@ export function App() {
       }}
       tagCount={selectedMessage?.review?.tags?.length || 0}
       onOpenAttachment={(attachment) => {
-        if (sessionId && selectedMessageId && attachment.downloadUrl) {
+        if (attachment.downloadUrl) {
           triggerDownload(attachment.downloadUrl, attachment.downloadFilename || attachment.filename || undefined)
         }
       }}
@@ -2865,7 +2969,7 @@ export function App() {
               tagCount={selectedMessage?.review?.tags?.length || 0}
               showNavigationControls={false}
               onOpenAttachment={(attachment) => {
-                if (sessionId && selectedMessageId && attachment.downloadUrl) {
+                if (attachment.downloadUrl) {
                   triggerDownload(attachment.downloadUrl, attachment.downloadFilename || attachment.filename || undefined)
                 }
               }}

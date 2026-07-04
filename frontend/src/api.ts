@@ -305,6 +305,9 @@ export const api = {
       requestJson<ReviewUpdateResponse>(`/api/items/${encodeURIComponent(itemId)}/review`, {
         method: 'DELETE'
       }),
+    messageEmlUrl: (itemId: string) => `/api/items/${encodeURIComponent(itemId)}/export.eml`,
+    attachmentUrl: (itemId: string, attachmentIndex: number) =>
+      `/api/items/${encodeURIComponent(itemId)}/attachments/${attachmentIndex}`,
     contentUrl: (itemId: string) => `/api/items/${encodeURIComponent(itemId)}/content`
   },
   session: {

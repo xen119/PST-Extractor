@@ -888,6 +888,52 @@ describe('pst review api', () => {
     expect(reviewSpy).toHaveBeenCalledTimes(3)
   })
 
+  it('serves mailbox item attachments through the item route and opens PST only on download', async () => {
+    rootDir = makeTempDir('pst-review-item-attachment-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
+    const mailboxPath = path.join(pstDir, 'Case1', 'Search1', 'sample.pst')
+    stageFixture(outlookPath, mailboxPath)
+
+    const started = await startApp(pstDir)
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    await requestJson(`${started.baseUrl}/api/psts/open`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        scopePath: 'Case1/Search1',
+        fileName: 'sample.pst'
+      })
+    })
+
+    const { PSTUtil } = require('../PSTUtil.class')
+    const loadSpy = jest.spyOn(PSTUtil, 'detectAndLoadPSTObject')
+    loadSpy.mockClear()
+
+    const itemDetail = await requestJson(
+      `${started.baseUrl}/api/items/${encodeURIComponent('message:2110308')}`
+    )
+    expect(itemDetail.detail.attachments).toHaveLength(1)
+    expect(itemDetail.detail.attachments[0].isDownloadable).toBe(true)
+    expect(itemDetail.detail.attachments[0].downloadUrl).toContain(
+      '/api/items/message%3A2110308/attachments/0'
+    )
+    expect(loadSpy).not.toHaveBeenCalled()
+
+    const attachment = await requestBuffer(
+      `${started.baseUrl}/api/items/${encodeURIComponent('message:2110308')}/attachments/0`
+    )
+    expect(attachment.response.status).toBe(200)
+    expect(attachment.response.headers.get('content-disposition')).toContain('OBA_2760.doc')
+    expect(attachment.buffer.length).toBeGreaterThan(1000)
+    expect(loadSpy).toHaveBeenCalled()
+  })
+
   it('backfills a missing mailbox snapshot from PST once and reuses it thereafter', async () => {
     rootDir = makeTempDir('pst-review-detail-backfill-')
     const pstDir = path.join(rootDir, 'PST')
