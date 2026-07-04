@@ -424,7 +424,10 @@ export function App() {
   })
   const messagePreviewRequestRef = React.useRef(0)
   const skipNextMessageReloadRef = React.useRef(false)
+  const skipNextMailboxOpenRef = React.useRef('')
+  const previewRequestKeyRef = React.useRef('')
   const mailboxDetailCacheRef = React.useRef(new Map<string, MessageDetail>())
+  const mailboxPreviewCacheRef = React.useRef(new Map<string, MessageDetail>())
   const mailboxDetailInFlightRef = React.useRef(new Map<string, Promise<MessageDetail>>())
 
   const catalogLoadKeyRef = React.useRef('')
@@ -494,9 +497,18 @@ export function App() {
 
   function invalidateMessagePreview(loading = true): number {
     messagePreviewRequestRef.current += 1
+    previewRequestKeyRef.current = ''
     setSelectedMessage(null)
     setMessageLoading(loading)
     return messagePreviewRequestRef.current
+  }
+
+  function getMailboxPreviewKey(
+    messageId: string,
+    fileName = selectedPstFileName || sessionSummary?.fileName || '',
+    scopePath = selectedScopePath || selectedCasePath || ''
+  ): string {
+    return `${normalizeText(fileName)}::${normalizeText(scopePath)}::${normalizeText(messageId)}`
   }
 
   function getMailboxDetailCacheKey(messageId: string): string {
@@ -507,6 +519,7 @@ export function App() {
     if (!sessionId) {
       mailboxDetailCacheRef.current.clear()
       mailboxDetailInFlightRef.current.clear()
+      mailboxPreviewCacheRef.current.clear()
       return
     }
 
@@ -528,11 +541,27 @@ export function App() {
     const cacheKey = getMailboxDetailCacheKey(messageId)
     mailboxDetailCacheRef.current.delete(cacheKey)
     mailboxDetailInFlightRef.current.delete(cacheKey)
+    clearMailboxPreviewCache(messageId)
+  }
+
+  function clearMailboxPreviewCache(messageId?: string): void {
+    if (!messageId) {
+      mailboxPreviewCacheRef.current.clear()
+      return
+    }
+
+    const suffix = `::${normalizeText(messageId)}`
+    for (const key of mailboxPreviewCacheRef.current.keys()) {
+      if (key.endsWith(suffix)) {
+        mailboxPreviewCacheRef.current.delete(key)
+      }
+    }
   }
 
   function clearMailboxPreviewCacheForRefresh(source: SearchIndexRefreshSource): void {
     if (source === 'mailboxes') {
       clearMailboxDetailCache()
+      clearMailboxPreviewCache()
     }
   }
 
@@ -541,9 +570,16 @@ export function App() {
       return Promise.reject(new Error('Mailbox session not available'))
     }
 
+    const previewKey = getMailboxPreviewKey(messageId)
     const cacheKey = getMailboxDetailCacheKey(messageId)
+    const cachedPreviewDetail = mailboxPreviewCacheRef.current.get(previewKey)
+    if (cachedPreviewDetail) {
+      return Promise.resolve(cachedPreviewDetail)
+    }
+
     const cachedDetail = mailboxDetailCacheRef.current.get(cacheKey)
     if (cachedDetail) {
+      mailboxPreviewCacheRef.current.set(previewKey, cachedDetail)
       return Promise.resolve(cachedDetail)
     }
 
@@ -556,6 +592,7 @@ export function App() {
       if (mailboxDetailInFlightRef.current.get(cacheKey) === request) {
         mailboxDetailInFlightRef.current.delete(cacheKey)
         mailboxDetailCacheRef.current.set(cacheKey, response.detail)
+        mailboxPreviewCacheRef.current.set(previewKey, response.detail)
       }
       return response.detail
     })
@@ -909,6 +946,9 @@ export function App() {
     }
 
     const nextFiles = activeCatalogScope.files || []
+    const nextFile =
+      nextFiles.find((file) => file.fileName === selectedPstFileName)?.fileName || nextFiles[0]?.fileName || ''
+    const nextScopePath = activeCatalogScope.scopePath || selectedScopePath || selectedCasePath || ''
     setCatalogFiles(nextFiles)
     setCatalogMessage(
       `Found ${activeCatalogScope.fileCount || 0} mailbox file${
@@ -916,11 +956,15 @@ export function App() {
       } in ${activeCatalogScope.scopeLabel || 'PST root'}.`
     )
 
-    const nextFile =
-      nextFiles.find((file) => file.fileName === selectedPstFileName)?.fileName || nextFiles[0]?.fileName || ''
+    const nextMailboxOpenKey = `${normalizeText(nextFile)}::${normalizeText(nextScopePath)}`
+    if (skipNextMailboxOpenRef.current && skipNextMailboxOpenRef.current === nextMailboxOpenKey) {
+      skipNextMailboxOpenRef.current = ''
+      return
+    }
+
     if (nextFile && nextFile !== selectedPstFileName) {
       setSelectedPstFileName(nextFile)
-      void openMailbox(nextFile, activeCatalogScope.scopePath || selectedScopePath || selectedCasePath, catalog)
+      void openMailbox(nextFile, nextScopePath, catalog)
     }
   }, [
     activeCatalogScope,
@@ -1144,20 +1188,35 @@ export function App() {
     const activeSessionId = sessionId
     const mailboxSessionMatchesSelection =
       !selectedPstFileName || !sessionSummary?.fileName || sessionSummary.fileName === selectedPstFileName
+    const previewKey = getMailboxPreviewKey(activeMessageId)
+
+    if (previewRequestKeyRef.current === previewKey) {
+      return
+    }
 
     if (selectedMessage?.id === activeMessageId) {
       if (!activeSessionId || !mailboxSessionMatchesSelection) {
         return
       }
 
+      const cachedPreviewDetail = mailboxPreviewCacheRef.current.get(previewKey)
+      if (cachedPreviewDetail) {
+        previewRequestKeyRef.current = previewKey
+        setSelectedMessage(cachedPreviewDetail)
+        return
+      }
+
       const cacheKey = getMailboxDetailCacheKey(activeMessageId)
       const cachedDetail = mailboxDetailCacheRef.current.get(cacheKey)
       if (cachedDetail) {
+        previewRequestKeyRef.current = previewKey
+        mailboxPreviewCacheRef.current.set(previewKey, cachedDetail)
         setSelectedMessage(cachedDetail)
         return
       }
 
       const hydrationRequestId = messagePreviewRequestRef.current
+      previewRequestKeyRef.current = previewKey
       void loadMailboxMessageDetail(activeMessageId)
         .then((detail) => {
           if (
@@ -1180,15 +1239,26 @@ export function App() {
       return
     }
 
+    const cachedPreviewDetail = mailboxPreviewCacheRef.current.get(previewKey)
+    if (cachedPreviewDetail) {
+      previewRequestKeyRef.current = previewKey
+      setSelectedMessage(cachedPreviewDetail)
+      setMessageLoading(false)
+      return
+    }
+
     const cacheKey = getMailboxDetailCacheKey(activeMessageId)
     const cachedDetail = mailboxDetailCacheRef.current.get(cacheKey)
     if (cachedDetail) {
+      previewRequestKeyRef.current = previewKey
+      mailboxPreviewCacheRef.current.set(previewKey, cachedDetail)
       setSelectedMessage(cachedDetail)
       setMessageLoading(false)
       return
     }
 
     const requestId = invalidateMessagePreview(true)
+    previewRequestKeyRef.current = previewKey
     let cancelled = false
 
     async function loadMessage(): Promise<void> {
@@ -2028,6 +2098,7 @@ export function App() {
       if (nextFileName && nextScopePath) {
         const requestId = invalidateMessagePreview(true)
         const nextCasePath = getCasePathFromScopePath(nextScopePath)
+        skipNextMailboxOpenRef.current = `${normalizeText(nextFileName)}::${normalizeText(nextScopePath)}`
         if (workspaceMode === 'search' && sourceType === 'mailbox' && searchScope !== 'pst') {
           skipNextMessageReloadRef.current = true
         }
@@ -2046,6 +2117,9 @@ export function App() {
             return
           }
           setSelectedMessage(response.detail)
+          const nextPreviewKey = getMailboxPreviewKey(message.id, nextFileName, nextScopePath)
+          previewRequestKeyRef.current = nextPreviewKey
+          mailboxPreviewCacheRef.current.set(nextPreviewKey, response.detail)
           void openMailbox(nextFileName, nextScopePath, catalog || undefined, {
             preserveWorkspaceMode: true,
             preservePreview: true

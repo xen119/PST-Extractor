@@ -1561,6 +1561,7 @@ describe('shell and preview', () => {
     await user.click(screen.getByRole('button', { name: 'Run search' }))
 
     expect(await screen.findByText('Current mailbox body')).toBeInTheDocument()
+    const openCallCountBeforeTarget = vi.mocked(api.pst.open).mock.calls.length
     await user.click(screen.getByRole('button', { name: /Target search result/ }))
 
     expect(await screen.findByText('Loading preview...')).toBeInTheDocument()
@@ -1574,6 +1575,7 @@ describe('shell and preview', () => {
       expect(api.pst.open).toHaveBeenCalledWith('Case Beta/Search Two', 'mailbox-b.pst')
     })
     expect(screen.queryByText('Loading preview...')).not.toBeInTheDocument()
+    const detailCallCountBeforeMailboxOpen = vi.mocked(api.session.messageDetail).mock.calls.length
     openTargetMailbox.resolve({
       sessionId: 'session-b',
       scopePath: 'Case Beta/Search Two',
@@ -1591,8 +1593,9 @@ describe('shell and preview', () => {
       }
     })
     await waitFor(() => {
-      expect(api.session.messageDetail).toHaveBeenCalledWith('session-b', 'search-hit')
+      expect(vi.mocked(api.session.messageDetail).mock.calls.length).toBe(detailCallCountBeforeMailboxOpen)
     })
+    expect(vi.mocked(api.pst.open).mock.calls.length).toBe(openCallCountBeforeTarget + 1)
   })
 
   it('shows the tag manager modal', async () => {
