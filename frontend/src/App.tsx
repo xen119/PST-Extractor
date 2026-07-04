@@ -573,6 +573,25 @@ export function App() {
     void loadMailboxMessageDetail(messageId).catch(() => undefined)
   }
 
+  function applyLoadedPage(page: PageResponse<MessageSummary>): void {
+    setCurrentPage(page)
+    if (page.page !== pageIndex) {
+      setPageIndex(page.page)
+    }
+    const storedMessageId = readWorkspaceStorageItem('messageId', true, username, '')
+    const nextMessageId = page.items.some((item) => item.id === selectedMessageId)
+      ? selectedMessageId
+      : page.items.find((item) => item.id === storedMessageId)?.id || page.items[0]?.id || ''
+    if (nextMessageId && nextMessageId !== selectedMessageId) {
+      const nextMessage = page.items.find((item) => item.id === nextMessageId)
+      if (nextMessage) {
+        void openMessageSummary(nextMessage)
+      } else {
+        setSelectedMessageId(nextMessageId)
+      }
+    }
+  }
+
   React.useEffect(() => {
     document.documentElement.dataset.theme = theme
     document.documentElement.style.colorScheme = theme
@@ -931,79 +950,110 @@ export function App() {
   React.useEffect(() => {
     const activeSessionId = sessionId
     const activeFolderId = currentFolderId
-    if (!workspaceReady || (workspaceMode !== 'search' && (!activeSessionId || !activeFolderId))) {
+    if (!workspaceReady || workspaceMode === 'search' || !activeSessionId || !activeFolderId) {
       return
     }
     if (skipNextMessageReloadRef.current) {
       skipNextMessageReloadRef.current = false
       return
     }
-    const sessionToken = activeSessionId
 
     let cancelled = false
 
-    async function loadMessages(): Promise<void> {
+    async function loadFolderMessages(): Promise<void> {
       try {
         setMessagesLoading(true)
-        const queryParams =
-          workspaceMode === 'search'
-            ? {
-                scope:
-                  sourceType === 'mailbox'
-                    ? searchScope === 'pst' && !activeSessionId
-                      ? 'all'
-                      : searchScope
-                    : searchScope === 'pst'
-                      ? 'search'
-                      : searchScope,
-                sourceType,
-                query: searchQuery,
-                mode: deriveSearchMode(searchQuery, 'and'),
-                page: pageIndex,
-                pageSize: 50,
-                mailOnly,
-                sort,
-                reviewFlagged: reviewFlaggedOnly,
-                reviewTagged: reviewTaggedOnly,
-                scopePath: activeSearchScopePath,
-                sessionId: sourceType === 'mailbox' && searchScope === 'pst' && activeSessionId ? sessionToken : undefined
-              }
-            : null
-
-        const response = queryParams
-          ? await api.search(queryParams)
-          : await api.session.folderMessages(sessionToken, activeFolderId, {
-              q: searchQuery,
-              page: pageIndex,
-              pageSize: 50,
-              mailOnly,
-              sort,
-              reviewFlagged: reviewFlaggedOnly,
-              reviewTagged: reviewTaggedOnly
-            })
+        const response = await api.session.folderMessages(activeSessionId, activeFolderId, {
+          q: '',
+          page: pageIndex,
+          pageSize: 50,
+          mailOnly,
+          sort,
+          reviewFlagged: reviewFlaggedOnly,
+          reviewTagged: reviewTaggedOnly
+        })
 
         if (cancelled) {
           return
         }
 
-        const page = 'page' in response && response.page ? normalizeSearchResultsPage(response.page) : null
-        if (page) {
-          setCurrentPage(page)
-          if (page.page !== pageIndex) {
-            setPageIndex(page.page)
-          }
-          const storedMessageId = readWorkspaceStorageItem('messageId', true, username, '')
-          const nextMessageId = page.items.some((item) => item.id === selectedMessageId)
-            ? selectedMessageId
-            : page.items.find((item) => item.id === storedMessageId)?.id || page.items[0]?.id || ''
-          if (nextMessageId && nextMessageId !== selectedMessageId) {
-            const nextMessage = page.items.find((item) => item.id === nextMessageId)
-            if (nextMessage) {
-              void openMessageSummary(nextMessage)
-            } else {
-              setSelectedMessageId(nextMessageId)
-            }
-          }
+        const page = normalizeSearchResultsPage(response.page)
+        applyLoadedPage(page)
+      } catch (error) {
+        if (!cancelled) {
+          setCurrentPage(null)
+          setAuthError(error instanceof Error ? error.message : 'Unable to load messages')
+        }
+      } finally {
+        if (!cancelled) {
+          setMessagesLoading(false)
+        }
+      }
+    }
+
+    void loadFolderMessages()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    authenticated,
+    currentFolderId,
+    mailOnly,
+    pageIndex,
+    reviewFlaggedOnly,
+    reviewTaggedOnly,
+    sort,
+    sessionId,
+    username,
+    workspaceMode,
+    workspaceReady
+  ])
+
+  React.useEffect(() => {
+    const activeSessionId = sessionId
+    if (!workspaceReady || workspaceMode !== 'search') {
+      return
+    }
+    if (skipNextMessageReloadRef.current) {
+      skipNextMessageReloadRef.current = false
+      return
+    }
+
+    const sessionToken = activeSessionId
+    let cancelled = false
+
+    async function loadSearchMessages(): Promise<void> {
+      try {
+        setMessagesLoading(true)
+        const response = await api.search({
+          scope:
+            sourceType === 'mailbox'
+              ? searchScope === 'pst' && !activeSessionId
+                ? 'all'
+                : searchScope
+              : searchScope === 'pst'
+                ? 'search'
+                : searchScope,
+          sourceType,
+          query: searchQuery,
+          mode: deriveSearchMode(searchQuery, 'and'),
+          page: pageIndex,
+          pageSize: 50,
+          mailOnly,
+          sort,
+          reviewFlagged: reviewFlaggedOnly,
+          reviewTagged: reviewTaggedOnly,
+          scopePath: activeSearchScopePath,
+          sessionId: sourceType === 'mailbox' && searchScope === 'pst' && activeSessionId ? sessionToken : undefined
+        })
+
+        if (cancelled) {
+          return
+        }
+
+        if ('page' in response && response.page) {
+          applyLoadedPage(normalizeSearchResultsPage(response.page))
         }
       } catch (error) {
         if (!cancelled) {
@@ -1017,14 +1067,14 @@ export function App() {
       }
     }
 
-    void loadMessages()
+    void loadSearchMessages()
 
     return () => {
       cancelled = true
     }
   }, [
+    activeSearchScopePath,
     authenticated,
-    currentFolderId,
     mailOnly,
     pageIndex,
     reviewFlaggedOnly,
@@ -1033,9 +1083,7 @@ export function App() {
     searchScope,
     sort,
     sourceType,
-    username,
-    activeSearchScopePath,
-    searchSessionKey,
+    sessionId,
     workspaceMode,
     workspaceReady
   ])
@@ -1992,16 +2040,16 @@ export function App() {
         writeWorkspaceStorageItem('casePath', true, username, nextCasePath)
         writeWorkspaceStorageItem('scopePath', true, username, nextScopePath)
         writeWorkspaceStorageItem('pstFileName', true, username, nextFileName)
-        void openMailbox(nextFileName, nextScopePath, catalog || undefined, {
-          preserveWorkspaceMode: true,
-          preservePreview: true
-        })
         try {
           const response = await api.item.detail(message.id)
           if (messagePreviewRequestRef.current !== requestId) {
             return
           }
           setSelectedMessage(response.detail)
+          void openMailbox(nextFileName, nextScopePath, catalog || undefined, {
+            preserveWorkspaceMode: true,
+            preservePreview: true
+          })
         } catch (error) {
           if (messagePreviewRequestRef.current === requestId) {
             setAuthError(error instanceof Error ? error.message : 'Unable to load item detail')

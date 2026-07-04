@@ -1565,9 +1565,15 @@ describe('shell and preview', () => {
 
     expect(await screen.findByText('Loading preview...')).toBeInTheDocument()
     expect(screen.queryByText('No message selected')).not.toBeInTheDocument()
+    await waitFor(() => {
+      expect(api.search).toHaveBeenCalledTimes(1)
+    })
     targetItemDetail.resolve({ detail: targetDetail })
     expect(await screen.findByText('Target mailbox body')).toBeInTheDocument()
-    expect(api.pst.open).toHaveBeenCalledWith('Case Beta/Search Two', 'mailbox-b.pst')
+    await waitFor(() => {
+      expect(api.pst.open).toHaveBeenCalledWith('Case Beta/Search Two', 'mailbox-b.pst')
+    })
+    expect(screen.queryByText('Loading preview...')).not.toBeInTheDocument()
     openTargetMailbox.resolve({
       sessionId: 'session-b',
       scopePath: 'Case Beta/Search Two',
