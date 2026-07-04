@@ -1641,6 +1641,31 @@ async function resolveMailboxMessageDetail(
   return applyMailboxAttachmentDownloadUrls(detail, session.id)
 }
 
+async function resolveMailboxItemDetail(
+  pstRootDir: string,
+  item: SearchIndexDocument,
+  reviewStore: ReviewStore,
+  reviewerUsername: string,
+  searchIndexStore: SearchIndexStore
+): Promise<MessageDetail> {
+  const snapshot = await searchIndexStore.findMailboxDetail(item.mailboxKey, item.messageId).catch(() => null)
+  if (snapshot) {
+    const review = await reviewStore.getReview(item.mailboxKey, item.messageId, reviewerUsername)
+    return buildReviewedDetail(snapshot, review)
+  }
+
+  const session = openPstMailbox(pstRootDir, item.scopePath, item.fileName)
+  const detail = buildMessageDetailFromSession(session, item.messageId, 1)
+  try {
+    await searchIndexStore.upsertMailboxDetail(item.mailboxKey, detail)
+  } catch {
+    // Ignore snapshot backfill failures and keep serving the live PST detail.
+  }
+
+  const review = await reviewStore.getReview(item.mailboxKey, item.messageId, reviewerUsername)
+  return buildReviewedDetail(detail, review)
+}
+
 function buildMailboxDetailCacheKey(messageId: string, reviewerUsername: string): string {
   return `${normalizeText(reviewerUsername) || 'anonymous'}::${normalizeText(messageId)}`
 }
@@ -5275,50 +5300,55 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         return
       }
 
-      const detail = {
-        id: item.id || item.messageId,
-        sourceType: item.sourceType,
-        subject: item.subject,
-        senderName: item.senderName,
-        senderEmailAddress: item.senderEmailAddress,
-        displayTo: item.displayTo,
-        displayCC: item.displayCC,
-        displayBCC: item.displayBCC,
-        resolvedDisplayTo: item.resolvedDisplayTo,
-        resolvedDisplayCC: item.resolvedDisplayCC,
-        resolvedDisplayBCC: item.resolvedDisplayBCC,
-        clientSubmitTime: item.clientSubmitTime,
-        creationTime: item.creationTime,
-        modificationTime: item.modificationTime,
-        messageDeliveryTime: item.messageDeliveryTime,
-        sortDate: item.sortDate,
-        bodyHtml: item.previewHtml || '',
-        bodyText: item.previewText || '',
-        bodyPrefix: item.previewText || item.previewHtml ? 'Preview from archive item' : '',
-        parseError: '',
-        attachments: [],
-        review: item.review,
-        folderId: item.folderId,
-        folderPath: item.folderPath,
-        mailboxName: item.mailboxName,
-        archivePath: item.archivePath,
-        archiveEntryPath: item.archiveEntryPath,
-        archiveEntryChain: item.archiveEntryChain,
-        archiveEntryName: item.archiveEntryName,
-        contentType: item.contentType,
-        downloadFilename: item.downloadFilename,
-        previewKind: item.previewKind,
-        previewText: item.previewText,
-        previewHtml: item.previewHtml,
-        previewUrl: item.archivePath ? `/api/items/${encodeURIComponent(item.id || item.messageId)}/preview` : '',
-        downloadUrl: item.archivePath ? `/api/items/${encodeURIComponent(item.id || item.messageId)}/content` : ''
-      }
+      const reviewerUsername = getReviewOwnerUsername(authSession)
+      const detail =
+        item.sourceType === 'mailbox'
+          ? await resolveMailboxItemDetail(pstRootDir, item, reviewStore, reviewerUsername, searchIndexStore)
+          : buildReviewedDetail(
+              ({
+              id: item.id || item.messageId,
+              subject: item.subject,
+              senderName: item.senderName,
+              senderEmailAddress: item.senderEmailAddress,
+              displayTo: item.displayTo,
+              displayCC: item.displayCC,
+              displayBCC: item.displayBCC,
+              resolvedDisplayTo: item.resolvedDisplayTo,
+              resolvedDisplayCC: item.resolvedDisplayCC,
+              resolvedDisplayBCC: item.resolvedDisplayBCC,
+              clientSubmitTime: item.clientSubmitTime,
+              creationTime: item.creationTime,
+              modificationTime: item.modificationTime,
+              messageDeliveryTime: item.messageDeliveryTime,
+              sortDate: item.sortDate,
+              bodyHtml: item.previewHtml || '',
+              bodyText: item.previewText || '',
+              bodyPrefix: item.previewText || item.previewHtml ? 'Preview from archive item' : '',
+              parseError: '',
+              attachments: [],
+              folderId: item.folderId,
+              folderPath: item.folderPath,
+              mailboxName: item.mailboxName,
+              archivePath: item.archivePath,
+              archiveEntryPath: item.archiveEntryPath,
+              archiveEntryChain: item.archiveEntryChain,
+              archiveEntryName: item.archiveEntryName,
+              contentType: item.contentType,
+              downloadFilename: item.downloadFilename,
+              previewKind: item.previewKind,
+              previewText: item.previewText,
+              previewHtml: item.previewHtml,
+              previewUrl: item.archivePath ? `/api/items/${encodeURIComponent(item.id || item.messageId)}/preview` : '',
+              downloadUrl: item.archivePath ? `/api/items/${encodeURIComponent(item.id || item.messageId)}/content` : ''
+              } as unknown as MessageDetail),
+              item.review
+            )
 
       recordAuditEvent({
         req,
         session: authSession,
         action: 'search.item.view',
-        target: detail.subject || detail.archiveEntryName || detail.id || 'item',
+        target: detail.subject || item.archiveEntryName || detail.id || 'item',
         outcome: 'success',
         metadata: {
           sourceType: item.sourceType,

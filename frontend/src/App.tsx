@@ -80,6 +80,7 @@ type CorpusSourceType = SearchSourceType
 type OpenMailboxOptions = {
   preserveWorkspaceMode?: boolean
   selectedMessageId?: string
+  preservePreview?: boolean
 }
 type SmtpFormState = {
   enabled: boolean
@@ -1037,7 +1038,16 @@ export function App() {
   ])
 
   React.useEffect(() => {
-    if (!workspaceReady || !sessionId || !currentPage?.items?.length || sourceType !== 'mailbox') {
+    const mailboxSessionMatchesSelection =
+      !selectedPstFileName || !sessionSummary?.fileName || sessionSummary.fileName === selectedPstFileName
+
+    if (
+      !workspaceReady ||
+      !sessionId ||
+      !mailboxSessionMatchesSelection ||
+      !currentPage?.items?.length ||
+      sourceType !== 'mailbox'
+    ) {
       return
     }
 
@@ -1081,7 +1091,37 @@ export function App() {
       return
     }
     const activeSessionId = sessionId
-    if (!activeSessionId) {
+    const mailboxSessionMatchesSelection =
+      !selectedPstFileName || !sessionSummary?.fileName || sessionSummary.fileName === selectedPstFileName
+
+    if (selectedMessage?.id === activeMessageId) {
+      if (!activeSessionId || !mailboxSessionMatchesSelection) {
+        return
+      }
+
+      const cacheKey = getMailboxDetailCacheKey(activeMessageId)
+      const cachedDetail = mailboxDetailCacheRef.current.get(cacheKey)
+      if (cachedDetail) {
+        setSelectedMessage(cachedDetail)
+        return
+      }
+
+      const hydrationRequestId = messagePreviewRequestRef.current
+      void loadMailboxMessageDetail(activeMessageId)
+        .then((detail) => {
+          if (
+            messagePreviewRequestRef.current !== hydrationRequestId ||
+            selectedMessageId !== activeMessageId
+          ) {
+            return
+          }
+          setSelectedMessage(detail)
+        })
+        .catch(() => undefined)
+      return
+    }
+
+    if (!activeSessionId || !mailboxSessionMatchesSelection) {
       setSelectedMessage(null)
       setMessageLoading(false)
       return
@@ -1122,7 +1162,17 @@ export function App() {
     return () => {
       cancelled = true
     }
-  }, [currentPage, selectedMessageId, selectedPageItem?.sourceType, sessionId, workspaceReady])
+  }, [
+    currentPage,
+    messageLoading,
+    selectedMessage?.id,
+    selectedMessageId,
+    selectedPageItem?.sourceType,
+    selectedPstFileName,
+    sessionId,
+    sessionSummary?.fileName,
+    workspaceReady
+  ])
 
   React.useEffect(() => {
     if (!workspaceReady || (!selectedMessage && !messageLoading)) {
@@ -1837,11 +1887,15 @@ export function App() {
     catalogResponse?: PstCatalogResponse,
     options: OpenMailboxOptions = {}
   ): Promise<void> {
-    invalidateMessagePreview(Boolean(options.selectedMessageId))
+    if (!options.preservePreview) {
+      invalidateMessagePreview(Boolean(options.selectedMessageId))
+    }
     const effectiveScope = scopePath || selectedScopePath || selectedCasePath || catalogResponse?.scopePath || catalog?.scopePath || ''
     try {
       const response: SessionOpenResponse = await api.pst.open(effectiveScope, fileName)
-      clearMailboxDetailCache()
+      if (!options.preservePreview) {
+        clearMailboxDetailCache()
+      }
       const nextCasePath = getCasePathFromScopePath(effectiveScope || response.scopePath)
       setSessionId(response.sessionId)
       setSessionSummary(response.summary)
@@ -1850,7 +1904,7 @@ export function App() {
       setSelectedPstFileName(response.fileName)
       setSelectedCasePath(nextCasePath)
       setSelectedScopePath(effectiveScope || response.scopePath)
-      if (options.selectedMessageId) {
+      if (options.selectedMessageId && !options.preservePreview) {
         setSelectedMessageId(options.selectedMessageId)
         writeWorkspaceStorageItem('messageId', true, username, options.selectedMessageId)
       }
@@ -1915,13 +1969,39 @@ export function App() {
       const nextFileName = message.fileName || currentFileName
       const nextScopePath = message.scopePath || currentScopePath
       if (nextFileName && nextScopePath) {
+        const requestId = invalidateMessagePreview(true)
+        const nextCasePath = getCasePathFromScopePath(nextScopePath)
         if (workspaceMode === 'search' && sourceType === 'mailbox' && searchScope !== 'pst') {
           skipNextSearchReloadRef.current = true
         }
-        await openMailbox(nextFileName, nextScopePath, catalog || undefined, {
+        setSelectedMessageId(message.id)
+        writeWorkspaceStorageItem('messageId', true, username, message.id)
+        setWorkspaceMode('search')
+        setSelectedPstFileName(nextFileName)
+        setSelectedCasePath(nextCasePath)
+        setSelectedScopePath(nextScopePath)
+        writeWorkspaceStorageItem('casePath', true, username, nextCasePath)
+        writeWorkspaceStorageItem('scopePath', true, username, nextScopePath)
+        writeWorkspaceStorageItem('pstFileName', true, username, nextFileName)
+        void openMailbox(nextFileName, nextScopePath, catalog || undefined, {
           preserveWorkspaceMode: true,
-          selectedMessageId: message.id
+          preservePreview: true
         })
+        try {
+          const response = await api.item.detail(message.id)
+          if (messagePreviewRequestRef.current !== requestId) {
+            return
+          }
+          setSelectedMessage(response.detail)
+        } catch (error) {
+          if (messagePreviewRequestRef.current === requestId) {
+            setAuthError(error instanceof Error ? error.message : 'Unable to load item detail')
+          }
+        } finally {
+          if (messagePreviewRequestRef.current === requestId) {
+            setMessageLoading(false)
+          }
+        }
         return
       }
     }

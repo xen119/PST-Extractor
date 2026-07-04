@@ -899,7 +899,7 @@ export function EmailPreview({
   canNavigatePrev,
   canNavigateNext
 }: EmailPreviewProps) {
-  if (loading || !detail) {
+  if (!detail) {
     return (
       <div className="panel-surface flex h-full min-h-0 items-center justify-center p-6">
         <div className="empty-state">

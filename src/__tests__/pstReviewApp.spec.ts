@@ -806,11 +806,14 @@ describe('pst review api', () => {
     const detailTwo = await requestJson(
       `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(message.id)}`
     )
+    const itemDetail = await requestJson(`${started.baseUrl}/api/items/${encodeURIComponent(message.id)}`)
 
     expect(detailTwo.detail).toEqual(detailOne.detail)
+    expect(itemDetail.detail.bodyText).toBe(detailOne.detail.bodyText)
+    expect(itemDetail.detail.review.flagged).toBe(detailOne.detail.review.flagged)
     expect(extractOne.record.review.flagged).toBe(detailOne.detail.review.flagged)
     expect(loadSpy).not.toHaveBeenCalled()
-    expect(reviewSpy).toHaveBeenCalledTimes(1)
+    expect(reviewSpy).toHaveBeenCalledTimes(2)
 
     await requestJson(
       `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
@@ -839,7 +842,7 @@ describe('pst review api', () => {
     expect(detailAfterUpdate.detail.review.flagged).toBe(true)
     expect(extractAfterUpdate.record.review.flagged).toBe(true)
     expect(loadSpy).not.toHaveBeenCalled()
-    expect(reviewSpy).toHaveBeenCalledTimes(2)
+    expect(reviewSpy).toHaveBeenCalledTimes(3)
   })
 
   it('backfills a missing mailbox snapshot from PST once and reuses it thereafter', async () => {

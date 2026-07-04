@@ -595,6 +595,7 @@ describe('shell and preview', () => {
   }
 
   const sampleDetail: MessageDetail = {
+    id: 'sample-message',
     subject: 'Quarterly update',
     senderName: 'Alice Example',
     senderEmailAddress: 'alice@example.com',
@@ -909,6 +910,7 @@ describe('shell and preview', () => {
       files: []
     }
     const currentDetail: MessageDetail = {
+      id: 'message-1',
       subject: 'Current mailbox message',
       senderName: 'Alice Example',
       senderEmailAddress: 'alice@example.com',
@@ -918,6 +920,7 @@ describe('shell and preview', () => {
     const firstDetail = createDeferred<{ detail: MessageDetail }>()
     const secondDetail = createDeferred<{ detail: MessageDetail }>()
     const firstPreview: MessageDetail = {
+      id: 'message-1',
       subject: 'Archive item A',
       senderName: 'Team A',
       senderEmailAddress: 'team-a@example.com',
@@ -929,6 +932,7 @@ describe('shell and preview', () => {
       downloadUrl: '/api/items/archive-a/content'
     }
     const secondPreview: MessageDetail = {
+      id: 'message-2',
       subject: 'Archive item B',
       senderName: 'Team B',
       senderEmailAddress: 'team-b@example.com',
@@ -1142,6 +1146,7 @@ describe('shell and preview', () => {
       'message-3': thirdDetail
     }
     const firstPreview: MessageDetail = {
+      id: 'message-1',
       subject: 'First mailbox result',
       senderName: 'Alice Example',
       senderEmailAddress: 'alice@example.com',
@@ -1149,6 +1154,7 @@ describe('shell and preview', () => {
       bodyText: 'First mailbox body'
     }
     const secondPreview: MessageDetail = {
+      id: 'message-2',
       subject: 'Second mailbox result',
       senderName: 'Bob Example',
       senderEmailAddress: 'bob@example.com',
@@ -1156,6 +1162,7 @@ describe('shell and preview', () => {
       bodyText: 'Second mailbox body'
     }
     const thirdPreview: MessageDetail = {
+      id: 'message-3',
       subject: 'Third mailbox result',
       senderName: 'Carol Example',
       senderEmailAddress: 'carol@example.com',
@@ -1390,6 +1397,7 @@ describe('shell and preview', () => {
       files: []
     }
     const currentDetail: MessageDetail = {
+      id: 'search-hit-current',
       subject: 'Current mailbox message',
       senderName: 'Alice Example',
       senderEmailAddress: 'alice@example.com',
@@ -1397,12 +1405,21 @@ describe('shell and preview', () => {
       bodyText: 'Current mailbox body'
     }
     const targetDetail: MessageDetail = {
+      id: 'search-hit',
       subject: 'Target search result',
       senderName: 'Bob Example',
       senderEmailAddress: 'bob@example.com',
       sortDate: new Date().toISOString(),
       bodyText: 'Target mailbox body'
     }
+    const openTargetMailbox = createDeferred<{
+      sessionId: string
+      scopePath: string
+      scopeLabel: string
+      fileName: string
+      summary: { fileName: string; mailboxName: string }
+      tree: FolderNode
+    }>()
     const searchResultsPage: PageResponse<MessageSummary> = {
       items: [
         {
@@ -1460,22 +1477,7 @@ describe('shell and preview', () => {
     vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue({ items: [] })
     vi.spyOn(api.pst, 'open').mockImplementation(async (_scopePath, fileName) => {
       if (fileName === 'mailbox-b.pst') {
-        return {
-          sessionId: 'session-b',
-          scopePath: 'Case Beta/Search Two',
-          scopeLabel: 'Search Two',
-          fileName: 'mailbox-b.pst',
-          summary: {
-            fileName: 'mailbox-b.pst',
-            mailboxName: 'mailbox-b.pst'
-          },
-          tree: {
-            id: 'root-b',
-            displayName: 'Inbox',
-            path: 'root-b',
-            children: []
-          }
-        }
+        return openTargetMailbox.promise
       }
 
       return {
@@ -1527,14 +1529,15 @@ describe('shell and preview', () => {
       }
     })
     vi.spyOn(api, 'search').mockResolvedValue(searchResponse)
+    vi.spyOn(api.item, 'detail').mockResolvedValue({ detail: targetDetail })
     vi.spyOn(api.session, 'messageDetail').mockImplementation(async (sessionId, messageId) => {
       if (sessionId === 'session-b' && messageId === 'search-hit') {
-        return { sessionId, detail: targetDetail }
+        return { sessionId, detail: { ...targetDetail, id: messageId } }
       }
       if (sessionId === 'session-a' && messageId === 'search-hit-current') {
-        return { sessionId, detail: currentDetail }
+        return { sessionId, detail: { ...currentDetail, id: messageId } }
       }
-      return { sessionId, detail: currentDetail }
+      return { sessionId, detail: { ...currentDetail, id: messageId } }
     })
 
     window.history.replaceState({}, '', '/')
@@ -1551,15 +1554,29 @@ describe('shell and preview', () => {
     await user.click(screen.getByRole('button', { name: 'Run search' }))
 
     expect(await screen.findByText('Current mailbox body')).toBeInTheDocument()
-    const callsBeforeSecondSelection = vi.mocked(api.search).mock.calls.length
     await user.click(screen.getByRole('button', { name: /Target search result/ }))
 
     expect(await screen.findByText('Target mailbox body')).toBeInTheDocument()
     expect(api.pst.open).toHaveBeenCalledWith('Case Beta/Search Two', 'mailbox-b.pst')
-    await waitFor(() => {
-      expect(vi.mocked(api.search).mock.calls.length).toBe(callsBeforeSecondSelection)
+    openTargetMailbox.resolve({
+      sessionId: 'session-b',
+      scopePath: 'Case Beta/Search Two',
+      scopeLabel: 'Search Two',
+      fileName: 'mailbox-b.pst',
+      summary: {
+        fileName: 'mailbox-b.pst',
+        mailboxName: 'mailbox-b.pst'
+      },
+      tree: {
+        id: 'root-b',
+        displayName: 'Inbox',
+        path: 'root-b',
+        children: []
+      }
     })
-    expect(screen.getByText('Target mailbox body')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(api.session.messageDetail).toHaveBeenCalledWith('session-b', 'search-hit')
+    })
   })
 
   it('shows the tag manager modal', async () => {
