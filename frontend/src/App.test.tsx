@@ -1412,6 +1412,7 @@ describe('shell and preview', () => {
       sortDate: new Date().toISOString(),
       bodyText: 'Target mailbox body'
     }
+    const targetItemDetail = createDeferred<{ detail: MessageDetail }>()
     const openTargetMailbox = createDeferred<{
       sessionId: string
       scopePath: string
@@ -1529,7 +1530,12 @@ describe('shell and preview', () => {
       }
     })
     vi.spyOn(api, 'search').mockResolvedValue(searchResponse)
-    vi.spyOn(api.item, 'detail').mockResolvedValue({ detail: targetDetail })
+    vi.spyOn(api.item, 'detail').mockImplementation(async (itemId) => {
+      if (itemId === 'search-hit') {
+        return targetItemDetail.promise
+      }
+      return { detail: currentDetail }
+    })
     vi.spyOn(api.session, 'messageDetail').mockImplementation(async (sessionId, messageId) => {
       if (sessionId === 'session-b' && messageId === 'search-hit') {
         return { sessionId, detail: { ...targetDetail, id: messageId } }
@@ -1550,12 +1556,16 @@ describe('shell and preview', () => {
     expect(await screen.findByText('Current mailbox message')).toBeInTheDocument()
 
     await user.type(screen.getByPlaceholderText('Keywords, "phrases", + AND, | OR'), 'target')
+    expect(api.search).not.toHaveBeenCalled()
     await user.selectOptions(screen.getByRole('combobox', { name: 'Scope' }), 'all')
     await user.click(screen.getByRole('button', { name: 'Run search' }))
 
     expect(await screen.findByText('Current mailbox body')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /Target search result/ }))
 
+    expect(await screen.findByText('Loading preview...')).toBeInTheDocument()
+    expect(screen.queryByText('No message selected')).not.toBeInTheDocument()
+    targetItemDetail.resolve({ detail: targetDetail })
     expect(await screen.findByText('Target mailbox body')).toBeInTheDocument()
     expect(api.pst.open).toHaveBeenCalledWith('Case Beta/Search Two', 'mailbox-b.pst')
     openTargetMailbox.resolve({

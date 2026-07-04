@@ -354,6 +354,7 @@ export function App() {
   const [messageLoading, setMessageLoading] = React.useState(false)
   const [workspaceMode, setWorkspaceMode] = React.useState<WorkspaceMode>('folder')
   const [searchQuery, setSearchQuery] = React.useState('')
+  const [searchInputQuery, setSearchInputQuery] = React.useState('')
   const [searchScope, setSearchScope] = React.useState<SearchScope>('all')
   const [sourceType, setSourceType] = React.useState<CorpusSourceType>('mailbox')
   const [mailOnly, setMailOnly] = React.useState(false)
@@ -422,7 +423,7 @@ export function App() {
     items: null
   })
   const messagePreviewRequestRef = React.useRef(0)
-  const skipNextSearchReloadRef = React.useRef(false)
+  const skipNextMessageReloadRef = React.useRef(false)
   const mailboxDetailCacheRef = React.useRef(new Map<string, MessageDetail>())
   const mailboxDetailInFlightRef = React.useRef(new Map<string, Promise<MessageDetail>>())
 
@@ -702,7 +703,9 @@ export function App() {
     setSelectedPstFileName(readWorkspaceStorageItem('pstFileName', true, username, ''))
     setCurrentFolderId(readWorkspaceStorageItem('folderId', true, username, ''))
     setSelectedMessageId(readWorkspaceStorageItem('messageId', true, username, ''))
-    setSearchQuery(readWorkspaceStorageItem('query', true, username, ''))
+    const rememberedQuery = readWorkspaceStorageItem('query', true, username, '')
+    setSearchQuery(rememberedQuery)
+    setSearchInputQuery(rememberedQuery)
     const rememberedSearchScope = (readWorkspaceStorageItem('searchScope', true, username, 'all') as SearchScope) || 'all'
     setSearchScope(rememberedSearchScope === 'pst' ? 'all' : rememberedSearchScope)
     const rememberedSourceType = readWorkspaceStorageItem('sourceType', true, username, 'mailbox') as CorpusSourceType
@@ -931,8 +934,8 @@ export function App() {
     if (!workspaceReady || (workspaceMode !== 'search' && (!activeSessionId || !activeFolderId))) {
       return
     }
-    if (skipNextSearchReloadRef.current) {
-      skipNextSearchReloadRef.current = false
+    if (skipNextMessageReloadRef.current) {
+      skipNextMessageReloadRef.current = false
       return
     }
     const sessionToken = activeSessionId
@@ -1122,8 +1125,10 @@ export function App() {
     }
 
     if (!activeSessionId || !mailboxSessionMatchesSelection) {
-      setSelectedMessage(null)
-      setMessageLoading(false)
+      if (!messageLoading) {
+        setSelectedMessage(null)
+        setMessageLoading(false)
+      }
       return
     }
 
@@ -1387,6 +1392,7 @@ export function App() {
       setSelectedMessage(null)
       setWorkspaceMode('folder')
       setSearchQuery('')
+      setSearchInputQuery('')
       setSearchScope('all')
       setSourceType('mailbox')
       setMailOnly(false)
@@ -1824,6 +1830,8 @@ export function App() {
     if (!sessionId) {
       return
     }
+    skipNextMessageReloadRef.current = true
+    setWorkspaceMode('folder')
     setMessagesLoading(true)
     try {
       setPageIndex(nextPage)
@@ -1837,7 +1845,6 @@ export function App() {
         reviewTagged: reviewTaggedOnly
       })
       setCurrentPage(normalizeSearchResultsPage(response.page))
-      setWorkspaceMode('folder')
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : 'Unable to load folder messages')
     } finally {
@@ -1845,7 +1852,9 @@ export function App() {
     }
   }
 
-  async function loadSearchPage(nextPage = 1): Promise<void> {
+  async function loadSearchPage(nextPage = 1, query = searchQuery): Promise<void> {
+    skipNextMessageReloadRef.current = true
+    setWorkspaceMode('search')
     setMessagesLoading(true)
     try {
       setPageIndex(nextPage)
@@ -1861,8 +1870,8 @@ export function App() {
       const response = await api.search({
         scope: effectiveSearchScope,
         sourceType,
-        query: searchQuery,
-        mode: deriveSearchMode(searchQuery, 'and'),
+        query,
+        mode: deriveSearchMode(query, 'and'),
         page: nextPage,
         pageSize: 50,
         mailOnly,
@@ -1873,7 +1882,6 @@ export function App() {
         sessionId: sourceType === 'mailbox' && effectiveSearchScope === 'pst' && sessionId ? sessionId : undefined
       })
       setCurrentPage(normalizeSearchResultsPage(response.page))
-      setWorkspaceMode('search')
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : 'Unable to run search')
     } finally {
@@ -1928,6 +1936,7 @@ export function App() {
     if (workspaceMode === 'search') {
       setWorkspaceMode('folder')
       setSearchQuery('')
+      setSearchInputQuery('')
     }
     await loadFolderPage(folderId, 1)
   }
@@ -1972,7 +1981,7 @@ export function App() {
         const requestId = invalidateMessagePreview(true)
         const nextCasePath = getCasePathFromScopePath(nextScopePath)
         if (workspaceMode === 'search' && sourceType === 'mailbox' && searchScope !== 'pst') {
-          skipNextSearchReloadRef.current = true
+          skipNextMessageReloadRef.current = true
         }
         setSelectedMessageId(message.id)
         writeWorkspaceStorageItem('messageId', true, username, message.id)
@@ -2284,11 +2293,13 @@ export function App() {
       sourceType === 'mailbox'
         ? searchScope
         : 'search'
-    if (!searchQuery.trim() && effectiveScope === 'pst') {
+    if (!searchInputQuery.trim() && effectiveScope === 'pst') {
+      setSearchQuery('')
       await refreshCurrentPage()
       return
     }
-    await loadSearchPage(1)
+    setSearchQuery(searchInputQuery)
+    await loadSearchPage(1, searchInputQuery)
   }
 
   function getWorkspaceItemsRequestParams(): Record<string, string | number | boolean | undefined> {
@@ -2500,14 +2511,15 @@ export function App() {
     <MessageList
       page={currentPage}
       loading={messagesLoading}
-      query={searchQuery}
+      query={searchInputQuery}
+      activeQuery={searchQuery}
       sourceType={sourceType}
       searchScope={searchScope}
       mailOnly={mailOnly}
       sort={sort}
       reviewFlaggedOnly={reviewFlaggedOnly}
       reviewTaggedOnly={reviewTaggedOnly}
-      onQueryChange={setSearchQuery}
+      onQueryChange={setSearchInputQuery}
       onSearch={() => {
         void runSearch()
       }}

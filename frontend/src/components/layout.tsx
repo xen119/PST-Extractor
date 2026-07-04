@@ -532,6 +532,7 @@ interface MessageListProps {
   } | null
   loading: boolean
   query: string
+  activeQuery?: string
   sourceType: 'mailbox' | 'teams' | 'sharepoint'
   searchScope: 'pst' | 'search' | 'all'
   mailOnly: boolean
@@ -558,6 +559,7 @@ export function MessageList({
   page,
   loading,
   query,
+  activeQuery,
   sourceType,
   searchScope,
   mailOnly,
@@ -614,6 +616,7 @@ export function MessageList({
         <div className="border-t border-[color:var(--line)] px-4 py-4">
           <MessageSearchBar
             query={query}
+            activeQuery={activeQuery}
             sourceType={sourceType}
             searchScope={searchScope}
             mailOnly={mailOnly}
@@ -692,6 +695,7 @@ export function MessageList({
 
 function MessageSearchBar(props: {
   query: string
+  activeQuery?: string
   sourceType: 'mailbox' | 'teams' | 'sharepoint'
   searchScope: 'pst' | 'search' | 'all'
   mailOnly: boolean
@@ -707,6 +711,7 @@ function MessageSearchBar(props: {
   onReviewTaggedChange: (value: boolean) => void
 }) {
   const effectiveSearchScope = props.sourceType === 'mailbox' ? props.searchScope : 'search'
+  const displayedQuery = props.activeQuery ?? props.query
   const scopeOptions =
     props.sourceType === 'mailbox'
       ? [
@@ -725,12 +730,6 @@ function MessageSearchBar(props: {
             <Input
               value={props.query}
               onChange={(event) => props.onQueryChange(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  event.preventDefault()
-                  props.onSearch()
-                }
-              }}
               placeholder='Keywords, "phrases", + AND, | OR'
             />
             <IconButton
@@ -799,7 +798,7 @@ function MessageSearchBar(props: {
         {props.mailOnly ? <span className="chip chip-active">Mail only</span> : null}
         {props.reviewFlaggedOnly ? <span className="chip chip-active">Flagged</span> : null}
         {props.reviewTaggedOnly ? <span className="chip chip-active">Tagged</span> : null}
-        {props.query ? <span className="chip">Search: {props.query}</span> : null}
+        {displayedQuery ? <span className="chip">Search: {displayedQuery}</span> : null}
       </div>
     </div>
   )
