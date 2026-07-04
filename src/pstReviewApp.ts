@@ -275,6 +275,7 @@ interface SessionRecord {
   scopePath: string
   scopeLabel: string
   mailboxKey: string
+  messageDetailCache: Map<string, Promise<ReviewedMessageDetail>>
 }
 
 interface OpenMailboxRequestBody {
@@ -1586,6 +1587,37 @@ function buildReviewedDetail(
   }
 }
 
+function buildMailboxDetailCacheKey(messageId: string, reviewerUsername: string): string {
+  return `${normalizeText(reviewerUsername) || 'anonymous'}::${normalizeText(messageId)}`
+}
+
+function invalidateMailboxDetailCache(
+  session: SessionRecord,
+  messageId?: string,
+  reviewerUsername?: string
+): void {
+  if (!messageId && !reviewerUsername) {
+    session.messageDetailCache.clear()
+    return
+  }
+
+  if (messageId && reviewerUsername) {
+    session.messageDetailCache.delete(buildMailboxDetailCacheKey(messageId, reviewerUsername))
+    return
+  }
+
+  const normalizedMessageId = normalizeText(messageId || '')
+  if (!normalizedMessageId) {
+    return
+  }
+
+  for (const cacheKey of session.messageDetailCache.keys()) {
+    if (cacheKey.endsWith(`::${normalizedMessageId}`)) {
+      session.messageDetailCache.delete(cacheKey)
+    }
+  }
+}
+
 function buildDocsHtml(): string {
   return `<!doctype html>
     <html lang="en">
@@ -1655,42 +1687,59 @@ async function buildMessageDetailResponse(
   reviewStore: ReviewStore,
   reviewerUsername: string
 ): Promise<ReviewedMessageDetail> {
-  const summary = session.index.messages.get(messageId)
-  if (!summary) {
-    throw createAppError(404, `Unknown message: ${messageId}`)
+  const cacheKey = buildMailboxDetailCacheKey(messageId, reviewerUsername)
+  const cached = session.messageDetailCache.get(cacheKey)
+  if (cached) {
+    return cached
   }
 
-  const review = await reviewStore.getReview(session.filePath, messageId, reviewerUsername)
-  if (summary.parseError) {
-    return buildReviewedDetail(buildEmptyMessageDetail(summary), review)
-  }
+  const detailPromise = (async () => {
+    const summary = session.index.messages.get(messageId)
+    if (!summary) {
+      throw createAppError(404, `Unknown message: ${messageId}`)
+    }
+
+    const review = await reviewStore.getReview(session.filePath, messageId, reviewerUsername)
+    if (summary.parseError) {
+      return buildReviewedDetail(buildEmptyMessageDetail(summary), review)
+    }
+
+    try {
+      const detail = buildMessageDetailFromSession(session.index, messageId, 1)
+      return buildReviewedDetail(
+        {
+          ...detail,
+          attachments: detail.attachments.map((attachment) => ({
+            ...attachment,
+            downloadUrl:
+              attachment.isDownloadable
+                ? attachment.downloadUrl || `${createAttachmentBaseUrl(session.id, messageId)}${attachment.index}`
+                : ''
+          }))
+        },
+        review
+      )
+    } catch (error) {
+      const parseError = error instanceof Error ? error.message : String(error)
+      return buildReviewedDetail(
+        buildEmptyMessageDetail({
+          ...summary,
+          parseError
+        }),
+        review
+      )
+    }
+  })()
+
+  session.messageDetailCache.set(cacheKey, detailPromise)
 
   try {
-    const detail = await Promise.resolve(
-      buildMessageDetailFromSession(session.index, messageId, 1)
-    )
-    return buildReviewedDetail(
-      {
-        ...detail,
-        attachments: detail.attachments.map((attachment) => ({
-          ...attachment,
-          downloadUrl:
-            attachment.isDownloadable
-              ? attachment.downloadUrl || `${createAttachmentBaseUrl(session.id, messageId)}${attachment.index}`
-              : ''
-        }))
-      },
-      review
-    )
+    return await detailPromise
   } catch (error) {
-    const parseError = error instanceof Error ? error.message : String(error)
-    return buildReviewedDetail(
-      buildEmptyMessageDetail({
-        ...summary,
-        parseError
-      }),
-      review
-    )
+    if (session.messageDetailCache.get(cacheKey) === detailPromise) {
+      session.messageDetailCache.delete(cacheKey)
+    }
+    throw error
   }
 }
 
@@ -3152,6 +3201,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     const normalizedMailboxKey = normalizeText(mailboxKey)
     for (const [sessionId, session] of sessions.entries()) {
       if (session.filePath === normalizedMailboxKey) {
+        session.messageDetailCache.clear()
         sessions.delete(sessionId)
         closedSessionIds.push(sessionId)
       }
@@ -4808,7 +4858,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         fileName: index.fileName,
         scopePath,
         scopeLabel,
-        mailboxKey: index.filePath
+        mailboxKey: index.filePath,
+        messageDetailCache: new Map<string, Promise<ReviewedMessageDetail>>()
       }
       sessions.set(sessionId, record)
 
@@ -6583,6 +6634,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         reviewerUsername,
         review
       )
+      invalidateMailboxDetailCache(session, messageId, reviewerUsername)
       recordAuditEvent({
         req,
         session: authSession,
@@ -6615,6 +6667,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       const messageId = normalizeText(req.params.messageId)
       await reviewStore.deleteReview(session.filePath, messageId, reviewerUsername)
       await searchIndexStore.updateReviewState(session.filePath, messageId, reviewerUsername, null)
+      invalidateMailboxDetailCache(session, messageId, reviewerUsername)
       recordAuditEvent({
         req,
         session: authSession,

@@ -420,6 +420,8 @@ export function App() {
     items: null
   })
   const messagePreviewRequestRef = React.useRef(0)
+  const mailboxDetailCacheRef = React.useRef(new Map<string, MessageDetail>())
+  const mailboxDetailInFlightRef = React.useRef(new Map<string, Promise<MessageDetail>>())
 
   const catalogLoadKeyRef = React.useRef('')
 
@@ -476,6 +478,74 @@ export function App() {
     setSelectedMessage(null)
     setMessageLoading(loading)
     return messagePreviewRequestRef.current
+  }
+
+  function getMailboxDetailCacheKey(messageId: string): string {
+    return `${sessionId || ''}::${messageId}`
+  }
+
+  function clearMailboxDetailCache(messageId?: string): void {
+    if (!sessionId) {
+      mailboxDetailCacheRef.current.clear()
+      mailboxDetailInFlightRef.current.clear()
+      return
+    }
+
+    if (!messageId) {
+      const prefix = `${sessionId}::`
+      for (const key of mailboxDetailCacheRef.current.keys()) {
+        if (key.startsWith(prefix)) {
+          mailboxDetailCacheRef.current.delete(key)
+        }
+      }
+      for (const key of mailboxDetailInFlightRef.current.keys()) {
+        if (key.startsWith(prefix)) {
+          mailboxDetailInFlightRef.current.delete(key)
+        }
+      }
+      return
+    }
+
+    const cacheKey = getMailboxDetailCacheKey(messageId)
+    mailboxDetailCacheRef.current.delete(cacheKey)
+    mailboxDetailInFlightRef.current.delete(cacheKey)
+  }
+
+  function loadMailboxMessageDetail(messageId: string): Promise<MessageDetail> {
+    if (!sessionId) {
+      return Promise.reject(new Error('Mailbox session not available'))
+    }
+
+    const cacheKey = getMailboxDetailCacheKey(messageId)
+    const cachedDetail = mailboxDetailCacheRef.current.get(cacheKey)
+    if (cachedDetail) {
+      return Promise.resolve(cachedDetail)
+    }
+
+    const inFlightRequest = mailboxDetailInFlightRef.current.get(cacheKey)
+    if (inFlightRequest) {
+      return inFlightRequest
+    }
+
+    const request = api.session.messageDetail(sessionId, messageId).then((response) => {
+      if (mailboxDetailInFlightRef.current.get(cacheKey) === request) {
+        mailboxDetailInFlightRef.current.delete(cacheKey)
+        mailboxDetailCacheRef.current.set(cacheKey, response.detail)
+      }
+      return response.detail
+    })
+
+    mailboxDetailInFlightRef.current.set(cacheKey, request)
+    return request.catch((error) => {
+      if (mailboxDetailInFlightRef.current.get(cacheKey) === request) {
+        mailboxDetailInFlightRef.current.delete(cacheKey)
+      }
+      throw error
+    })
+  }
+
+  function prefetchMailboxMessageDetail(messageId: string): void {
+    void loadMailboxMessageDetail(messageId).catch(() => undefined)
   }
 
   React.useEffect(() => {
@@ -934,13 +1004,47 @@ export function App() {
   ])
 
   React.useEffect(() => {
+    if (!workspaceReady || !sessionId || !currentPage?.items?.length || sourceType !== 'mailbox') {
+      return
+    }
+
+    const currentFileName = selectedPstFileName || sessionSummary?.fileName || ''
+    const currentScopePath = selectedScopePath || selectedCasePath
+    const mailboxItems = currentPage.items.filter(
+      (item) => item.sourceType === 'mailbox' && isSameMailboxContext(item, currentFileName, currentScopePath)
+    )
+    if (!mailboxItems.length) {
+      return
+    }
+
+    const selectedIndex = mailboxItems.findIndex((item) => item.id === selectedMessageId)
+    const nextItems = selectedIndex >= 0 ? mailboxItems.slice(selectedIndex, selectedIndex + 3) : mailboxItems.slice(0, 3)
+    for (const item of nextItems) {
+      prefetchMailboxMessageDetail(item.id)
+    }
+  }, [
+    currentPage,
+    selectedCasePath,
+    selectedMessageId,
+    selectedPstFileName,
+    selectedScopePath,
+    sessionId,
+    sessionSummary?.fileName,
+    sourceType,
+    workspaceReady
+  ])
+
+  React.useEffect(() => {
     const activeMessageId = selectedMessageId
     if (!workspaceReady || !activeMessageId) {
       setSelectedMessage(null)
       setMessageLoading(false)
       return
     }
-    if (selectedPageItem?.sourceType && selectedPageItem.sourceType !== 'mailbox') {
+    if (!selectedPageItem) {
+      return
+    }
+    if (selectedPageItem.sourceType && selectedPageItem.sourceType !== 'mailbox') {
       return
     }
     const activeSessionId = sessionId
@@ -949,19 +1053,25 @@ export function App() {
       setMessageLoading(false)
       return
     }
-    const sessionToken = activeSessionId
-    const requestId = messagePreviewRequestRef.current
 
+    const cacheKey = getMailboxDetailCacheKey(activeMessageId)
+    const cachedDetail = mailboxDetailCacheRef.current.get(cacheKey)
+    if (cachedDetail) {
+      setSelectedMessage(cachedDetail)
+      setMessageLoading(false)
+      return
+    }
+
+    const requestId = invalidateMessagePreview(true)
     let cancelled = false
 
     async function loadMessage(): Promise<void> {
       try {
-        setMessageLoading(true)
-        const response = await api.session.messageDetail(sessionToken, activeMessageId)
+        const detail = await loadMailboxMessageDetail(activeMessageId)
         if (cancelled || messagePreviewRequestRef.current !== requestId) {
           return
         }
-        setSelectedMessage(response.detail)
+        setSelectedMessage(detail)
       } catch (error) {
         if (!cancelled && messagePreviewRequestRef.current === requestId) {
           setSelectedMessage(null)
@@ -979,7 +1089,7 @@ export function App() {
     return () => {
       cancelled = true
     }
-  }, [selectedMessageId, selectedPageItem?.sourceType, sessionId, workspaceReady])
+  }, [currentPage, selectedMessageId, selectedPageItem?.sourceType, sessionId, workspaceReady])
 
   React.useEffect(() => {
     if (!workspaceReady || (!selectedMessage && !messageLoading)) {
@@ -1698,6 +1808,7 @@ export function App() {
     const effectiveScope = scopePath || selectedScopePath || selectedCasePath || catalogResponse?.scopePath || catalog?.scopePath || ''
     try {
       const response: SessionOpenResponse = await api.pst.open(effectiveScope, fileName)
+      clearMailboxDetailCache()
       const nextCasePath = getCasePathFromScopePath(effectiveScope || response.scopePath)
       setSessionId(response.sessionId)
       setSessionSummary(response.summary)
@@ -1834,6 +1945,7 @@ export function App() {
       flagged: !(selectedMessage?.review?.flagged ?? false),
       tags: selectedMessage?.review?.tags || []
     })
+    clearMailboxDetailCache(selectedMessageId)
     await refreshCurrentPage()
     await openMessage(selectedMessageId)
   }
@@ -1850,6 +1962,7 @@ export function App() {
       return
     }
     await api.session.clearReview(sessionId, selectedMessageId)
+    clearMailboxDetailCache(selectedMessageId)
     await refreshCurrentPage()
     await openMessage(selectedMessageId)
   }
@@ -1870,6 +1983,7 @@ export function App() {
     await api.session.updateReview(sessionId, selectedMessageId, {
       tags: Array.from(new Set([...(selectedMessage?.review?.tags || []), tag]))
     })
+    clearMailboxDetailCache(selectedMessageId)
     await refreshCurrentPage()
     await openMessage(selectedMessageId)
   }
@@ -1890,6 +2004,7 @@ export function App() {
     await api.session.updateReview(sessionId, selectedMessageId, {
       tags: (selectedMessage?.review?.tags || []).filter((item) => item !== tag)
     })
+    clearMailboxDetailCache(selectedMessageId)
     await refreshCurrentPage()
     await openMessage(selectedMessageId)
   }

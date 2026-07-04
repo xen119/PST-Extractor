@@ -751,6 +751,93 @@ describe('pst review api', () => {
     expect(docsHtml).toContain('/api/openapi.json')
   })
 
+  it('caches mailbox detail loads and refreshes them after review changes', async () => {
+    rootDir = makeTempDir('pst-review-detail-cache-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
+    stageFixture(enronPath, path.join(pstDir, 'Case1', 'Search1', 'sample.pst'))
+
+    const started = await startApp(pstDir)
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const opened = await requestJson(`${started.baseUrl}/api/psts/open`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        scopePath: 'Case1/Search1',
+        fileName: 'sample.pst'
+      })
+    })
+
+    const folder = findMailFolder(opened.tree)
+    expect(folder).toBeTruthy()
+
+    const folderPage = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/folders/${encodeURIComponent(
+        folder!.id
+      )}/messages?page=1&pageSize=20`
+    )
+    const message = folderPage.page.items.find((item: { isMailLike: boolean }) => item.isMailLike)
+    expect(message).toBeTruthy()
+    if (!message) {
+      throw new Error('Expected a mailbox message')
+    }
+
+    const { PSTUtil } = require('../PSTUtil.class')
+    const loadSpy = jest.spyOn(PSTUtil, 'detectAndLoadPSTObject')
+    const reviewSpy = jest.spyOn(started.reviewStore, 'getReview')
+
+    const detailOne = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(message.id)}`
+    )
+    const extractOne = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
+        message.id
+      )}/extract?fields=all`
+    )
+    const detailTwo = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(message.id)}`
+    )
+
+    expect(detailTwo.detail).toEqual(detailOne.detail)
+    expect(extractOne.record.review.flagged).toBe(detailOne.detail.review.flagged)
+    expect(loadSpy).toHaveBeenCalledTimes(1)
+    expect(reviewSpy).toHaveBeenCalledTimes(1)
+
+    await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
+        message.id
+      )}/review`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          flagged: true
+        })
+      }
+    )
+
+    const detailAfterUpdate = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(message.id)}`
+    )
+    const extractAfterUpdate = await requestJson(
+      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
+        message.id
+      )}/extract?fields=all`
+    )
+
+    expect(detailAfterUpdate.detail.review.flagged).toBe(true)
+    expect(extractAfterUpdate.record.review.flagged).toBe(true)
+    expect(loadSpy).toHaveBeenCalledTimes(1)
+    expect(reviewSpy).toHaveBeenCalledTimes(2)
+  })
+
   it('moves PSTs into and out of the removed archive without deleting them', async () => {
     rootDir = makeTempDir('pst-review-archive-')
     const pstDir = path.join(rootDir, 'PST')

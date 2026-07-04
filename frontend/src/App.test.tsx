@@ -1086,6 +1086,213 @@ describe('shell and preview', () => {
     })
   })
 
+  it('hydrates restored mailbox selections and reuses warmed preview requests for next navigation', async () => {
+    const user = userEvent.setup()
+    const authenticatedStatus: AuthStatus = {
+      authenticated: true,
+      enabled: true,
+      canManageUsers: false,
+      mfaEnabled: true,
+      mfaEnforced: false,
+      lockedUntil: null,
+      loginFailedCount: 0,
+      passwordResetAvailable: false,
+      user: { username: 'admin', assignedCasePaths: [] },
+      expiresAt: null
+    }
+    const catalog: PstCatalogResponse = {
+      rootPath: '',
+      rootExists: true,
+      message: '',
+      scopePath: 'Case Alpha/Search One',
+      scopeLabel: 'Search One',
+      scopes: [
+        {
+          scopePath: 'Case Alpha/Search One',
+          scopeLabel: 'Search One',
+          fileCount: 1,
+          files: [
+            {
+              fileName: 'mailbox-a.pst',
+              size: 1024,
+              modifiedAt: new Date().toISOString(),
+              scopePath: 'Case Alpha/Search One'
+            }
+          ]
+        }
+      ],
+      files: []
+    }
+    const idleStatus: SearchIndexRefreshStatus = {
+      jobId: null,
+      status: 'idle',
+      trigger: null,
+      startedAt: null,
+      completedAt: null,
+      updatedAt: new Date().toISOString(),
+      summary: null,
+      error: null
+    }
+    const firstDetail = createDeferred<{ sessionId: string; detail: MessageDetail }>()
+    const secondDetail = createDeferred<{ sessionId: string; detail: MessageDetail }>()
+    const thirdDetail = createDeferred<{ sessionId: string; detail: MessageDetail }>()
+    const detailRequests: Record<string, typeof firstDetail> = {
+      'message-1': firstDetail,
+      'message-2': secondDetail,
+      'message-3': thirdDetail
+    }
+    const firstPreview: MessageDetail = {
+      subject: 'First mailbox result',
+      senderName: 'Alice Example',
+      senderEmailAddress: 'alice@example.com',
+      sortDate: new Date().toISOString(),
+      bodyText: 'First mailbox body'
+    }
+    const secondPreview: MessageDetail = {
+      subject: 'Second mailbox result',
+      senderName: 'Bob Example',
+      senderEmailAddress: 'bob@example.com',
+      sortDate: new Date().toISOString(),
+      bodyText: 'Second mailbox body'
+    }
+    const thirdPreview: MessageDetail = {
+      subject: 'Third mailbox result',
+      senderName: 'Carol Example',
+      senderEmailAddress: 'carol@example.com',
+      sortDate: new Date().toISOString(),
+      bodyText: 'Third mailbox body'
+    }
+    const folderPage: PageResponse<MessageSummary> = {
+      items: [
+        {
+          id: 'message-1',
+          messageId: 'message-1',
+          subject: 'First mailbox result',
+          senderName: 'Alice Example',
+          senderEmailAddress: 'alice@example.com',
+          sortDate: new Date().toISOString(),
+          fileName: 'mailbox-a.pst',
+          scopePath: 'Case Alpha/Search One',
+          sourceType: 'mailbox',
+          isMailLike: true,
+          review: {
+            flagged: false,
+            tags: [],
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          }
+        } satisfies MessageSummary,
+        {
+          id: 'message-2',
+          messageId: 'message-2',
+          subject: 'Second mailbox result',
+          senderName: 'Bob Example',
+          senderEmailAddress: 'bob@example.com',
+          sortDate: new Date().toISOString(),
+          fileName: 'mailbox-a.pst',
+          scopePath: 'Case Alpha/Search One',
+          sourceType: 'mailbox',
+          isMailLike: true,
+          review: {
+            flagged: false,
+            tags: [],
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          }
+        } satisfies MessageSummary,
+        {
+          id: 'message-3',
+          messageId: 'message-3',
+          subject: 'Third mailbox result',
+          senderName: 'Carol Example',
+          senderEmailAddress: 'carol@example.com',
+          sortDate: new Date().toISOString(),
+          fileName: 'mailbox-a.pst',
+          scopePath: 'Case Alpha/Search One',
+          sourceType: 'mailbox',
+          isMailLike: true,
+          review: {
+            flagged: false,
+            tags: [],
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          }
+        } satisfies MessageSummary
+      ],
+      total: 3,
+      page: 1,
+      pageSize: 50,
+      totalPages: 1,
+      query: '',
+      mailOnly: false,
+      sort: 'date-desc'
+    }
+
+    vi.spyOn(api.auth, 'me').mockResolvedValueOnce(authenticatedStatus)
+    vi.spyOn(api.pst, 'catalog').mockResolvedValueOnce(catalog)
+    vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue({ items: [] })
+    vi.spyOn(api.pst, 'open').mockResolvedValue({
+      sessionId: 'session-a',
+      scopePath: 'Case Alpha/Search One',
+      scopeLabel: 'Search One',
+      fileName: 'mailbox-a.pst',
+      summary: {
+        fileName: 'mailbox-a.pst',
+        mailboxName: 'mailbox-a.pst'
+      },
+      tree: {
+        id: 'root-a',
+        displayName: 'Inbox',
+        path: 'root-a',
+        children: []
+      }
+    })
+    vi.spyOn(api.session, 'folderMessages').mockResolvedValue({
+      sessionId: 'session-a',
+      page: folderPage
+    })
+    const messageDetailMock = vi.spyOn(api.session, 'messageDetail').mockImplementation(async (_sessionId, messageId) => {
+      const request = detailRequests[messageId]
+      if (!request) {
+        throw new Error(`Unexpected mailbox message detail request: ${messageId}`)
+      }
+      return request.promise
+    })
+
+    window.localStorage.setItem('pst-mail-explorer.casePath::admin', 'Case Alpha')
+    window.localStorage.setItem('pst-mail-explorer.scopePath::admin', 'Case Alpha/Search One')
+    window.localStorage.setItem('pst-mail-explorer.pstFileName::admin', 'mailbox-a.pst')
+    window.localStorage.setItem('pst-mail-explorer.folderId::admin', 'root-a')
+    window.localStorage.setItem('pst-mail-explorer.messageId::admin', 'message-1')
+    window.localStorage.setItem('pst-mail-explorer.sourceType::admin', 'mailbox')
+
+    render(
+      <div style={{ width: 1800, height: 1600 }}>
+        <App />
+      </div>
+    )
+
+    expect(await screen.findByRole('button', { name: /First mailbox result/ })).toBeInTheDocument()
+    await waitFor(() => expect(messageDetailMock).toHaveBeenCalledTimes(3))
+    expect(screen.getByText('Loading preview...')).toBeInTheDocument()
+    expect(screen.queryByText('No message selected')).not.toBeInTheDocument()
+
+    firstDetail.resolve({ sessionId: 'session-a', detail: firstPreview })
+    expect(await screen.findByText('First mailbox body')).toBeInTheDocument()
+
+    const secondItem = await screen.findByRole('button', { name: /Second mailbox result/ })
+    await user.click(secondItem)
+    expect(messageDetailMock).toHaveBeenCalledTimes(3)
+    expect(screen.getByText('Loading preview...')).toBeInTheDocument()
+    expect(screen.queryByText('No message selected')).not.toBeInTheDocument()
+
+    secondDetail.resolve({ sessionId: 'session-a', detail: secondPreview })
+    expect(await screen.findByText('Second mailbox body')).toBeInTheDocument()
+    expect(messageDetailMock).toHaveBeenCalledTimes(3)
+
+    thirdDetail.resolve({ sessionId: 'session-a', detail: thirdPreview })
+  })
+
   it('shows archive office document previews through the preview url', () => {
     render(
       <div style={{ width: 1200, height: 900 }}>

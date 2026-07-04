@@ -30,6 +30,25 @@ export interface ViewerSessionIndex {
   searchTextByMessageId: Map<string, string>
 }
 
+const messageDetailCacheBySession = new WeakMap<ViewerSessionIndex, Map<string, MessageDetail>>()
+
+function getMessageDetailCache(session: ViewerSessionIndex): Map<string, MessageDetail> {
+  let cache = messageDetailCacheBySession.get(session)
+  if (!cache) {
+    cache = new Map<string, MessageDetail>()
+    messageDetailCacheBySession.set(session, cache)
+  }
+  return cache
+}
+
+export function clearMessageDetailCache(session: ViewerSessionIndex): void {
+  messageDetailCacheBySession.delete(session)
+}
+
+function getMessageDetailCacheKey(messageId: string, embeddedDepth: number): string {
+  return `${messageId}::${embeddedDepth}`
+}
+
 export interface FolderSummary {
   id: string
   descriptorId: string
@@ -2015,9 +2034,16 @@ export function buildMessageDetailFromSession(
   messageId: string,
   embeddedDepth = 1
 ): MessageDetail {
+  const cache = getMessageDetailCache(session)
+  const cacheKey = getMessageDetailCacheKey(messageId, embeddedDepth)
+  const cached = cache.get(cacheKey)
+  if (cached) {
+    return cached
+  }
+
   const summary = getMessageSummary(session, messageId)
   if (summary.parseError) {
-    return {
+    const detail: MessageDetail = {
       ...summary,
       sentRepresentingName: '',
       sentRepresentingAddressType: '',
@@ -2041,22 +2067,28 @@ export function buildMessageDetailFromSession(
       returnPath: '',
       attachments: []
     }
+    cache.set(cacheKey, detail)
+    return detail
   }
 
   try {
-    return withSessionMessage(session, messageId, (message) => {
+    const detail = withSessionMessage(session, messageId, (message) => {
       return buildMessageDetail(message, summary, {
         messageId,
         attachmentBaseUrl: '',
         embeddedDepth
       })
     })
+    cache.set(cacheKey, detail)
+    return detail
   } catch (err) {
     const parseError = err instanceof Error ? err.message : String(err)
-    return buildEmptyMessageDetail({
+    const detail = buildEmptyMessageDetail({
       ...summary,
       parseError
     })
+    cache.set(cacheKey, detail)
+    return detail
   }
 }
 

@@ -7,6 +7,7 @@ import {
   buildMessageDetail,
   buildMessageDetailFromSession,
   createViewerSession,
+  clearMessageDetailCache,
   htmlToText,
   exportMessageAsEml,
   exportMessageAsEmlFromSession,
@@ -96,6 +97,8 @@ describe('viewer integration', () => {
 
   afterEach(() => {
     jest.restoreAllMocks()
+    clearMessageDetailCache(enronSession)
+    clearMessageDetailCache(outlookSession)
   })
 
   it('indexes the bundled PST and keeps malformed folders as warnings', () => {
@@ -496,5 +499,20 @@ describe('viewer integration', () => {
       'forced attachment failure'
     )
     attachmentSpy.mockRestore()
+  })
+
+  it('reuses cached message details within a session and refreshes them for reopened sessions', () => {
+    const firstSession = createViewerSession(outlookPath, 'mtnman1965@outlook.com.ost')
+    const reopenedSession = createViewerSession(outlookPath, 'mtnman1965@outlook.com.ost')
+    const { PSTUtil } = require('../PSTUtil.class')
+    const loadSpy = jest.spyOn(PSTUtil, 'detectAndLoadPSTObject')
+
+    const firstDetail = buildMessageDetailFromSession(firstSession, 'message:2110308')
+    const repeatedDetail = buildMessageDetailFromSession(firstSession, 'message:2110308')
+    const reopenedDetail = buildMessageDetailFromSession(reopenedSession, 'message:2110308')
+
+    expect(repeatedDetail).toBe(firstDetail)
+    expect(reopenedDetail).not.toBe(firstDetail)
+    expect(loadSpy).toHaveBeenCalledTimes(2)
   })
 })
