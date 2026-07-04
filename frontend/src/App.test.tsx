@@ -1573,7 +1573,7 @@ describe('shell and preview', () => {
     expect(await screen.findByText('Target mailbox body')).toBeInTheDocument()
     await waitFor(() => {
       expect(api.pst.open).toHaveBeenCalledWith('Case Beta/Search Two', 'mailbox-b.pst')
-    })
+    }, { timeout: 3000 })
     expect(screen.queryByText('Loading preview...')).not.toBeInTheDocument()
     const detailCallCountBeforeMailboxOpen = vi.mocked(api.session.messageDetail).mock.calls.length
     openTargetMailbox.resolve({

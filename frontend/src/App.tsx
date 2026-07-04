@@ -105,6 +105,7 @@ const DEFAULT_SMTP_FORM: SmtpFormState = {
 }
 
 const SEARCH_INDEX_REFRESH_POLL_INTERVAL_MS = 2000
+const MAILBOX_OPEN_WARMUP_DELAY_MS = 1200
 const SEARCH_INDEX_REFRESH_SOURCES: SearchIndexRefreshSource[] = ['mailboxes', 'items']
 
 function getInviteToken(pathname = window.location.pathname): string | null {
@@ -626,7 +627,7 @@ export function App() {
     mailboxOpenTimerRef.current = window.setTimeout(() => {
       mailboxOpenTimerRef.current = null
       void openMailbox(fileName, scopePath, catalogResponse, options)
-    }, 250)
+    }, MAILBOX_OPEN_WARMUP_DELAY_MS)
   }
 
   React.useEffect(() => () => clearMailboxOpenTimer(), [])

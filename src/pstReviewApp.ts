@@ -1646,7 +1646,14 @@ async function resolveMailboxItemDetail(
   item: SearchIndexDocument,
   reviewStore: ReviewStore,
   reviewerUsername: string,
-  searchIndexStore: SearchIndexStore
+  searchIndexStore: SearchIndexStore,
+  getLiveSessionForMailboxKey?: (mailboxKey: string) => SessionRecord | null,
+  registerMailboxSession?: (
+    sessionIndex: ViewerSessionIndex,
+    mailboxKey: string,
+    scopePath: string,
+    fileName: string
+  ) => SessionRecord
 ): Promise<MessageDetail> {
   const snapshot = await searchIndexStore.findMailboxDetail(item.mailboxKey, item.messageId).catch(() => null)
   if (snapshot) {
@@ -1654,8 +1661,12 @@ async function resolveMailboxItemDetail(
     return buildReviewedDetail(snapshot, review)
   }
 
-  const session = openPstMailbox(pstRootDir, item.scopePath, item.fileName)
-  const detail = buildMessageDetailFromSession(session, item.messageId, 1)
+  const liveSession = getLiveSessionForMailboxKey?.(item.mailboxKey) || null
+  const sessionIndex = liveSession?.index || openPstMailbox(pstRootDir, item.scopePath, item.fileName)
+  if (!liveSession && registerMailboxSession) {
+    registerMailboxSession(sessionIndex, item.mailboxKey, item.scopePath, item.fileName)
+  }
+  const detail = buildMessageDetailFromSession(sessionIndex, item.messageId, 1)
   try {
     await searchIndexStore.upsertMailboxDetail(item.mailboxKey, detail)
   } catch {
@@ -1993,6 +2004,8 @@ function createDefaultSmtpTransport(settings: SmtpSettingsRecord): SmtpTransport
 export function createPstReviewApp(options: CreatePstReviewAppOptions): express.Express {
   const app = express()
   const sessions = new Map<string, SessionRecord>()
+  const reusableMailboxSessions = new Map<string, string>()
+  const openingMailboxSessions = new Map<string, Promise<SessionResponse>>()
   const publicDir = options.publicDir
   const pstRootDir = options.pstRootDir || getDefaultPstRootDirectory()
   const reviewStore = options.reviewStore
@@ -2077,6 +2090,83 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     }
 
     return auditLogStore.listAll(actorUsername)
+  }
+
+  function buildSessionResponse(session: SessionRecord): SessionResponse {
+    return {
+      sessionId: session.id,
+      scopePath: session.scopePath,
+      scopeLabel: session.scopeLabel,
+      fileName: session.fileName,
+      summary: buildSessionSummary(session.index),
+      tree: buildFolderTree(session.index)
+    }
+  }
+
+  function getLiveSessionForMailboxKey(mailboxKey: string): SessionRecord | null {
+    const normalizedMailboxKey = normalizeText(mailboxKey)
+    if (!normalizedMailboxKey) {
+      return null
+    }
+
+    const cachedSessionId = reusableMailboxSessions.get(normalizedMailboxKey)
+    if (cachedSessionId) {
+      const cachedSession = sessions.get(cachedSessionId)
+      if (cachedSession) {
+        return cachedSession
+      }
+      reusableMailboxSessions.delete(normalizedMailboxKey)
+    }
+
+    for (const session of sessions.values()) {
+      if (session.filePath === normalizedMailboxKey) {
+        return session
+      }
+    }
+
+    return null
+  }
+
+  function registerMailboxSession(
+    sessionIndex: ViewerSessionIndex,
+    mailboxKey: string,
+    scopePath: string,
+    fileName: string
+  ): SessionRecord {
+    const normalizedMailboxKey = normalizeText(mailboxKey)
+    const sessionId = createSessionId()
+    const scopeLabel = scopePath ? scopePath.split('/').join(' / ') : 'PST root'
+    const record: SessionRecord = {
+      id: sessionId,
+      index: sessionIndex,
+      filePath: sessionIndex.filePath,
+      fileName: sessionIndex.fileName || fileName,
+      scopePath,
+      scopeLabel,
+      mailboxKey: normalizedMailboxKey || sessionIndex.filePath,
+      messageDetailCache: new Map<string, Promise<ReviewedMessageDetail>>()
+    }
+    sessions.set(sessionId, record)
+    if (record.mailboxKey) {
+      reusableMailboxSessions.set(record.mailboxKey, sessionId)
+    }
+    return record
+  }
+
+  function clearReusableMailboxSessions(mailboxKey?: string): void {
+    if (!mailboxKey) {
+      reusableMailboxSessions.clear()
+      openingMailboxSessions.clear()
+      return
+    }
+
+    const normalizedMailboxKey = normalizeText(mailboxKey)
+    if (!normalizedMailboxKey) {
+      return
+    }
+
+    reusableMailboxSessions.delete(normalizedMailboxKey)
+    openingMailboxSessions.delete(normalizedMailboxKey)
   }
 
   function csvCell(value: unknown): string {
@@ -3252,6 +3342,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   function closeSessionsForMailboxKey(mailboxKey: string): string[] {
     const closedSessionIds: string[] = []
     const normalizedMailboxKey = normalizeText(mailboxKey)
+    clearReusableMailboxSessions(normalizedMailboxKey)
     for (const [sessionId, session] of sessions.entries()) {
       if (session.filePath === normalizedMailboxKey) {
         invalidateMailboxDetailCache(session)
@@ -3264,6 +3355,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   }
 
   function clearOpenMailboxDetailCaches(): void {
+    clearReusableMailboxSessions()
     for (const session of sessions.values()) {
       invalidateMailboxDetailCache(session)
       session.index.messageDetailSnapshots.clear()
@@ -4909,43 +5001,82 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         return
       }
 
-      const index = openPstMailbox(pstRootDir, scopePath, fileName)
-      const sessionId = createSessionId()
+      const mailboxKey = resolvePstMailboxPath(pstRootDir, scopePath, fileName)
       const scopeLabel = scopePath ? scopePath.split('/').join(' / ') : 'PST root'
-      const record: SessionRecord = {
-        id: sessionId,
-        index,
-        filePath: index.filePath,
-        fileName: index.fileName,
-        scopePath,
-        scopeLabel,
-        mailboxKey: index.filePath,
-        messageDetailCache: new Map<string, Promise<ReviewedMessageDetail>>()
-      }
-      sessions.set(sessionId, record)
-
-      const summary = buildSessionSummary(index)
-      recordAuditEvent({
-        req,
-        session: authSession,
-        action: 'mailbox.open',
-        target: `${scopePath ? `${scopePath}/` : ''}${fileName}`,
-        outcome: 'success',
-        metadata: {
-          scopePath,
-          scopeLabel,
-          fileName,
-          messageCount: index.messages.size
+      const existingSessionId = reusableMailboxSessions.get(mailboxKey)
+      if (existingSessionId) {
+        const existingSession = sessions.get(existingSessionId)
+        if (existingSession) {
+          recordAuditEvent({
+            req,
+            session: authSession,
+            action: 'mailbox.open',
+            target: `${scopePath ? `${scopePath}/` : ''}${fileName}`,
+            outcome: 'success',
+            metadata: {
+              scopePath,
+              scopeLabel,
+              fileName,
+              messageCount: existingSession.index.messages.size,
+              reused: true
+            }
+          })
+          responseJson(res, 200, buildSessionResponse(existingSession))
+          return
         }
-      })
-      responseJson(res, 200, {
-        sessionId,
-        scopePath,
-        scopeLabel,
-        fileName,
-        summary,
-        tree: buildFolderTree(index)
-      } satisfies SessionResponse)
+        reusableMailboxSessions.delete(mailboxKey)
+      }
+
+      const pendingSession = openingMailboxSessions.get(mailboxKey)
+      if (pendingSession) {
+        const response = await pendingSession
+        recordAuditEvent({
+          req,
+          session: authSession,
+          action: 'mailbox.open',
+          target: `${scopePath ? `${scopePath}/` : ''}${fileName}`,
+          outcome: 'success',
+          metadata: {
+            scopePath,
+            scopeLabel,
+            fileName,
+            messageCount: response.summary.stats.messageCount,
+            reused: true
+          }
+        })
+        responseJson(res, 200, response)
+        return
+      }
+
+      const openPromise = (async () => {
+        const index = openPstMailbox(pstRootDir, scopePath, fileName)
+        const record = registerMailboxSession(index, mailboxKey, scopePath, fileName)
+        return buildSessionResponse(record)
+      })()
+
+      openingMailboxSessions.set(mailboxKey, openPromise)
+      try {
+        const response = await openPromise
+        recordAuditEvent({
+          req,
+          session: authSession,
+          action: 'mailbox.open',
+          target: `${scopePath ? `${scopePath}/` : ''}${fileName}`,
+          outcome: 'success',
+          metadata: {
+            scopePath,
+            scopeLabel,
+            fileName,
+            messageCount: response.summary.stats.messageCount,
+            reused: false
+          }
+        })
+        responseJson(res, 200, response)
+      } finally {
+        if (openingMailboxSessions.get(mailboxKey) === openPromise) {
+          openingMailboxSessions.delete(mailboxKey)
+        }
+      }
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
@@ -5303,7 +5434,15 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       const reviewerUsername = getReviewOwnerUsername(authSession)
       const detail =
         item.sourceType === 'mailbox'
-          ? await resolveMailboxItemDetail(pstRootDir, item, reviewStore, reviewerUsername, searchIndexStore)
+          ? await resolveMailboxItemDetail(
+              pstRootDir,
+              item,
+              reviewStore,
+              reviewerUsername,
+              searchIndexStore,
+              getLiveSessionForMailboxKey,
+              registerMailboxSession
+            )
           : buildReviewedDetail(
               ({
               id: item.id || item.messageId,
