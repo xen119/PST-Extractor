@@ -3342,6 +3342,44 @@ describe('pst review api', () => {
     const fingerprintStore = new MemorySearchIndexStore()
     const mailboxKey = path.resolve(pstDir, 'Case1', 'Search1', 'alpha.pst')
     const teamsKey = path.resolve(pstDir, 'Case1', 'Search1', 'Items.1.001.TEAMS.zip')
+    const mailboxDetail: MessageDetail = {
+      id: buildMailboxSearchDocumentId(mailboxKey, 'message:mail-1'),
+      subject: 'Signature note',
+      senderName: 'Alice Example',
+      senderEmailAddress: 'alice@example.com',
+      displayTo: 'Bob Example <bob@example.com>',
+      displayCC: '',
+      displayBCC: '',
+      resolvedDisplayTo: 'Bob Example <bob@example.com>',
+      resolvedDisplayCC: '',
+      resolvedDisplayBCC: '',
+      clientSubmitTime: '2024-01-01T00:00:00.000Z',
+      creationTime: '2024-01-01T00:00:00.000Z',
+      modificationTime: '2024-01-01T00:00:00.000Z',
+      messageDeliveryTime: '2024-01-01T00:00:00.000Z',
+      sortDate: '2024-01-01T00:00:00.000Z',
+      bodyPrefix: '',
+      bodyText: 'signature note body',
+      bodyHtml: '<p>signature note body</p>',
+      bodyRtf: '',
+      transportMessageHeaders: '',
+      conversationTopic: 'Signature note',
+      originalSubject: 'Signature note',
+      internetMessageId: '',
+      inReplyToId: '',
+      returnPath: '',
+      sentRepresentingName: '',
+      sentRepresentingAddressType: '',
+      sentRepresentingEmailAddress: '',
+      receivedByName: '',
+      receivedByAddressType: '',
+      receivedByAddress: '',
+      replyRecipientNames: '',
+      originalDisplayTo: 'Bob Example <bob@example.com>',
+      originalDisplayCC: '',
+      originalDisplayBCC: '',
+      attachments: []
+    }
 
     await fingerprintStore.replaceMailboxDocuments(mailboxKey, [
       makeSearchIndexDocument({
@@ -3364,6 +3402,7 @@ describe('pst review api', () => {
         searchTokens: ['signature', 'note'],
         addressValues: ['alice@example.com', 'bob@example.com'],
         subjectValues: ['signature note'],
+        mailboxDetail,
         sourceType: 'mailbox'
       })
     ])

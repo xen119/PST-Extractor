@@ -5422,6 +5422,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         allowedMailboxKeys,
         reviewerUsername,
         sourceType,
+        requirePreviewPayload: true,
         casePath: requestedCasePath || undefined,
         query: filters.query,
         mode: filters.mode,

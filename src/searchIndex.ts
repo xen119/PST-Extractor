@@ -118,6 +118,7 @@ export interface SearchIndexSearchOptions {
   allowedMailboxKeys?: string[]
   reviewerUsername?: string
   sourceType?: SearchSourceType | 'all'
+  requirePreviewPayload?: boolean
   query: string
   mode: SearchMode
   mailOnly: boolean
@@ -1487,6 +1488,10 @@ function matchesDocument(
   options: SearchIndexSearchOptions,
   hiddenRules: HiddenRuleRecord[]
 ): boolean {
+  if (options.requirePreviewPayload && record.sourceType === 'mailbox' && !record.mailboxDetail) {
+    return false
+  }
+
   if (options.sourceType && options.sourceType !== 'all') {
     if (normalizeSourceType(record.sourceType) !== normalizeSourceType(options.sourceType)) {
       return false
