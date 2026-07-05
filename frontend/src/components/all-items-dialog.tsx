@@ -3,7 +3,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { ArrowDown, ArrowUp, ArrowUpDown, Cloud, FileText, Flag, Mail, RefreshCw, Search, Tag as TagIcon, X } from 'lucide-react'
 import { api } from '@/api'
 import { cn, formatDate, normalizeText } from '@/lib/utils'
-import { normalizeSearchResultsPage } from '@/lib/search'
+import { normalizeSearchResultsPage, resolveSelectionScope } from '@/lib/search'
 import type { MessageSummary, ReviewState, SearchSourceType } from '@/types'
 import {
   Badge,
@@ -107,6 +107,7 @@ function appendUniqueItems(existing: MessageSummary[], incoming: MessageSummary[
 
 type AllItemsSortColumn = 'subject' | 'sender' | 'location' | 'date'
 type AllItemsSortDirection = 'asc' | 'desc'
+type AllItemsSelectionState = Record<AllItemsSourceTab, Record<string, true>>
 
 interface AllItemsSortState {
   column: AllItemsSortColumn
@@ -119,13 +120,21 @@ const INITIAL_SORT_STATE: AllItemsSortState = {
 }
 
 const ITEM_GRID_TEMPLATE =
-  'grid grid-cols-[110px_minmax(0,1.6fr)_minmax(0,1.2fr)_minmax(0,1.4fr)_160px_110px]'
+  'grid grid-cols-[48px_110px_minmax(0,1.6fr)_minmax(0,1.2fr)_minmax(0,1.4fr)_160px_110px]'
 
 function createPageTrackingState(): Record<AllItemsSourceTab, Set<number>> {
   return {
     mailbox: new Set<number>(),
     teams: new Set<number>(),
     sharepoint: new Set<number>()
+  }
+}
+
+function createSelectionState(): AllItemsSelectionState {
+  return {
+    mailbox: {},
+    teams: {},
+    sharepoint: {}
   }
 }
 
@@ -163,18 +172,25 @@ export function AllItemsDialog({
   open,
   selectedItemId,
   selectedCasePath,
+  selectedScopePath,
+  sourceCounts,
   onOpenChange,
   onSelectItem,
-  onReviewChange
+  onReviewChange,
+  onRefreshCounts
 }: {
   open: boolean
   selectedItemId: string
   selectedCasePath: string
+  selectedScopePath: string
+  sourceCounts: Record<SearchSourceType, number> | null
   onOpenChange: (open: boolean) => void
   onSelectItem: (item: MessageSummary) => void
   onReviewChange: (itemId: string, review: ReviewState) => void
+  onRefreshCounts: () => void
 }) {
   const parentRef = React.useRef<HTMLDivElement | null>(null)
+  const selectAllRef = React.useRef<HTMLInputElement | null>(null)
   const scrollPositionsRef = React.useRef<Record<AllItemsSourceTab, number>>({
     mailbox: 0,
     teams: 0,
@@ -182,14 +198,15 @@ export function AllItemsDialog({
   })
   const loadedPagesRef = React.useRef<Record<AllItemsSourceTab, Set<number>>>(createPageTrackingState())
   const inFlightPagesRef = React.useRef<Record<AllItemsSourceTab, Set<number>>>(createPageTrackingState())
-  const countsRequestRef = React.useRef(0)
   const reviewRequestRef = React.useRef(0)
   const pagingGenerationRef = React.useRef(0)
+  const activeTabRef = React.useRef<AllItemsSourceTab>('mailbox')
 
   const [activeTab, setActiveTab] = React.useState<AllItemsSourceTab>('mailbox')
   const [tabState, setTabState] = React.useState<Record<AllItemsSourceTab, TabState>>(createInitialTabStates)
-  const [sourceCounts, setSourceCounts] = React.useState<Record<SearchSourceType, number> | null>(null)
   const [dialogError, setDialogError] = React.useState('')
+  const [bulkActionError, setBulkActionError] = React.useState('')
+  const [bulkActionLoading, setBulkActionLoading] = React.useState(false)
   const [pendingReviewIds, setPendingReviewIds] = React.useState<Record<string, boolean>>({})
   const [draftQuery, setDraftQuery] = React.useState('')
   const [appliedQuery, setAppliedQuery] = React.useState('')
@@ -198,14 +215,30 @@ export function AllItemsDialog({
   const [reviewTaggedOnly, setReviewTaggedOnly] = React.useState(false)
   const [sortState, setSortState] = React.useState<AllItemsSortState>(INITIAL_SORT_STATE)
   const [scrollResetToken, setScrollResetToken] = React.useState(0)
+  const [selectedItemIdsByTab, setSelectedItemIdsByTab] = React.useState<AllItemsSelectionState>(
+    createSelectionState
+  )
 
-  const normalizedCasePath = normalizeText(selectedCasePath)
+  const selectedTotalsScope = React.useMemo(
+    () => resolveSelectionScope(selectedCasePath, selectedScopePath),
+    [selectedCasePath, selectedScopePath]
+  )
+  const activeSelection = selectedItemIdsByTab[activeTab]
   const activeState = tabState[activeTab]
   const sortKey = getSortKey(sortState)
   const sortLabel = getSortLabel(sortState)
   const hasMoreItems = activeState.page > 0 && activeState.page < activeState.totalPages
+  const rows = activeState.items
+  const selectedRows = React.useMemo(
+    () => rows.filter((item) => Boolean(activeSelection[normalizeText(item.id)])),
+    [activeSelection, rows]
+  )
+  const selectedCount = selectedRows.length
+  const allLoadedSelected = rows.length > 0 && selectedCount === rows.length
+  const someLoadedSelected = selectedCount > 0 && !allLoadedSelected
+  const selectedHasPending = selectedRows.some((item) => Boolean(pendingReviewIds[normalizeText(item.id)]))
   const virtualizer = useVirtualizer({
-    count: activeState.items.length,
+    count: rows.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 84,
     overscan: 8
@@ -260,6 +293,61 @@ export function AllItemsDialog({
     onReviewChange(key, review)
   }
 
+  const clearSelection = React.useCallback((): void => {
+    setSelectedItemIdsByTab(createSelectionState())
+    setBulkActionError('')
+  }, [])
+
+  function updateSelectionForTab(
+    tab: AllItemsSourceTab,
+    updater: (selection: Record<string, true>) => Record<string, true>
+  ): void {
+    setSelectedItemIdsByTab((current) => ({
+      ...current,
+      [tab]: updater(current[tab])
+    }))
+  }
+
+  function setItemSelected(tab: AllItemsSourceTab, itemId: string, selected: boolean): void {
+    const key = normalizeText(itemId)
+    if (!key) {
+      return
+    }
+    updateSelectionForTab(tab, (current) => {
+      const next = { ...current }
+      if (selected) {
+        next[key] = true
+      } else {
+        delete next[key]
+      }
+      return next
+    })
+  }
+
+  function setAllItemsSelected(tab: AllItemsSourceTab, items: MessageSummary[], selected: boolean): void {
+    updateSelectionForTab(tab, () => {
+      if (!selected) {
+        return {}
+      }
+      const next: Record<string, true> = {}
+      for (const item of items) {
+        const key = normalizeText(item.id)
+        if (key) {
+          next[key] = true
+        }
+      }
+      return next
+    })
+  }
+
+  function handleTabChange(tab: AllItemsSourceTab): void {
+    if (tab === activeTab) {
+      return
+    }
+    clearSelection()
+    setActiveTab(tab)
+  }
+
   const resetPagingState = React.useCallback(() => {
     pagingGenerationRef.current += 1
     loadedPagesRef.current = createPageTrackingState()
@@ -271,34 +359,9 @@ export function AllItemsDialog({
     }
     setTabState(createInitialTabStates())
     setDialogError('')
+    clearSelection()
     setScrollResetToken((current) => current + 1)
-  }, [])
-
-  async function loadCounts(): Promise<void> {
-    const requestId = ++countsRequestRef.current
-    setSourceCounts(null)
-    try {
-      const response = await api.search({
-        scope: 'all',
-        sourceType: 'all',
-        casePath: normalizedCasePath || undefined,
-        query: '',
-        mode: 'and',
-        page: 1,
-        pageSize: 1,
-        mailOnly: false,
-        sort: 'date-desc'
-      })
-      if (countsRequestRef.current !== requestId) {
-        return
-      }
-      setSourceCounts(response.page.sourceCounts || { mailbox: 0, teams: 0, sharepoint: 0 })
-    } catch {
-      if (countsRequestRef.current === requestId) {
-        setSourceCounts(null)
-      }
-    }
-  }
+  }, [clearSelection])
 
   async function loadPage(tab: AllItemsSourceTab, page: number): Promise<void> {
     const normalizedTab = tab
@@ -327,9 +390,10 @@ export function AllItemsDialog({
 
     try {
       const response = await api.search({
-        scope: 'all',
+        scope: selectedTotalsScope.scope,
         sourceType: normalizedTab,
-        casePath: normalizedCasePath || undefined,
+        casePath: selectedTotalsScope.casePath || undefined,
+        scopePath: selectedTotalsScope.scopePath || undefined,
         query: appliedQuery,
         mode: 'and',
         page: normalizedPage,
@@ -344,7 +408,6 @@ export function AllItemsDialog({
       }
       const pageResponse = normalizeSearchResultsPage(response.page)
       loadedPages.add(pageResponse.page)
-      setSourceCounts(pageResponse.sourceCounts || { mailbox: 0, teams: 0, sharepoint: 0 })
       setTabState((current) => {
         const prev = current[normalizedTab]
         const mergedItems =
@@ -451,19 +514,98 @@ export function AllItemsDialog({
     }
   }
 
-  React.useEffect(() => {
-    if (!open) {
+  async function handleBulkFlagSelected(): Promise<void> {
+    if (bulkActionLoading || !selectedRows.length || selectedHasPending) {
       return
     }
-    resetPagingState()
-  }, [appliedQuery, mailOnly, open, resetPagingState, reviewFlaggedOnly, reviewTaggedOnly, selectedCasePath, sortKey])
+
+    const operationTab = activeTabRef.current
+    const operationGeneration = pagingGenerationRef.current
+    const itemsToFlag = [...selectedRows]
+    setBulkActionLoading(true)
+    setBulkActionError('')
+
+    try {
+      const results = await Promise.allSettled(
+        itemsToFlag.map(async (item) => {
+          const key = normalizeText(item.id)
+          const currentReview = item.review || {
+            flagged: false,
+            tags: [],
+            createdAt: '',
+            updatedAt: ''
+          }
+          const response = await api.item.updateReview(key, {
+            flagged: true,
+            tags: [...(currentReview.tags || [])]
+          })
+          return {
+            itemId: key,
+            review: response.review
+          }
+        })
+      )
+
+      if (pagingGenerationRef.current !== operationGeneration || activeTabRef.current !== operationTab) {
+        return
+      }
+
+      const successfulIds: string[] = []
+      const failedCount = results.reduce((count, result, index) => {
+        if (result.status === 'fulfilled') {
+          successfulIds.push(result.value.itemId)
+          patchReviewState(result.value.itemId, result.value.review)
+          return count
+        }
+
+        return count + 1
+      }, 0)
+
+      if (!failedCount) {
+        clearSelection()
+        return
+      }
+
+      updateSelectionForTab(operationTab, (current) => {
+        const next = { ...current }
+        for (const itemId of successfulIds) {
+          delete next[itemId]
+        }
+        return next
+      })
+
+      setBulkActionError(
+        failedCount === 1
+          ? '1 selected item could not be flagged.'
+          : `${failedCount} selected items could not be flagged.`
+      )
+    } catch (error) {
+      setBulkActionError(error instanceof Error ? error.message : 'Unable to flag selected items')
+    } finally {
+      setBulkActionLoading(false)
+    }
+  }
 
   React.useEffect(() => {
     if (!open) {
       return
     }
-    void loadCounts()
-  }, [normalizedCasePath, open])
+    resetPagingState()
+  }, [
+    appliedQuery,
+    mailOnly,
+    open,
+    resetPagingState,
+    reviewFlaggedOnly,
+    reviewTaggedOnly,
+    selectedCasePath,
+    selectedScopePath,
+    sortKey
+  ])
+
+  React.useEffect(() => {
+    activeTabRef.current = activeTab
+  }, [activeTab])
 
   React.useEffect(() => {
     if (!open) {
@@ -475,6 +617,15 @@ export function AllItemsDialog({
       void loadPage(activeTab, 1)
     }
   }, [activeTab, activeState.loading, activeState.loadingMore, activeState.items.length, open, sortKey, tabState])
+
+  React.useEffect(() => {
+    if (open) {
+      return
+    }
+    clearSelection()
+    setBulkActionLoading(false)
+    setDialogError('')
+  }, [open, clearSelection])
 
   React.useLayoutEffect(() => {
     if (!open) {
@@ -495,7 +646,13 @@ export function AllItemsDialog({
     el.scrollTop = 0
   }, [scrollResetToken])
 
-  const rows = activeState.items
+  React.useLayoutEffect(() => {
+    if (!selectAllRef.current) {
+      return
+    }
+    selectAllRef.current.indeterminate = someLoadedSelected
+  }, [someLoadedSelected, activeTab, selectedCount, rows.length])
+
   const virtualItems = virtualizer.getVirtualItems()
 
   function renderSortHeader(column: AllItemsSortColumn, label: string): React.ReactNode {
@@ -553,12 +710,12 @@ export function AllItemsDialog({
                   Case scope
                 </span>
                 <Badge className="border-[color:var(--line)] bg-[color:var(--surface)] text-[color:var(--text)]">
-                  {normalizedCasePath || 'All cases'}
+                  {selectedTotalsScope.scopePath || selectedTotalsScope.casePath || 'All cases'}
                 </Badge>
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <Button variant="ghost" onClick={() => void loadCounts()}>
+              <Button variant="ghost" onClick={onRefreshCounts}>
                 <RefreshCw className="h-4 w-4" />
                 Refresh counts
               </Button>
@@ -584,7 +741,7 @@ export function AllItemsDialog({
                         ? 'border-[color:var(--accent)] bg-[color:var(--accent-soft)] text-[color:var(--accent)]'
                         : 'border-[color:var(--line)] bg-[color:var(--surface-strong)] text-[color:var(--text)] hover:border-[color:var(--accent-soft)] hover:bg-[color:var(--surface-soft)]'
                     )}
-                    onClick={() => setActiveTab(tab.key)}
+                    onClick={() => handleTabChange(tab.key)}
                   >
                     {tab.icon}
                     <span>{tab.label}</span>
@@ -606,7 +763,7 @@ export function AllItemsDialog({
                 />
                 <Button type="submit">
                   <Search className="h-4 w-4" />
-                  Apply search
+                  Search
                 </Button>
                 {draftQuery || appliedQuery ? (
                   <Button type="button" variant="ghost" onClick={handleClearSearch}>
@@ -655,7 +812,63 @@ export function AllItemsDialog({
             </div>
           </div>
 
-          <div className={`${ITEM_GRID_TEMPLATE} border-b border-[color:var(--line)] bg-[color:var(--surface)] px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.2em] text-[color:var(--muted)]`}>
+          {selectedCount > 0 ? (
+            <div className="border-b border-[color:var(--line)] px-6 py-4">
+              <div className="rounded-2xl border border-[color:rgba(59,130,246,0.22)] bg-[color:rgba(59,130,246,0.08)] px-4 py-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Badge className="border-[color:rgba(59,130,246,0.22)] bg-[color:var(--surface-strong)] text-[color:var(--accent)]">
+                      {selectedCount}
+                    </Badge>
+                    <div className="text-sm">
+                      <div className="font-semibold text-[color:var(--text)]">
+                        {selectedCount === 1 ? 'item selected' : 'items selected'}
+                      </div>
+                      <div className="text-[color:var(--muted)]">
+                        Selection stays with loaded rows in this tab.
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={() => void handleBulkFlagSelected()}
+                      disabled={bulkActionLoading || selectedHasPending}
+                    >
+                      {bulkActionLoading ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Flag className="h-4 w-4" />}
+                      {bulkActionLoading ? 'Flagging...' : 'Flag selected'}
+                    </Button>
+                    <Button type="button" variant="ghost" onClick={clearSelection} disabled={bulkActionLoading}>
+                      Clear selection
+                    </Button>
+                  </div>
+                </div>
+
+                {bulkActionError ? (
+                  <div className="mt-3 text-sm text-[color:var(--danger)]">{bulkActionError}</div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+
+          <div
+            className={`${ITEM_GRID_TEMPLATE} border-b border-[color:var(--line)] bg-[color:var(--surface)] px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.2em] text-[color:var(--muted)]`}
+          >
+            <div className="flex items-center justify-center">
+              <input
+                ref={selectAllRef}
+                type="checkbox"
+                className="h-4 w-4 rounded border-[color:var(--line)] accent-[color:var(--accent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--focus-ring)]"
+                aria-label="Select all loaded items"
+                checked={allLoadedSelected}
+                disabled={!rows.length || bulkActionLoading}
+                onChange={(event) => {
+                  setAllItemsSelected(activeTab, rows, event.target.checked)
+                }}
+              />
+            </div>
             <div>Source</div>
             {renderSortHeader('subject', 'Subject')}
             {renderSortHeader('sender', 'Sender')}
@@ -699,6 +912,7 @@ export function AllItemsDialog({
                     updatedAt: ''
                   }
                   const flagged = Boolean(review.flagged)
+                  const selected = Boolean(activeSelection[normalizeText(item.id)])
                   const active = normalizeText(item.id) === normalizeText(selectedItemId)
                   const pending = Boolean(pendingReviewIds[normalizeText(item.id)])
                   return (
@@ -717,7 +931,9 @@ export function AllItemsDialog({
                         aria-selected={active}
                         className={cn(
                           `${ITEM_GRID_TEMPLATE} items-center gap-4 rounded-2xl border px-4 py-3 text-left transition focus:outline-none focus:ring-2 focus:ring-[color:var(--focus-ring)]`,
-                          active
+                          selected
+                            ? 'border-[color:var(--accent)] bg-[color:var(--accent-soft)]'
+                            : active
                             ? 'border-[color:var(--accent)] bg-[color:var(--accent-soft)]'
                             : 'border-[color:var(--line)] bg-[color:var(--surface-strong)] hover:border-[color:var(--accent-soft)] hover:bg-[color:var(--surface-soft)]',
                           pending && 'opacity-80'
@@ -732,6 +948,25 @@ export function AllItemsDialog({
                           }
                         }}
                       >
+                        <div className="flex items-center justify-center">
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 rounded border-[color:var(--line)] accent-[color:var(--accent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--focus-ring)]"
+                            aria-label={`Select item ${item.subject || item.messageId || item.id}`}
+                            checked={selected}
+                            disabled={bulkActionLoading}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                            }}
+                            onKeyDown={(event) => {
+                              event.stopPropagation()
+                            }}
+                            onChange={(event) => {
+                              setItemSelected(activeTab, item.id, event.target.checked)
+                            }}
+                          />
+                        </div>
+
                         <div className="min-w-0">
                           <span
                             className={cn(
@@ -799,12 +1034,16 @@ export function AllItemsDialog({
                         <div className="flex justify-end">
                           <IconButton
                             label={flagged ? 'Unflag item' : 'Flag item'}
-                            className={cn('h-9 w-9', flagged ? 'icon-button-primary' : '', pending && 'opacity-60')}
+                            className={cn(
+                              'h-9 w-9',
+                              flagged ? 'icon-button-primary' : '',
+                              (pending || bulkActionLoading) && 'opacity-60'
+                            )}
                             onClick={(event) => {
                               event.stopPropagation()
                               void handleReviewToggle(item)
                             }}
-                            disabled={pending}
+                            disabled={pending || bulkActionLoading}
                           >
                             <Flag className={cn('h-4 w-4', flagged && 'fill-current')} />
                           </IconButton>

@@ -10,6 +10,12 @@ export interface ParsedSearchQuery {
   terms: SearchTerm[]
 }
 
+export interface ResolvedSelectionScope {
+  scope: 'all' | 'search'
+  scopePath: string
+  casePath?: string
+}
+
 export function normalizeSearchResultItem<T extends Record<string, unknown>>(item: T): T {
   if (!item || typeof item !== 'object') {
     return item
@@ -36,6 +42,32 @@ export function normalizeSearchResultsPage<T extends { items?: unknown[] }>(page
   return {
     ...page,
     items: items.map((item) => normalizeSearchResultItem(item as Record<string, unknown>))
+  }
+}
+
+export function resolveSelectionScope(selectedCasePath: string, selectedScopePath: string): ResolvedSelectionScope {
+  const normalizedCasePath = normalizeText(selectedCasePath)
+  const normalizedScopePath = normalizeText(selectedScopePath)
+
+  if (normalizedScopePath) {
+    return {
+      scope: 'search',
+      scopePath: normalizedScopePath,
+      casePath: normalizedCasePath || undefined
+    }
+  }
+
+  if (normalizedCasePath) {
+    return {
+      scope: 'all',
+      scopePath: '',
+      casePath: normalizedCasePath
+    }
+  }
+
+  return {
+    scope: 'all',
+    scopePath: ''
   }
 }
 

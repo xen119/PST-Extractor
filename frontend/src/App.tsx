@@ -36,7 +36,7 @@ import {
 import { AllItemsDialog } from '@/components/all-items-dialog'
 import { AppShell, EmailPreview, EmptyState, MessageList, Sidebar, TagManagerDialog } from '@/components/layout'
 import { Badge, Button, Dialog, DialogContent, DialogDescription, DialogTitle, IconButton, Input, PopoverClose, ScrollArea, Separator } from '@/components/ui'
-import { deriveSearchMode, normalizeSearchResultsPage } from '@/lib/search'
+import { deriveSearchMode, normalizeSearchResultsPage, resolveSelectionScope } from '@/lib/search'
 import { cn, downloadTextFile, formatDate, normalizeText } from '@/lib/utils'
 import {
   getWorkspaceStorageNamespace,
@@ -420,10 +420,12 @@ export function App() {
     mailboxes: false,
     items: false
   })
+  const [sourceCounts, setSourceCounts] = React.useState<Record<SearchSourceType, number> | null>(null)
   const [mfaReminderDismissed, setMfaReminderDismissed] = React.useState(false)
   const [tagsDialogOpen, setTagsDialogOpen] = React.useState(false)
   const [fullViewOpen, setFullViewOpen] = React.useState(false)
   const refreshCurrentPageRef = React.useRef<() => Promise<void>>(async () => undefined)
+  const sourceCountsRequestRef = React.useRef(0)
   const searchIndexRefreshPollTimeoutRef = React.useRef<Record<SearchIndexRefreshSource, number | null>>({
     mailboxes: null,
     items: null
@@ -473,18 +475,21 @@ export function App() {
     authenticated && !authFlowActive && (mfaEnabled || (!mfaEnforced && mfaReminderDismissed) || !authStatus?.enabled)
   const breadcrumbs = React.useMemo(() => {
     const folderNode = getFolderNode(folderTree, currentFolderId)
-    const parts = [
-      { label: catalog?.scopeLabel || 'Mailbox review' },
-      { label: selectedPstFileName || sessionSummary?.fileName || 'PST' }
-    ]
-    if (folderNode?.displayName) {
+    const parts: Array<{ label: string }> = []
+    if (selectedCasePath || selectedScopePath) {
+      parts.push({ label: selectedScopePath || selectedCasePath })
+    }
+    if (selectedPstFileName || sessionSummary?.fileName) {
+      parts.push({ label: selectedPstFileName || sessionSummary?.fileName || 'PST' })
+    }
+    if (folderNode?.displayName && (selectedPstFileName || sessionSummary?.fileName)) {
       parts.push({ label: folderNode.displayName })
     }
     return parts
-  }, [catalog?.scopeLabel, currentFolderId, folderTree, selectedPstFileName, sessionSummary?.fileName])
+  }, [currentFolderId, folderTree, selectedCasePath, selectedPstFileName, selectedScopePath, sessionSummary?.fileName])
   const caseSelectorOptions = React.useMemo(() => getTopLevelCaseOptions(caseOptions), [caseOptions])
   const searchSelectorOptions = React.useMemo(
-    () => getSearchOptionsForCase(caseOptions, selectedCasePath),
+    () => (selectedCasePath ? getSearchOptionsForCase(caseOptions, selectedCasePath) : []),
     [caseOptions, selectedCasePath]
   )
   const activeSearchScopePath = React.useMemo(() => {
@@ -512,6 +517,43 @@ export function App() {
       getScopeEntryForPath(catalog.scopes, selectedCasePath)
     )
   }, [catalog?.scopes, selectedCasePath, selectedScopePath])
+  const workspaceEmptyState = React.useMemo(() => {
+    const hasMailboxSelection = Boolean(selectedPstFileName || sessionSummary?.fileName)
+
+    if (!selectedCasePath && !selectedScopePath) {
+      return {
+        messageTitle: 'Select a case to begin.',
+        messageDescription: 'Choose a case, then a search and mailbox to load messages.',
+        previewTitle: 'Select a case to begin.',
+        previewDescription: 'Choose a case, then a search and mailbox to preview a message.'
+      }
+    }
+
+    if (sourceType === 'mailbox' && !hasMailboxSelection) {
+      return {
+        messageTitle: 'Select a mailbox to begin.',
+        messageDescription: 'Choose a mailbox to load folders and messages.',
+        previewTitle: 'Select a mailbox to begin.',
+        previewDescription: 'Choose a mailbox to preview a message.'
+      }
+    }
+
+    if (!selectedScopePath && sourceType !== 'mailbox') {
+      return {
+        messageTitle: 'Select a search to begin.',
+        messageDescription: 'Choose a search to load results.',
+        previewTitle: 'Select a search to begin.',
+        previewDescription: 'Choose a search to preview a message.'
+      }
+    }
+
+    return {
+      messageTitle: 'Select a message to preview it.',
+      messageDescription: 'Choose a message from the list to load the reading pane.',
+      previewTitle: 'No message selected',
+      previewDescription: 'Select a message from the list to preview it.'
+    }
+  }, [selectedCasePath, selectedPstFileName, selectedScopePath, sessionSummary?.fileName])
 
   function invalidateMessagePreview(loading = true): number {
     messagePreviewRequestRef.current += 1
@@ -592,6 +634,39 @@ export function App() {
       clearMailboxPreviewCache()
     }
   }
+
+  const loadSourceCounts = React.useCallback(async (): Promise<void> => {
+    const requestId = ++sourceCountsRequestRef.current
+    const totalsScope = resolveSelectionScope(selectedCasePath, selectedScopePath)
+    setSourceCounts(null)
+
+    try {
+      const response = await api.search({
+        scope: totalsScope.scope,
+        sourceType: 'all',
+        casePath: totalsScope.casePath || undefined,
+        scopePath: totalsScope.scopePath || undefined,
+        query: '',
+        mode: 'and',
+        page: 1,
+        pageSize: 1,
+        mailOnly: false,
+        sort: 'date-desc',
+        reviewFlagged: false,
+        reviewTagged: false
+      })
+
+      if (sourceCountsRequestRef.current !== requestId) {
+        return
+      }
+
+      setSourceCounts(response.page.sourceCounts || { mailbox: 0, teams: 0, sharepoint: 0 })
+    } catch {
+      if (sourceCountsRequestRef.current === requestId) {
+        setSourceCounts(null)
+      }
+    }
+  }, [selectedCasePath, selectedScopePath])
 
   function getIndexedItemDetailCacheKey(itemId: string): string {
     return normalizeText(itemId)
@@ -799,19 +874,6 @@ export function App() {
     if (page.page !== pageIndex) {
       setPageIndex(page.page)
     }
-    if (selectedMessageId) {
-      return
-    }
-    const storedMessageId = readWorkspaceStorageItem('messageId', true, username, '')
-    const nextMessageId = page.items.find((item) => item.id === storedMessageId)?.id || page.items[0]?.id || ''
-    if (nextMessageId) {
-      const nextMessage = page.items.find((item) => item.id === nextMessageId)
-      if (nextMessage) {
-        void openMessageSummary(nextMessage)
-      } else {
-        setSelectedMessageId(nextMessageId)
-      }
-    }
   }
 
   React.useEffect(() => {
@@ -934,25 +996,26 @@ export function App() {
     }
 
     setMfaReminderDismissed(mfaEnforced ? false : readReminderDismissed(username))
-    const rememberedCasePath = readWorkspaceStorageItem('casePath', true, username, '')
-    const rememberedScopePath = readWorkspaceStorageItem('scopePath', true, username, '')
-    const rememberedMailboxSearchScopePath = readWorkspaceStorageItem('searchScopePath', true, username, '')
-    const normalizedCasePath = getCasePathFromScopePath(rememberedCasePath || rememberedScopePath)
-    setSelectedCasePath(normalizedCasePath)
-    setSelectedScopePath(rememberedScopePath || normalizedCasePath)
-    setMailboxSearchScopePath(rememberedMailboxSearchScopePath || rememberedScopePath || normalizedCasePath)
-    setSelectedPstFileName(readWorkspaceStorageItem('pstFileName', true, username, ''))
-    setCurrentFolderId(readWorkspaceStorageItem('folderId', true, username, ''))
-    setSelectedMessageId(readWorkspaceStorageItem('messageId', true, username, ''))
+    setSelectedCasePath('')
+    setSelectedScopePath('')
+    setMailboxSearchScopePath('')
+    setSelectedPstFileName('')
+    setCurrentFolderId('')
+    setSelectedMessageId('')
+    setCurrentPage(null)
+    setPageIndex(1)
+    setSelectedMessage(null)
+    setSessionId(null)
+    setSessionSummary(null)
+    setFolderTree(null)
+    setCatalogFiles([])
+    setCatalogMessage('')
+    setWorkspaceMode('folder')
     const rememberedQuery = readWorkspaceStorageItem('query', true, username, '')
     setSearchQuery(rememberedQuery)
     setSearchInputQuery(rememberedQuery)
-    const rememberedSearchScope = (readWorkspaceStorageItem('searchScope', true, username, 'all') as SearchScope) || 'all'
-    setSearchScope(rememberedSearchScope === 'pst' ? 'all' : rememberedSearchScope)
-    const rememberedSourceType = readWorkspaceStorageItem('sourceType', true, username, 'mailbox') as CorpusSourceType
-    setSourceType(
-      rememberedSourceType === 'teams' || rememberedSourceType === 'sharepoint' ? rememberedSourceType : 'mailbox'
-    )
+    setSearchScope('all')
+    setSourceType('mailbox')
     setMailOnly(readWorkspaceStorageBool('mailOnly', true, username, false))
     setSort(readWorkspaceStorageItem('sort', true, username, 'date-desc'))
     setReviewFlaggedOnly(readWorkspaceStorageBool('reviewFlaggedOnly', true, username, false))
@@ -1078,32 +1141,9 @@ export function App() {
           return
         }
         setCatalogMessage(response.message || '')
-        const nextCasePath = (() => {
-          const caseOptions = getTopLevelCaseOptions(response.scopes || [])
-          if (selectedCasePath && caseOptions.some((option) => option.value === selectedCasePath)) {
-            return selectedCasePath
-          }
-          return caseOptions[0]?.value || getCasePathFromScopePath(response.scopePath || '')
-        })()
-        const availableSearchOptions = getSearchOptionsForCase(response.scopes || [], nextCasePath)
-        const nextScopePath = (() => {
-          if (selectedScopePath && availableSearchOptions.some((option) => option.value === selectedScopePath)) {
-            return selectedScopePath
-          }
-          return getDefaultSearchPathForCase(response.scopes || [], nextCasePath)
-        })()
         catalogLoadKeyRef.current = loadKey
         setCatalog(response)
         setCaseOptions(response.scopes || [])
-        if (nextCasePath !== selectedCasePath) {
-          setSelectedCasePath(nextCasePath)
-        }
-        if (nextScopePath !== selectedScopePath) {
-          setSelectedScopePath(nextScopePath)
-          if (sourceType === 'mailbox') {
-            setMailboxSearchScopePath(nextScopePath)
-          }
-        }
       } catch (error) {
         if (!cancelled) {
           setCatalogMessage(error instanceof Error ? error.message : 'Unable to load PST catalog')
@@ -1126,14 +1166,32 @@ export function App() {
   }, [assignedCasePathsKey, authenticated, authFlowActive, selectedCasePath, selectedScopePath, username])
 
   React.useEffect(() => {
-    if (!workspaceReady || !authenticated || sourceType !== 'mailbox' || !catalog?.scopes?.length || !activeCatalogScope) {
+    if (!workspaceReady || !authenticated || sourceType !== 'mailbox' || !catalog?.scopes?.length) {
+      return
+    }
+
+    if (!activeCatalogScope) {
+      setCatalogFiles([])
+      setCatalogMessage('Select a case to browse mailboxes.')
+      if (!selectedPstFileName && !sessionId && !sessionSummary && !folderTree) {
+        return
+      }
+      clearMailboxDetailCache()
+      setSelectedPstFileName('')
+      setSessionId(null)
+      setSessionSummary(null)
+      setFolderTree(null)
+      setCurrentFolderId('')
+      setCurrentPage(null)
+      setPageIndex(1)
+      setSelectedMessageId('')
+      setSelectedMessage(null)
+      setWorkspaceMode('folder')
       return
     }
 
     const nextFiles = activeCatalogScope.files || []
-    const nextFile =
-      nextFiles.find((file) => file.fileName === selectedPstFileName)?.fileName || nextFiles[0]?.fileName || ''
-    const nextScopePath = activeCatalogScope.scopePath || selectedScopePath || selectedCasePath || ''
+    const selectedMailboxExists = nextFiles.some((file) => file.fileName === selectedPstFileName)
     setCatalogFiles(nextFiles)
     setCatalogMessage(
       `Found ${activeCatalogScope.fileCount || 0} mailbox file${
@@ -1141,27 +1199,44 @@ export function App() {
       } in ${activeCatalogScope.scopeLabel || 'PST root'}.`
     )
 
-    const nextMailboxOpenKey = `${normalizeText(nextFile)}::${normalizeText(nextScopePath)}`
-    if (skipNextMailboxOpenRef.current && skipNextMailboxOpenRef.current === nextMailboxOpenKey) {
-      skipNextMailboxOpenRef.current = ''
+    if (!selectedPstFileName || selectedMailboxExists) {
       return
     }
 
-    if (nextFile && nextFile !== selectedPstFileName) {
-      setSelectedPstFileName(nextFile)
-      void openMailbox(nextFile, nextScopePath, catalog)
-    }
+    clearMailboxDetailCache()
+    setSelectedPstFileName('')
+    setSessionId(null)
+    setSessionSummary(null)
+    setFolderTree(null)
+    setCurrentFolderId('')
+    setCurrentPage(null)
+    setPageIndex(1)
+    setSelectedMessageId('')
+    setSelectedMessage(null)
+    setWorkspaceMode('folder')
   }, [
     activeCatalogScope,
     authenticated,
     catalog,
+    folderTree,
     sourceType,
     selectedCasePath,
     selectedPstFileName,
     selectedScopePath,
+    sessionId,
+    sessionSummary?.fileName,
     username,
     workspaceReady
   ])
+
+  React.useEffect(() => {
+    if (!workspaceReady || !authenticated) {
+      setSourceCounts(null)
+      return
+    }
+
+    void loadSourceCounts()
+  }, [authenticated, loadSourceCounts, workspaceReady])
 
   React.useEffect(() => {
     if (!workspaceReady || !authenticated) {
@@ -1554,20 +1629,6 @@ export function App() {
       setFullViewOpen(false)
     }
   }, [messageLoading, selectedMessage, workspaceReady])
-
-  React.useEffect(() => {
-    if (!workspaceReady || !sessionId || !currentPage?.items?.length) {
-      return
-    }
-    if (selectedPreviewOriginRef.current === 'item') {
-      return
-    }
-
-    const first = currentPage.items.find((item) => item.id === selectedMessageId) || currentPage.items[0]
-    if (first && first.id !== selectedMessageId) {
-      void openMessageSummary(first)
-    }
-  }, [currentPage, selectedMessageId, sessionId, workspaceReady])
 
   React.useEffect(() => {
     if (!workspaceReady) {
@@ -2811,29 +2872,49 @@ export function App() {
       selectedCasePath={selectedCasePath}
       selectedScopePath={selectedScopePath}
       sourceType={sourceType}
-      sourceCounts={currentPage?.sourceCounts}
+      sourceCounts={sourceCounts}
       searchOptions={searchSelectorOptions}
       catalogFiles={catalogFiles}
       selectedPstFileName={selectedPstFileName}
       onCaseChange={(value) => {
         const nextCasePath = normalizeText(value)
-        const nextScopePath = getDefaultSearchPathForCase(caseOptions, nextCasePath)
         setSelectedCasePath(nextCasePath)
-        setSelectedScopePath(nextScopePath)
+        setSelectedScopePath('')
+        setMailboxSearchScopePath('')
+        clearMailboxDetailCache()
+        setSelectedPstFileName('')
+        setSessionId(null)
+        setSessionSummary(null)
+        setFolderTree(null)
+        setCurrentFolderId('')
+        setCurrentPage(null)
+        setPageIndex(1)
+        setSelectedMessageId('')
+        setSelectedMessage(null)
+        setWorkspaceMode('folder')
         if (sourceType === 'mailbox') {
-          setMailboxSearchScopePath(nextScopePath)
+          setSearchScope('all')
         }
         writeWorkspaceStorageItem('casePath', true, username, nextCasePath)
-        writeWorkspaceStorageItem('scopePath', true, username, nextScopePath)
+        writeWorkspaceStorageItem('scopePath', true, username, '')
       }}
       onScopeChange={(value) => {
         const nextScopePath = value
         const nextCasePath = getCasePathFromScopePath(nextScopePath)
         setSelectedCasePath(nextCasePath)
         setSelectedScopePath(nextScopePath)
-        if (sourceType === 'mailbox') {
-          setMailboxSearchScopePath(nextScopePath)
-        }
+        setMailboxSearchScopePath(nextScopePath)
+        clearMailboxDetailCache()
+        setSelectedPstFileName('')
+        setSessionId(null)
+        setSessionSummary(null)
+        setFolderTree(null)
+        setCurrentFolderId('')
+        setCurrentPage(null)
+        setPageIndex(1)
+        setSelectedMessageId('')
+        setSelectedMessage(null)
+        setWorkspaceMode('folder')
         writeWorkspaceStorageItem('casePath', true, username, nextCasePath)
         writeWorkspaceStorageItem('scopePath', true, username, nextScopePath)
       }}
@@ -2872,6 +2953,8 @@ export function App() {
     <MessageList
       page={currentPage}
       loading={messagesLoading}
+      emptyStateTitle={workspaceEmptyState.messageTitle}
+      emptyStateDescription={workspaceEmptyState.messageDescription}
       query={searchInputQuery}
       activeQuery={searchQuery}
       sourceType={sourceType}
@@ -2932,6 +3015,8 @@ export function App() {
     <EmailPreview
       detail={selectedMessage}
       loading={messageLoading}
+      emptyStateTitle={workspaceEmptyState.previewTitle}
+      emptyStateDescription={workspaceEmptyState.previewDescription}
       theme={theme}
       onDownloadJson={() => {
         void downloadJson()
@@ -3047,6 +3132,8 @@ export function App() {
             <EmailPreview
               detail={selectedMessage}
               loading={messageLoading}
+              emptyStateTitle={workspaceEmptyState.previewTitle}
+              emptyStateDescription={workspaceEmptyState.previewDescription}
               theme={theme}
               onDownloadJson={() => {
                 void downloadJson()
@@ -3302,6 +3389,8 @@ export function App() {
         open={allItemsDialogOpen}
         selectedItemId={selectedMessageId}
         selectedCasePath={selectedCasePath}
+        selectedScopePath={selectedScopePath}
+        sourceCounts={sourceCounts}
         onOpenChange={(open) => {
           setAllItemsDialogOpen(open)
         }}
@@ -3310,6 +3399,9 @@ export function App() {
         }}
         onReviewChange={(itemId, review) => {
           patchIndexedItemReview(itemId, review)
+        }}
+        onRefreshCounts={() => {
+          void loadSourceCounts()
         }}
       />
     </>

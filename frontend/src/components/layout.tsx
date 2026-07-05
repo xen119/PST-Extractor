@@ -149,7 +149,7 @@ export function AppShell({
                 {breadcrumbs.length ? (
                   breadcrumbs.map((crumb) => crumb.label).filter(Boolean).join(' / ')
                 ) : (
-                  'Select a mailbox to begin.'
+                  'Select a case to begin.'
                 )}
               </div>
             </div>
@@ -205,7 +205,7 @@ interface SidebarProps {
   selectedCasePath: string
   selectedScopePath: string
   sourceType: 'mailbox' | 'teams' | 'sharepoint'
-  sourceCounts?: Record<'mailbox' | 'teams' | 'sharepoint', number>
+  sourceCounts?: Record<'mailbox' | 'teams' | 'sharepoint', number> | null
   searchOptions: Array<{ label: string; value: string; count: number }>
   catalogFiles: CatalogEntry[]
   selectedPstFileName: string
@@ -247,9 +247,8 @@ export function Sidebar({
   currentFolderId,
   onSelectFolder
 }: SidebarProps) {
-  const selectedMailbox =
-    catalogFiles.find((file) => file.fileName === selectedPstFileName) || catalogFiles[0] || null
-  const tabCounts = sourceCounts || { mailbox: 0, teams: 0, sharepoint: 0 }
+  const selectedMailbox = catalogFiles.find((file) => file.fileName === selectedPstFileName) || null
+  const tabCounts = sourceCounts || null
   const mailboxesRefreshStatus = searchIndexRefreshStatuses.mailboxes || null
   const itemsRefreshStatus = searchIndexRefreshStatuses.items || null
   const mailboxesRefreshBusy = Boolean(searchIndexRefreshBusyBySource.mailboxes)
@@ -356,7 +355,7 @@ export function Sidebar({
               <div className="grid grid-cols-3 gap-2">
                 {sourceTabs.map((tab) => {
                   const active = sourceType === tab.key
-                  const count = tab.key === 'mailbox' ? catalogFiles.length : tabCounts[tab.key] || 0
+                  const count = tabCounts ? tabCounts[tab.key] : '…'
                   return (
                     <button
                       key={tab.key}
@@ -384,18 +383,17 @@ export function Sidebar({
               Case
               <select
                 className="select mt-2"
-                value={selectedCasePath}
+                value={selectedCasePath || ''}
                 onChange={(event) => onCaseChange(event.target.value)}
               >
+                <option value="">{caseOptions.length ? 'Select a case' : 'No cases found'}</option>
                 {caseOptions.length ? (
                   caseOptions.map((option) => (
                     <option key={option.value} value={option.value}>
                       {option.label}
                     </option>
                   ))
-                ) : (
-                  <option value="">No cases found</option>
-                )}
+                ) : null}
               </select>
             </label>
 
@@ -403,18 +401,18 @@ export function Sidebar({
               Search
               <select
                 className="select mt-2"
-                value={selectedScopePath}
+                value={selectedScopePath || ''}
+                disabled={!selectedCasePath || !searchOptions.length}
                 onChange={(event) => onScopeChange(event.target.value)}
               >
+                <option value="">{selectedCasePath ? 'Select a search' : 'Select a case first'}</option>
                 {searchOptions.length ? (
                   searchOptions.map((option) => (
                     <option key={option.value} value={option.value}>
                       {option.label}
                     </option>
                   ))
-                ) : (
-                  <option value={selectedCasePath}>{selectedCasePath || 'PST root'}</option>
-                )}
+                ) : null}
               </select>
             </label>
             {catalogMessage ? <div className="text-xs leading-5 text-[color:var(--muted)]">{catalogMessage}</div> : null}
@@ -436,6 +434,7 @@ export function Sidebar({
                         className="select flex-1"
                         aria-label="Mailbox selector"
                         value={selectedMailbox?.fileName || ''}
+                        disabled={!catalogFiles.length}
                         onChange={(event) => {
                           const nextMailbox = catalogFiles.find((file) => file.fileName === event.target.value)
                           if (nextMailbox) {
@@ -443,6 +442,7 @@ export function Sidebar({
                           }
                         }}
                       >
+                        <option value="">{selectedCasePath ? 'Select a mailbox' : 'Select a case first'}</option>
                         {catalogFiles.map((file) => (
                           <option key={`${file.scopePath || ''}/${file.fileName}`} value={file.fileName}>
                             {file.fileName}
@@ -568,6 +568,8 @@ interface MessageListProps {
   onPageChange?: (page: number) => void
   selectedMessageId: string
   sessionId: string | null
+  emptyStateTitle?: string
+  emptyStateDescription?: string
 }
 
 export function MessageList({
@@ -593,7 +595,9 @@ export function MessageList({
   onNextPage,
   onOpenBundle,
   selectedMessageId,
-  sessionId
+  sessionId,
+  emptyStateTitle,
+  emptyStateDescription
 }: MessageListProps) {
   const parentRef = React.useRef<HTMLDivElement | null>(null)
   const rows = page?.items || []
@@ -699,7 +703,12 @@ export function MessageList({
                 <div className="empty-state m-4">No messages match the current filters.</div>
               )
             ) : (
-              <div className="empty-state m-4">Select a folder to begin.</div>
+              <div className="empty-state m-4">
+                <div className="text-base font-semibold text-[color:var(--text)]">
+                  {emptyStateTitle || 'Select a folder to begin.'}
+                </div>
+                {emptyStateDescription ? <div>{emptyStateDescription}</div> : null}
+              </div>
             )}
           </ScrollArea>
         </div>
@@ -892,6 +901,8 @@ interface EmailPreviewProps {
   tagCount: number
   canNavigatePrev: boolean
   canNavigateNext: boolean
+  emptyStateTitle?: string
+  emptyStateDescription?: string
 }
 
 export function EmailPreview({
@@ -911,7 +922,9 @@ export function EmailPreview({
   showNavigationControls = true,
   tagCount,
   canNavigatePrev,
-  canNavigateNext
+  canNavigateNext,
+  emptyStateTitle,
+  emptyStateDescription
 }: EmailPreviewProps) {
   if (!detail) {
     return (
@@ -919,9 +932,13 @@ export function EmailPreview({
         <div className="empty-state">
           {loading ? <RefreshCw className="h-5 w-5 animate-spin text-[color:var(--accent)]" aria-hidden="true" /> : null}
           <div className="text-base font-semibold text-[color:var(--text)]">
-            {loading ? 'Loading preview...' : 'No message selected'}
+            {loading ? 'Loading preview...' : emptyStateTitle || 'No message selected'}
           </div>
-          <div>{loading ? 'Fetching the selected item.' : 'Select a message from the list to preview it.'}</div>
+          <div>
+            {loading
+              ? 'Fetching the selected item.'
+              : emptyStateDescription || 'Select a message from the list to preview it.'}
+          </div>
         </div>
       </div>
     )

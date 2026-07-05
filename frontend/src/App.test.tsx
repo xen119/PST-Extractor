@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App, getCasePathFromScopePath } from '@/App'
@@ -898,6 +898,19 @@ describe('shell and preview', () => {
       scopeLabel: 'Search One',
       scopes: [
         {
+          scopePath: 'Case Alpha',
+          scopeLabel: 'Case Alpha',
+          fileCount: 1,
+          files: [
+            {
+              fileName: 'mailbox-a.pst',
+              size: 1024,
+              modifiedAt: new Date().toISOString(),
+              scopePath: 'Case Alpha'
+            }
+          ]
+        },
+        {
           scopePath: 'Case Alpha/Search One',
           scopeLabel: 'Search One',
           fileCount: 1,
@@ -967,10 +980,10 @@ describe('shell and preview', () => {
       sessionId: 'session-a',
       scopePath: 'Case Alpha/Search One',
       scopeLabel: 'Search One',
-      fileName: 'mailbox-a.pst',
+      fileName: 'items.zip',
       summary: {
-        fileName: 'mailbox-a.pst',
-        mailboxName: 'mailbox-a.pst'
+        fileName: 'items.zip',
+        mailboxName: 'items.zip'
       },
       tree: {
         id: 'root-a',
@@ -990,7 +1003,7 @@ describe('shell and preview', () => {
             senderName: 'Alice Example',
             senderEmailAddress: 'alice@example.com',
             sortDate: new Date().toISOString(),
-            fileName: 'mailbox-a.pst',
+            fileName: 'items.zip',
             scopePath: 'Case Alpha/Search One',
             isMailLike: true,
             review: {
@@ -1007,7 +1020,7 @@ describe('shell and preview', () => {
             senderName: 'Team A',
             senderEmailAddress: 'team-a@example.com',
             sortDate: new Date().toISOString(),
-            fileName: 'mailbox-a.pst',
+            fileName: 'items.zip',
             scopePath: 'Case Alpha/Search One',
             isMailLike: true,
             review: {
@@ -1024,7 +1037,7 @@ describe('shell and preview', () => {
             senderName: 'Team B',
             senderEmailAddress: 'team-b@example.com',
             sortDate: new Date().toISOString(),
-            fileName: 'mailbox-a.pst',
+            fileName: 'items.zip',
             scopePath: 'Case Alpha/Search One',
             isMailLike: true,
             review: {
@@ -1062,20 +1075,21 @@ describe('shell and preview', () => {
       throw new Error(`Unexpected message detail request: ${sessionId}/${messageId}`)
     })
 
-    window.localStorage.setItem('pst-mail-explorer.casePath::admin', 'Case Alpha')
-    window.localStorage.setItem('pst-mail-explorer.scopePath::admin', 'Case Alpha/Search One')
-    window.localStorage.setItem('pst-mail-explorer.pstFileName::admin', 'mailbox-a.pst')
-    window.localStorage.setItem('pst-mail-explorer.folderId::admin', 'root-a')
-    window.localStorage.setItem('pst-mail-explorer.messageId::admin', 'current-message')
-    window.localStorage.setItem('pst-mail-explorer.sourceType::admin', 'mailbox')
-
     render(
       <div style={{ width: 1800, height: 5000 }}>
         <App />
       </div>
     )
 
-    expect(await screen.findByText('Current mailbox body')).toBeInTheDocument()
+    const caseSelect = await screen.findByRole('combobox', { name: 'Case' })
+    await user.selectOptions(caseSelect, 'Case Alpha')
+    await waitFor(() => {
+      expect(screen.getByRole('combobox', { name: 'Search' })).not.toBeDisabled()
+    })
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Search' }), 'Case Alpha/Search One')
+    const mailboxSelect = await screen.findByLabelText('Mailbox selector')
+    await user.selectOptions(mailboxSelect, 'items.zip')
+
     const firstItem = await screen.findByRole('button', { name: /Archive item A/ })
     await user.click(firstItem)
     expect(await screen.findByText('Loading preview...')).toBeInTheDocument()
@@ -1083,18 +1097,27 @@ describe('shell and preview', () => {
     const secondItem = await screen.findByRole('button', { name: /Archive item B/ })
     await user.click(secondItem)
     expect(screen.getByText('Loading preview...')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(vi.mocked(api.session.messageDetail)).toHaveBeenCalledWith('session-a', 'archive-b')
+    })
 
-    secondDetail.resolve({ detail: secondPreview })
+    await act(async () => {
+      secondDetail.resolve({ detail: secondPreview })
+      await secondDetail.promise
+    })
     expect(await screen.findByText('Second item body')).toBeInTheDocument()
 
-    firstDetail.resolve({ detail: firstPreview })
+    await act(async () => {
+      firstDetail.resolve({ detail: firstPreview })
+      await firstDetail.promise
+    })
     await waitFor(() => {
       expect(screen.getByText('Second item body')).toBeInTheDocument()
       expect(screen.queryByText('First item body')).not.toBeInTheDocument()
     })
   })
 
-  it('hydrates restored mailbox selections and reuses warmed preview requests for next navigation', async () => {
+  it('starts blank on login and still opens mailbox previews after an explicit selection', async () => {
     const user = userEvent.setup()
     const authenticatedStatus: AuthStatus = {
       authenticated: true,
@@ -1115,6 +1138,19 @@ describe('shell and preview', () => {
       scopePath: 'Case Alpha/Search One',
       scopeLabel: 'Search One',
       scopes: [
+        {
+          scopePath: 'Case Alpha',
+          scopeLabel: 'Case Alpha',
+          fileCount: 1,
+          files: [
+            {
+              fileName: 'mailbox-a.pst',
+              size: 1024,
+              modifiedAt: new Date().toISOString(),
+              scopePath: 'Case Alpha'
+            }
+          ]
+        },
         {
           scopePath: 'Case Alpha/Search One',
           scopeLabel: 'Search One',
@@ -1141,6 +1177,7 @@ describe('shell and preview', () => {
       summary: null,
       error: null
     }
+    const sourceCounts = { mailbox: 1, teams: 0, sharepoint: 0 }
     const firstDetail = createDeferred<{ sessionId: string; detail: MessageDetail }>()
     const secondDetail = createDeferred<{ sessionId: string; detail: MessageDetail }>()
     const thirdDetail = createDeferred<{ sessionId: string; detail: MessageDetail }>()
@@ -1242,6 +1279,23 @@ describe('shell and preview', () => {
     vi.spyOn(api.auth, 'me').mockResolvedValueOnce(authenticatedStatus)
     vi.spyOn(api.pst, 'catalog').mockResolvedValueOnce(catalog)
     vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue({ items: [] })
+    vi.spyOn(api, 'search').mockResolvedValue({
+      scope: 'all',
+      scopePath: '',
+      scopeLabel: 'All cases/searches',
+      sourceType: 'all',
+      page: {
+        items: [],
+        total: 1,
+        page: 1,
+        pageSize: 1,
+        totalPages: 1,
+        query: '',
+        mailOnly: false,
+        sort: 'date-desc',
+        sourceCounts
+      }
+    })
     vi.spyOn(api.pst, 'open').mockResolvedValue({
       sessionId: 'session-a',
       scopePath: 'Case Alpha/Search One',
@@ -1283,25 +1337,182 @@ describe('shell and preview', () => {
       </div>
     )
 
+    expect(await screen.findByRole('combobox', { name: 'Case' })).toHaveValue('')
+    expect(screen.getByRole('combobox', { name: 'Search' })).toHaveValue('')
+    expect(screen.getByRole('combobox', { name: 'Search' })).toBeDisabled()
+    expect(screen.queryByLabelText('Mailbox selector')).not.toBeInTheDocument()
+    expect(screen.getAllByText('Select a case to begin.').length).toBeGreaterThan(0)
+    expect(screen.getByText('Choose a case, then a search and mailbox to load messages.')).toBeInTheDocument()
+    expect(screen.getByText('Choose a case, then a search and mailbox to preview a message.')).toBeInTheDocument()
+    expect(vi.mocked(api.pst.open)).not.toHaveBeenCalled()
+    expect(vi.mocked(api.session.folderMessages)).not.toHaveBeenCalled()
+
+    const caseSelect = await screen.findByRole('combobox', { name: 'Case' })
+    await user.selectOptions(caseSelect, 'Case Alpha')
+    await waitFor(() => {
+      expect(screen.getByRole('combobox', { name: 'Search' })).not.toBeDisabled()
+    })
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Search' }), 'Case Alpha/Search One')
+    expect(await screen.findByLabelText('Mailbox selector')).toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText('Mailbox selector'), 'mailbox-a.pst')
+
     expect(await screen.findByRole('button', { name: /First mailbox result/ })).toBeInTheDocument()
-    await waitFor(() => expect(messageDetailMock).toHaveBeenCalledTimes(3))
-    expect(screen.getByText('Loading preview...')).toBeInTheDocument()
-    expect(screen.queryByText('No message selected')).not.toBeInTheDocument()
+    expect(screen.getAllByText('No message selected').length).toBeGreaterThan(0)
+    expect(screen.queryByText('Loading preview...')).not.toBeInTheDocument()
 
-    firstDetail.resolve({ sessionId: 'session-a', detail: firstPreview })
-    expect(await screen.findByText('First mailbox body')).toBeInTheDocument()
-
+    await user.click(screen.getByRole('button', { name: /First mailbox result/ }))
     const secondItem = await screen.findByRole('button', { name: /Second mailbox result/ })
     await user.click(secondItem)
-    expect(messageDetailMock).toHaveBeenCalledTimes(3)
-    expect(screen.getByText('Loading preview...')).toBeInTheDocument()
-    expect(screen.queryByText('No message selected')).not.toBeInTheDocument()
 
     secondDetail.resolve({ sessionId: 'session-a', detail: secondPreview })
     expect(await screen.findByText('Second mailbox body')).toBeInTheDocument()
-    expect(messageDetailMock).toHaveBeenCalledTimes(3)
+
+    firstDetail.resolve({ sessionId: 'session-a', detail: firstPreview })
+    await waitFor(() => {
+      expect(screen.getByText('Second mailbox body')).toBeInTheDocument()
+      expect(screen.queryByText('First mailbox body')).not.toBeInTheDocument()
+    })
 
     thirdDetail.resolve({ sessionId: 'session-a', detail: thirdPreview })
+  })
+
+  it('shows source totals for all cases, case scope, search scope, and the all-items modal', async () => {
+    const user = userEvent.setup()
+    const authenticatedStatus: AuthStatus = {
+      authenticated: true,
+      enabled: true,
+      canManageUsers: false,
+      mfaEnabled: true,
+      mfaEnforced: false,
+      lockedUntil: null,
+      loginFailedCount: 0,
+      passwordResetAvailable: false,
+      user: { username: 'admin', assignedCasePaths: [] },
+      expiresAt: null
+    }
+    const catalog: PstCatalogResponse = {
+      rootPath: '',
+      rootExists: true,
+      message: '',
+      scopePath: '',
+      scopeLabel: 'PST root',
+      scopes: [
+        {
+          scopePath: 'Case Alpha',
+          scopeLabel: 'Case Alpha',
+          fileCount: 1,
+          files: [
+            {
+              fileName: 'alpha.pst',
+              size: 1024,
+              modifiedAt: new Date().toISOString(),
+              scopePath: 'Case Alpha'
+            }
+          ]
+        },
+        {
+          scopePath: 'Case Alpha/Search One',
+          scopeLabel: 'Search One',
+          fileCount: 1,
+          files: [
+            {
+              fileName: 'alpha-one.pst',
+              size: 1024,
+              modifiedAt: new Date().toISOString(),
+              scopePath: 'Case Alpha/Search One'
+            }
+          ]
+        },
+        {
+          scopePath: 'Case Alpha/Search Two',
+          scopeLabel: 'Search Two',
+          fileCount: 1,
+          files: [
+            {
+              fileName: 'alpha-two.pst',
+              size: 1024,
+              modifiedAt: new Date().toISOString(),
+              scopePath: 'Case Alpha/Search Two'
+            }
+          ]
+        }
+      ],
+      files: []
+    }
+    const hiddenRulesResponse: HiddenRulesResponse = { items: [] }
+    const idleStatus: SearchIndexRefreshStatus = {
+      jobId: null,
+      status: 'idle',
+      trigger: null,
+      startedAt: null,
+      completedAt: null,
+      updatedAt: new Date().toISOString(),
+      summary: null,
+      error: null
+    }
+    const allCounts = { mailbox: 12, teams: 8, sharepoint: 4 }
+    const caseCounts = { mailbox: 3, teams: 1, sharepoint: 0 }
+    const searchCounts = { mailbox: 1, teams: 0, sharepoint: 0 }
+
+    vi.spyOn(api.auth, 'me').mockResolvedValueOnce(authenticatedStatus)
+    vi.spyOn(api.pst, 'catalog').mockResolvedValueOnce(catalog)
+    vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue(hiddenRulesResponse)
+    vi.spyOn(api.pst, 'refreshSearchIndexStatus').mockResolvedValue({ status: idleStatus })
+    vi.spyOn(api, 'search').mockImplementation(async (params) => {
+      const counts =
+        params.pageSize === 1 && params.sourceType === 'all' && !params.casePath && !params.scopePath
+          ? allCounts
+          : params.scope === 'search' && params.casePath === 'Case Alpha' && params.scopePath === 'Case Alpha/Search One'
+            ? searchCounts
+            : caseCounts
+
+      return {
+        scope: params.scope === 'search' ? 'search' : 'all',
+        scopePath: params.scope === 'search' ? 'Case Alpha/Search One' : params.casePath || '',
+        scopeLabel: params.scope === 'search' ? 'Search One' : params.casePath || 'All cases/searches',
+        sourceType: params.sourceType,
+        page: {
+          items: [],
+          total: counts.mailbox + counts.teams + counts.sharepoint,
+          page: 1,
+          pageSize: params.pageSize,
+          totalPages: 1,
+          query: '',
+          mailOnly: false,
+          sort: params.sort,
+          sourceCounts: counts
+        }
+      }
+    })
+
+    render(
+      <div style={{ width: 1800, height: 1600 }}>
+        <App />
+      </div>
+    )
+
+    expect(await screen.findByRole('button', { name: /^Mailbox\s+12$/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Teams\s+8$/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^SharePoint\/OneDrive\s+4$/ })).toBeInTheDocument()
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Case' }), 'Case Alpha')
+    expect(await screen.findByRole('button', { name: /^Mailbox\s+3$/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Teams\s+1$/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^SharePoint\/OneDrive\s+0$/ })).toBeInTheDocument()
+
+    await waitFor(() => {
+      expect(screen.getByRole('combobox', { name: 'Search' })).not.toBeDisabled()
+    })
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Search' }), 'Case Alpha/Search One')
+    expect(await screen.findByRole('button', { name: /^Mailbox\s+1$/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Teams\s+0$/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^SharePoint\/OneDrive\s+0$/ })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'All items' }))
+    const dialog = await screen.findByRole('dialog', { name: /All items review/i })
+    expect(within(dialog).getByRole('button', { name: /^Mailbox\s+1$/ })).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: /^Teams\s+0$/ })).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: /^SharePoint \/ OneDrive\s+0$/ })).toBeInTheDocument()
   })
 
   it('shows archive office document previews through the preview url', () => {
@@ -1371,6 +1582,19 @@ describe('shell and preview', () => {
       scopePath: 'Case Alpha/Search One',
       scopeLabel: 'Search One',
       scopes: [
+        {
+          scopePath: 'Case Alpha',
+          scopeLabel: 'Case Alpha',
+          fileCount: 1,
+          files: [
+            {
+              fileName: 'mailbox-a.pst',
+              size: 1024,
+              modifiedAt: new Date().toISOString(),
+              scopePath: 'Case Alpha'
+            }
+          ]
+        },
         {
           scopePath: 'Case Alpha/Search One',
           scopeLabel: 'Search One',
@@ -1443,33 +1667,6 @@ describe('shell and preview', () => {
     const searchResultsPage: PageResponse<MessageSummary> = {
       items: [
         {
-          id: currentSearchHitId,
-          messageId: sharedSearchHitMessageId,
-          sourceType: 'mailbox',
-          subject: 'Current mailbox search result',
-          senderName: 'Alice Example',
-          senderEmailAddress: 'alice@example.com',
-          sortDate: new Date().toISOString(),
-          fileName: 'mailbox-a.pst',
-          scopePath: 'Case Alpha/Search One',
-          isMailLike: true,
-          review: {
-            flagged: false,
-            tags: [],
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-          },
-          mailboxDetail: {
-            ...currentDetail,
-            review: {
-              flagged: false,
-              tags: [],
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString()
-            }
-          }
-        },
-        {
           id: targetSearchHitId,
           messageId: sharedSearchHitMessageId,
           sourceType: 'mailbox',
@@ -1488,6 +1685,33 @@ describe('shell and preview', () => {
           },
           mailboxDetail: {
             ...targetDetail,
+            review: {
+              flagged: false,
+              tags: [],
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            }
+          }
+        },
+        {
+          id: currentSearchHitId,
+          messageId: sharedSearchHitMessageId,
+          sourceType: 'mailbox',
+          subject: 'Current mailbox search result',
+          senderName: 'Alice Example',
+          senderEmailAddress: 'alice@example.com',
+          sortDate: new Date().toISOString(),
+          fileName: 'mailbox-a.pst',
+          scopePath: 'Case Alpha/Search One',
+          isMailLike: true,
+          review: {
+            flagged: false,
+            tags: [],
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          },
+          mailboxDetail: {
+            ...currentDetail,
             review: {
               flagged: false,
               tags: [],
@@ -1562,7 +1786,28 @@ describe('shell and preview', () => {
         sort: 'date-desc'
       }
     })
-    vi.spyOn(api, 'search').mockResolvedValue(searchResponse)
+    vi.spyOn(api, 'search').mockImplementation(async (params) => {
+      if (params.pageSize === 1 && params.sourceType === 'all' && !params.casePath && !params.scopePath) {
+        return {
+          scope: 'all',
+          scopePath: '',
+          scopeLabel: 'All cases/searches',
+          sourceType: 'all',
+          page: {
+            items: [],
+            total: 2,
+            page: 1,
+            pageSize: 1,
+            totalPages: 2,
+            query: '',
+            mailOnly: false,
+            sort: 'date-desc',
+            sourceCounts: { mailbox: 1, teams: 0, sharepoint: 0 }
+          }
+        }
+      }
+      return searchResponse
+    })
     const itemDetailMock = vi.spyOn(api.item, 'detail').mockImplementation(async (itemId) => {
       throw new Error(`Unexpected item detail request: ${itemId}`)
     })
@@ -1583,23 +1828,37 @@ describe('shell and preview', () => {
       </div>
     )
 
-    expect(await screen.findByText('Current mailbox message')).toBeInTheDocument()
+    const caseSelect = await screen.findByRole('combobox', { name: 'Case' })
+    await user.selectOptions(caseSelect, 'Case Alpha')
+    await waitFor(() => {
+      expect(screen.getByRole('combobox', { name: 'Search' })).not.toBeDisabled()
+    })
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Search' }), 'Case Alpha/Search One')
+    expect(await screen.findByLabelText('Mailbox selector')).toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText('Mailbox selector'), 'mailbox-a.pst')
 
-    await user.type(screen.getByPlaceholderText('Keywords, "phrases", + AND, | OR'), 'target')
-    expect(api.search).not.toHaveBeenCalled()
+    const currentMailboxMessageButton = await screen.findByRole('button', { name: /Current mailbox message/ })
+    await user.click(currentMailboxMessageButton)
+    expect(await screen.findByText('Current mailbox body')).toBeInTheDocument()
+
+    const searchCallCountBeforeTyping = vi.mocked(api.search).mock.calls.length
+    const searchInput = screen.getByPlaceholderText('Keywords, "phrases", + AND, | OR')
+    fireEvent.change(searchInput, { target: { value: 'target' } })
+    expect(searchInput).toHaveValue('target')
+    expect(vi.mocked(api.search).mock.calls.length).toBe(searchCallCountBeforeTyping)
     await user.selectOptions(screen.getByRole('combobox', { name: 'Scope' }), 'all')
     await user.click(screen.getByRole('button', { name: 'Run search' }))
+    expect(await screen.findByText('Target search result')).toBeInTheDocument()
 
-    expect(await screen.findByText('Current mailbox body')).toBeInTheDocument()
     const openCallCountBeforeTarget = vi.mocked(api.pst.open).mock.calls.length
     const detailCallCountBeforeTarget = vi.mocked(api.session.messageDetail).mock.calls.length
-    await user.click(screen.getByRole('button', { name: /Target search result/ }))
+    await user.click(screen.getByText('Target search result'))
 
     expect(await screen.findByText('Target mailbox body')).toBeInTheDocument()
     expect(screen.queryByText('Loading preview...')).not.toBeInTheDocument()
     expect(screen.queryByText('No message selected')).not.toBeInTheDocument()
     await waitFor(() => {
-      expect(api.search).toHaveBeenCalledTimes(1)
+      expect(api.search).toHaveBeenCalledWith(expect.objectContaining({ query: 'target', scope: 'all' }))
     })
     expect(screen.getByRole('link', { name: 'Download' })).toHaveAttribute(
       'href',
@@ -1744,9 +2003,7 @@ describe('shell and preview', () => {
       vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue(hiddenRulesResponse)
       vi.spyOn(api.pst, 'refreshSearchIndexStatus').mockResolvedValue({ status: idleStatus })
       const searchSpy = vi.spyOn(api, 'search').mockImplementation(async (params) => {
-        expect(params.casePath).toBe('Case Alpha')
-
-        if (params.pageSize === 1 && params.sourceType === 'all') {
+        if (params.pageSize === 1 && params.sourceType === 'all' && !params.casePath && !params.scopePath) {
           return {
             scope: 'all',
             scopePath: '',
@@ -1765,6 +2022,28 @@ describe('shell and preview', () => {
             }
           }
         }
+
+        if (params.pageSize === 1 && params.sourceType === 'all' && params.casePath === 'Case Alpha' && !params.scopePath) {
+          return {
+            scope: 'all',
+            scopePath: 'Case Alpha',
+            scopeLabel: 'Case Alpha',
+            sourceType: 'all',
+            page: {
+              items: [],
+              total: 4,
+              page: 1,
+              pageSize: 1,
+              totalPages: 4,
+              query: '',
+              mailOnly: false,
+              sort: 'date-desc',
+              sourceCounts
+            }
+          }
+        }
+
+        expect(params.casePath).toBe('Case Alpha')
 
         if (params.sourceType === 'mailbox') {
           const mailboxItems =
@@ -1842,6 +2121,10 @@ describe('shell and preview', () => {
         </div>
       )
 
+      const caseSelect = await screen.findByRole('combobox', { name: 'Case' })
+      await user.selectOptions(caseSelect, 'Case Alpha')
+      expect(await screen.findByRole('button', { name: /^Mailbox\s+2$/ })).toBeInTheDocument()
+
       await user.click(await screen.findByRole('button', { name: 'All items' }))
       const dialog = await screen.findByRole('dialog', { name: /All items review/i })
 
@@ -1915,6 +2198,26 @@ describe('shell and preview', () => {
       vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue(hiddenRulesResponse)
       vi.spyOn(api.pst, 'refreshSearchIndexStatus').mockResolvedValue({ status: idleStatus })
       const searchSpy = vi.spyOn(api, 'search').mockImplementation(async (params) => {
+        if (params.pageSize === 1 && params.sourceType === 'all' && !params.casePath && !params.scopePath) {
+          return {
+            scope: 'all',
+            scopePath: '',
+            scopeLabel: 'All cases/searches',
+            sourceType: 'all',
+            page: {
+              items: [],
+              total: 120,
+              page: 1,
+              pageSize: 1,
+              totalPages: 120,
+              query: '',
+              mailOnly: false,
+              sort: 'date-desc',
+              sourceCounts
+            }
+          }
+        }
+
         expect(params.casePath).toBe('Case Alpha')
 
         if (params.pageSize === 1 && params.sourceType === 'all') {
@@ -2006,6 +2309,10 @@ describe('shell and preview', () => {
         </div>
       )
 
+      const caseSelect = await screen.findByRole('combobox', { name: 'Case' })
+      await user.selectOptions(caseSelect, 'Case Alpha')
+      expect(await screen.findByRole('button', { name: /^Mailbox\s+120$/ })).toBeInTheDocument()
+
       await user.click(await screen.findByRole('button', { name: 'All items' }))
       const dialog = await screen.findByRole('dialog', { name: /All items review/i })
 
@@ -2050,6 +2357,11 @@ describe('shell and preview', () => {
       expect(await screen.findByText('Mailbox item 120')).toBeInTheDocument()
       expect(screen.getByText('Mailbox item 1')).toBeInTheDocument()
 
+      await user.click(within(dialog).getByRole('checkbox', { name: 'Select item Mailbox item 1' }))
+      await waitFor(() => {
+        expect(within(dialog).getByText(/item selected/)).toBeInTheDocument()
+      })
+
       await user.click(within(dialog).getByRole('button', { name: 'Mail only' }))
 
       await waitFor(() => {
@@ -2065,7 +2377,437 @@ describe('shell and preview', () => {
 
       expect(await screen.findByText('Filtered mailbox item')).toBeInTheDocument()
       expect(screen.queryByText('Mailbox item 120')).not.toBeInTheDocument()
+      await waitFor(() => {
+        expect(within(dialog).queryByText(/item selected/)).not.toBeInTheDocument()
+      })
+      expect(within(dialog).queryByRole('button', { name: 'Flag selected' })).not.toBeInTheDocument()
       expect((scrollArea as HTMLDivElement).scrollTop).toBe(0)
+    })
+
+    it('bulk flags selected items across pages and clears the selection on success', async () => {
+      const user = userEvent.setup()
+      const authenticatedStatus: AuthStatus = {
+        authenticated: true,
+        enabled: true,
+        canManageUsers: false,
+        mfaEnabled: true,
+        mfaEnforced: false,
+        lockedUntil: null,
+        loginFailedCount: 0,
+        passwordResetAvailable: false,
+        user: { username: 'admin', assignedCasePaths: [] },
+        expiresAt: null
+      }
+      const hiddenRulesResponse: HiddenRulesResponse = { items: [] }
+      const idleStatus: SearchIndexRefreshStatus = {
+        jobId: null,
+        status: 'idle',
+        trigger: null,
+        startedAt: null,
+        completedAt: null,
+        updatedAt: new Date().toISOString(),
+        summary: null,
+        error: null
+      }
+      const sourceCounts = { mailbox: 120, teams: 1, sharepoint: 0 }
+      const mailboxItems = Array.from({ length: 120 }, (_, index) =>
+        buildSummary(`mailbox-bulk-${index + 1}`, `Mailbox item ${index + 1}`, 'mailbox', {
+          scopeLabel: 'Mailbox scope',
+          scopePath: 'Case Alpha/Search1',
+          folderPath: `Folder ${index + 1}`
+        })
+      )
+      const teamsItem = buildSummary('teams-bulk-1', 'Teams item one', 'teams', {
+        scopeLabel: 'Teams scope',
+        scopePath: 'Case Alpha/Search1',
+        archivePath: 'teams.zip',
+        archiveEntryPath: 'Messages/teams-item.json'
+      })
+
+      vi.spyOn(api.auth, 'me').mockResolvedValueOnce(authenticatedStatus)
+      vi.spyOn(api.pst, 'catalog').mockResolvedValueOnce(buildCatalog())
+      vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue(hiddenRulesResponse)
+      vi.spyOn(api.pst, 'refreshSearchIndexStatus').mockResolvedValue({ status: idleStatus })
+      const detailSpy = vi.spyOn(api.item, 'detail').mockImplementation(async (itemId) => ({
+        detail: buildDetail(itemId, `Loaded ${itemId}`, 'Loaded body')
+      }))
+      const updateReviewSpy = vi.spyOn(api.item, 'updateReview').mockImplementation(async (itemId, payload) => {
+        const now = new Date().toISOString()
+        return {
+          sessionId: 'session-1',
+          messageId: itemId,
+          review: {
+            flagged: Boolean(payload.flagged),
+            tags: Array.isArray(payload.tags) ? [...payload.tags] : [],
+            createdAt: now,
+            updatedAt: now
+          }
+        }
+      })
+      const searchSpy = vi.spyOn(api, 'search').mockImplementation(async (params) => {
+        expect(params.casePath).toBe('Case Alpha')
+
+        if (params.pageSize === 1 && params.sourceType === 'all') {
+          return {
+            scope: 'all',
+            scopePath: '',
+            scopeLabel: 'All cases/searches',
+            sourceType: 'all',
+            page: {
+              items: [],
+              total: 121,
+              page: 1,
+              pageSize: 1,
+              totalPages: 121,
+              query: '',
+              mailOnly: false,
+              sort: 'date-desc',
+              sourceCounts
+            }
+          }
+        }
+
+        if (params.sourceType === 'mailbox' && params.page === 1) {
+          return {
+            scope: 'all',
+            scopePath: '',
+            scopeLabel: 'All cases/searches',
+            sourceType: 'mailbox',
+            page: {
+              items: mailboxItems.slice(0, 100),
+              total: 120,
+              page: 1,
+              pageSize: 100,
+              totalPages: 2,
+              query: '',
+              mailOnly: false,
+              sort: params.sort,
+              sourceCounts
+            }
+          }
+        }
+
+        if (params.sourceType === 'mailbox' && params.page === 2) {
+          return {
+            scope: 'all',
+            scopePath: '',
+            scopeLabel: 'All cases/searches',
+            sourceType: 'mailbox',
+            page: {
+              items: mailboxItems.slice(100),
+              total: 120,
+              page: 2,
+              pageSize: 100,
+              totalPages: 2,
+              query: '',
+              mailOnly: false,
+              sort: params.sort,
+              sourceCounts
+            }
+          }
+        }
+
+        if (params.sourceType === 'teams') {
+          return {
+            scope: 'all',
+            scopePath: '',
+            scopeLabel: 'All cases/searches',
+            sourceType: 'teams',
+            page: {
+              items: [teamsItem],
+              total: 1,
+              page: 1,
+              pageSize: 100,
+              totalPages: 1,
+              query: '',
+              mailOnly: false,
+              sort: params.sort,
+              sourceCounts
+            }
+          }
+        }
+
+        if (params.sourceType === 'sharepoint') {
+          return {
+            scope: 'all',
+            scopePath: '',
+            scopeLabel: 'All cases/searches',
+            sourceType: 'sharepoint',
+            page: {
+              items: [],
+              total: 0,
+              page: 1,
+              pageSize: 100,
+              totalPages: 0,
+              query: '',
+              mailOnly: false,
+              sort: params.sort,
+              sourceCounts
+            }
+          }
+        }
+
+        throw new Error(`Unexpected search request: ${JSON.stringify(params)}`)
+      })
+
+      render(
+        <div style={{ width: 1800, height: 1600 }}>
+          <App />
+        </div>
+      )
+
+      const caseSelect = await screen.findByRole('combobox', { name: 'Case' })
+      await user.selectOptions(caseSelect, 'Case Alpha')
+      expect(await screen.findByRole('button', { name: /^Mailbox\s+120$/ })).toBeInTheDocument()
+
+      await user.click(await screen.findByRole('button', { name: 'All items' }))
+      const dialog = await screen.findByRole('dialog', { name: /All items review/i })
+
+      expect(await screen.findByText('Mailbox item 1')).toBeInTheDocument()
+      expect(screen.getByText('Mailbox item 100')).toBeInTheDocument()
+
+      const detailCallCountBeforeSelection = detailSpy.mock.calls.length
+      await user.click(within(dialog).getByRole('checkbox', { name: 'Select item Mailbox item 1' }))
+      await waitFor(() => {
+        expect(detailSpy.mock.calls.length).toBe(detailCallCountBeforeSelection)
+        expect(within(dialog).getByRole('checkbox', { name: 'Select item Mailbox item 1' })).toBeChecked()
+      })
+      await waitFor(() => {
+        expect(within(dialog).getByText(/item selected/)).toBeInTheDocument()
+      })
+
+      await user.click(within(dialog).getByRole('button', { name: /^Teams\s+1$/ }))
+      await waitFor(() => {
+        expect(searchSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sourceType: 'teams',
+            casePath: 'Case Alpha',
+            page: 1
+          })
+        )
+      })
+      expect(within(dialog).queryByText(/item selected/)).not.toBeInTheDocument()
+
+      await user.click(within(dialog).getByRole('button', { name: /^Mailbox\s+120$/ }))
+      await user.click(within(dialog).getByRole('checkbox', { name: 'Select item Mailbox item 1' }))
+      await waitFor(() => {
+        expect(within(dialog).getByRole('checkbox', { name: 'Select item Mailbox item 1' })).toBeChecked()
+      })
+      await user.click(within(dialog).getByRole('button', { name: 'Load more items' }))
+
+      await waitFor(() => {
+        expect(searchSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sourceType: 'mailbox',
+            casePath: 'Case Alpha',
+            page: 2
+          })
+        )
+      })
+
+      expect(await screen.findByText('Mailbox item 120')).toBeInTheDocument()
+      await user.click(within(dialog).getByRole('checkbox', { name: 'Select item Mailbox item 120' }))
+      await waitFor(() => {
+        expect(within(dialog).getByRole('checkbox', { name: 'Select item Mailbox item 1' })).toBeChecked()
+        expect(within(dialog).getByRole('checkbox', { name: 'Select item Mailbox item 120' })).toBeChecked()
+        expect(within(dialog).getByText(/items selected/)).toBeInTheDocument()
+      })
+
+      await user.click(within(dialog).getByRole('button', { name: 'Flag selected' }))
+
+      await waitFor(() => {
+        expect(updateReviewSpy).toHaveBeenCalledTimes(2)
+      })
+      expect(updateReviewSpy).toHaveBeenCalledWith(
+        'mailbox-bulk-1',
+        expect.objectContaining({
+          flagged: true,
+          tags: []
+        })
+      )
+      expect(updateReviewSpy).toHaveBeenCalledWith(
+        'mailbox-bulk-120',
+        expect.objectContaining({
+          flagged: true,
+          tags: []
+        })
+      )
+      await waitFor(() => {
+        expect(within(dialog).queryByText(/items selected/)).not.toBeInTheDocument()
+        expect(within(dialog).getByRole('checkbox', { name: 'Select item Mailbox item 1' })).not.toBeChecked()
+        expect(within(dialog).getByRole('checkbox', { name: 'Select item Mailbox item 120' })).not.toBeChecked()
+      })
+      expect(within(dialog).getAllByRole('button', { name: 'Unflag item' })).toHaveLength(2)
+    })
+
+    it('reports mixed bulk-flag results and preserves failed selections', async () => {
+      const user = userEvent.setup()
+      const authenticatedStatus: AuthStatus = {
+        authenticated: true,
+        enabled: true,
+        canManageUsers: false,
+        mfaEnabled: true,
+        mfaEnforced: false,
+        lockedUntil: null,
+        loginFailedCount: 0,
+        passwordResetAvailable: false,
+        user: { username: 'admin', assignedCasePaths: [] },
+        expiresAt: null
+      }
+      const hiddenRulesResponse: HiddenRulesResponse = { items: [] }
+      const idleStatus: SearchIndexRefreshStatus = {
+        jobId: null,
+        status: 'idle',
+        trigger: null,
+        startedAt: null,
+        completedAt: null,
+        updatedAt: new Date().toISOString(),
+        summary: null,
+        error: null
+      }
+      const sourceCounts = { mailbox: 120, teams: 0, sharepoint: 0 }
+      const mailboxItems = Array.from({ length: 120 }, (_, index) =>
+        buildSummary(`mailbox-bulk-fail-${index + 1}`, `Mailbox item ${index + 1}`, 'mailbox', {
+          scopeLabel: 'Mailbox scope',
+          scopePath: 'Case Alpha/Search1',
+          folderPath: `Folder ${index + 1}`
+        })
+      )
+
+      vi.spyOn(api.auth, 'me').mockResolvedValueOnce(authenticatedStatus)
+      vi.spyOn(api.pst, 'catalog').mockResolvedValueOnce(buildCatalog())
+      vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue(hiddenRulesResponse)
+      vi.spyOn(api.pst, 'refreshSearchIndexStatus').mockResolvedValue({ status: idleStatus })
+      vi.spyOn(api.item, 'detail').mockImplementation(async (itemId) => ({
+        detail: buildDetail(itemId, `Loaded ${itemId}`, 'Loaded body')
+      }))
+      const updateReviewSpy = vi.spyOn(api.item, 'updateReview').mockImplementation(async (itemId, payload) => {
+        if (itemId === 'mailbox-bulk-fail-120') {
+          throw new Error('Unable to flag selected item')
+        }
+
+        const now = new Date().toISOString()
+        return {
+          sessionId: 'session-1',
+          messageId: itemId,
+          review: {
+            flagged: Boolean(payload.flagged),
+            tags: Array.isArray(payload.tags) ? [...payload.tags] : [],
+            createdAt: now,
+            updatedAt: now
+          }
+        }
+      })
+      const searchSpy = vi.spyOn(api, 'search').mockImplementation(async (params) => {
+        expect(params.casePath).toBe('Case Alpha')
+
+        if (params.pageSize === 1 && params.sourceType === 'all') {
+          return {
+            scope: 'all',
+            scopePath: '',
+            scopeLabel: 'All cases/searches',
+            sourceType: 'all',
+            page: {
+              items: [],
+              total: 120,
+              page: 1,
+              pageSize: 1,
+              totalPages: 120,
+              query: '',
+              mailOnly: false,
+              sort: 'date-desc',
+              sourceCounts
+            }
+          }
+        }
+
+        if (params.sourceType === 'mailbox' && params.page === 1) {
+          return {
+            scope: 'all',
+            scopePath: '',
+            scopeLabel: 'All cases/searches',
+            sourceType: 'mailbox',
+            page: {
+              items: mailboxItems.slice(0, 100),
+              total: 120,
+              page: 1,
+              pageSize: 100,
+              totalPages: 2,
+              query: '',
+              mailOnly: false,
+              sort: params.sort,
+              sourceCounts
+            }
+          }
+        }
+
+        if (params.sourceType === 'mailbox' && params.page === 2) {
+          return {
+            scope: 'all',
+            scopePath: '',
+            scopeLabel: 'All cases/searches',
+            sourceType: 'mailbox',
+            page: {
+              items: mailboxItems.slice(100),
+              total: 120,
+              page: 2,
+              pageSize: 100,
+              totalPages: 2,
+              query: '',
+              mailOnly: false,
+              sort: params.sort,
+              sourceCounts
+            }
+          }
+        }
+
+        throw new Error(`Unexpected search request: ${JSON.stringify(params)}`)
+      })
+
+      render(
+        <div style={{ width: 1800, height: 1600 }}>
+          <App />
+        </div>
+      )
+
+      const caseSelect = await screen.findByRole('combobox', { name: 'Case' })
+      await user.selectOptions(caseSelect, 'Case Alpha')
+      expect(await screen.findByRole('button', { name: /^Mailbox\s+120$/ })).toBeInTheDocument()
+
+      await user.click(await screen.findByRole('button', { name: 'All items' }))
+      const dialog = await screen.findByRole('dialog', { name: /All items review/i })
+
+      expect(await screen.findByText('Mailbox item 1')).toBeInTheDocument()
+      expect(screen.getByText('Mailbox item 100')).toBeInTheDocument()
+
+      await user.click(within(dialog).getByRole('checkbox', { name: 'Select item Mailbox item 1' }))
+      await user.click(within(dialog).getByRole('button', { name: 'Load more items' }))
+
+      await waitFor(() => {
+        expect(searchSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sourceType: 'mailbox',
+            casePath: 'Case Alpha',
+            page: 2
+          })
+        )
+      })
+
+      expect(await screen.findByText('Mailbox item 120')).toBeInTheDocument()
+      await user.click(within(dialog).getByRole('checkbox', { name: 'Select item Mailbox item 120' }))
+
+      await user.click(within(dialog).getByRole('button', { name: 'Flag selected' }))
+
+      await waitFor(() => {
+        expect(updateReviewSpy).toHaveBeenCalledTimes(2)
+      })
+      expect(await screen.findByText('1 selected item could not be flagged.')).toBeInTheDocument()
+      await waitFor(() => {
+        expect(within(dialog).getByText(/item selected/)).toBeInTheDocument()
+      })
+      expect(within(dialog).getByRole('checkbox', { name: 'Select item Mailbox item 1' })).not.toBeChecked()
+      expect(within(dialog).getByRole('checkbox', { name: 'Select item Mailbox item 120' })).toBeChecked()
+      expect(within(dialog).getAllByRole('button', { name: 'Unflag item' })).toHaveLength(1)
     })
   })
 
