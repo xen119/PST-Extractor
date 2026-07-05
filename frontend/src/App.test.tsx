@@ -61,6 +61,10 @@ function createDeferred<T>() {
   return { promise, resolve, reject }
 }
 
+function buildMailboxSearchHitId(mailboxKey: string, messageId: string): string {
+  return `${encodeURIComponent(mailboxKey)}::${encodeURIComponent(messageId)}`
+}
+
 describe('auth shell', () => {
   it('shows a minimal login screen', () => {
     render(
@@ -1396,8 +1400,14 @@ describe('shell and preview', () => {
       ],
       files: []
     }
+    const currentMailboxKey = 'Case Alpha/Search One/mailbox-a.pst'
+    const targetMailboxKey = 'Case Beta/Search Two/mailbox-b.pst'
+    const sharedSearchHitMessageId = 'shared-message'
+    const currentSearchHitId = buildMailboxSearchHitId(currentMailboxKey, sharedSearchHitMessageId)
+    const targetSearchHitId = buildMailboxSearchHitId(targetMailboxKey, sharedSearchHitMessageId)
+
     const currentDetail: MessageDetail = {
-      id: 'search-hit-current',
+      id: currentSearchHitId,
       subject: 'Current mailbox message',
       senderName: 'Alice Example',
       senderEmailAddress: 'alice@example.com',
@@ -1405,7 +1415,7 @@ describe('shell and preview', () => {
       bodyText: 'Current mailbox body'
     }
     const targetDetail: MessageDetail = {
-      id: 'search-hit',
+      id: targetSearchHitId,
       subject: 'Target search result',
       senderName: 'Bob Example',
       senderEmailAddress: 'bob@example.com',
@@ -1413,7 +1423,7 @@ describe('shell and preview', () => {
       bodyText: 'Target mailbox body',
       attachments: [
         {
-          attachmentId: 'search-hit:attachment:0',
+          attachmentId: `${targetSearchHitId}:attachment:0`,
           index: 0,
           filename: 'report.txt',
           longFilename: 'report.txt',
@@ -1426,15 +1436,15 @@ describe('shell and preview', () => {
           longPathname: '',
           isEmbeddedMessage: false,
           isDownloadable: true,
-          downloadUrl: '/api/items/search-hit/attachments/0'
+          downloadUrl: `/api/items/${encodeURIComponent(targetSearchHitId)}/attachments/0`
         }
       ]
     }
     const searchResultsPage: PageResponse<MessageSummary> = {
       items: [
         {
-          id: 'search-hit-current',
-          messageId: 'search-hit-current',
+          id: currentSearchHitId,
+          messageId: sharedSearchHitMessageId,
           sourceType: 'mailbox',
           subject: 'Current mailbox search result',
           senderName: 'Alice Example',
@@ -1460,8 +1470,8 @@ describe('shell and preview', () => {
           }
         },
         {
-          id: 'search-hit',
-          messageId: 'search-hit',
+          id: targetSearchHitId,
+          messageId: sharedSearchHitMessageId,
           sourceType: 'mailbox',
           subject: 'Target search result',
           senderName: 'Bob Example',
@@ -1487,7 +1497,7 @@ describe('shell and preview', () => {
           }
         }
       ],
-      total: 1,
+      total: 2,
       page: 1,
       pageSize: 50,
       totalPages: 1,
@@ -1557,10 +1567,10 @@ describe('shell and preview', () => {
       throw new Error(`Unexpected item detail request: ${itemId}`)
     })
     vi.spyOn(api.session, 'messageDetail').mockImplementation(async (sessionId, messageId) => {
-      if (sessionId === 'session-b' && messageId === 'search-hit') {
+      if (sessionId === 'session-b' && messageId === 'shared-message') {
         return { sessionId, detail: { ...targetDetail, id: messageId } }
       }
-      if (sessionId === 'session-a' && messageId === 'search-hit-current') {
+      if (sessionId === 'session-a' && messageId === 'shared-message') {
         return { sessionId, detail: { ...currentDetail, id: messageId } }
       }
       return { sessionId, detail: { ...currentDetail, id: messageId } }
@@ -1593,7 +1603,7 @@ describe('shell and preview', () => {
     })
     expect(screen.getByRole('link', { name: 'Download' })).toHaveAttribute(
       'href',
-      '/api/items/search-hit/attachments/0'
+      `/api/items/${encodeURIComponent(targetSearchHitId)}/attachments/0`
     )
     expect(itemDetailMock).not.toHaveBeenCalled()
     await waitFor(() => {

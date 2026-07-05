@@ -48,6 +48,7 @@ import {
 import type { ReviewState } from './reviewTypes'
 import {
   type HiddenRuleRecord,
+  buildMailboxSearchDocumentId,
   type SearchIndexDocument,
   type SearchIndexFileFingerprint,
   type SearchIndexPage,
@@ -1627,9 +1628,13 @@ function buildReviewedSummary(
       return undefined
     }
 
+    const itemId = buildMailboxSearchDocumentId(item.mailboxKey, item.messageId)
     return applyItemAttachmentDownloadUrls(
-      buildReviewedDetail(item.mailboxDetail, item.review),
-      item.id || item.messageId
+      {
+        ...buildReviewedDetail(item.mailboxDetail, item.review),
+        id: itemId
+      },
+      itemId
     )
   }
 
@@ -1651,43 +1656,30 @@ function buildReviewedSummary(
 async function resolveMailboxItemDetail(
   item: SearchIndexDocument,
   reviewStore: ReviewStore,
-  reviewerUsername: string,
-  pstRootDir: string,
-  searchIndexStore: SearchIndexStore
+  reviewerUsername: string
 ): Promise<MessageDetail> {
-  const snapshot = item.mailboxDetail || null
-  const review = await reviewStore.getReview(item.mailboxKey, item.messageId, reviewerUsername)
-
-  if (snapshot) {
-    return applyItemAttachmentDownloadUrls(buildReviewedDetail(snapshot, review), item.id || item.messageId)
-  }
-
-  if (!item.scopePath || !item.fileName) {
+  if (!item.mailboxDetail) {
     throw createAppError(500, 'Mailbox preview data unavailable; rebuild the search index')
   }
 
-  const sessionIndex = openPstMailbox(pstRootDir, item.scopePath, item.fileName)
-  const detail = buildMessageDetailFromSession(sessionIndex, item.messageId, 1)
-  try {
-    await searchIndexStore.upsertMailboxDocument(item.mailboxKey, {
-      ...item,
-      mailboxDetail: detail
-    })
-  } catch {
-    // Ignore backfill failures and keep serving the recovered detail.
-  }
-  return applyItemAttachmentDownloadUrls(buildReviewedDetail(detail, review), item.id || item.messageId)
+  const review = await reviewStore.getReview(item.mailboxKey, item.messageId, reviewerUsername)
+  const itemId = buildMailboxSearchDocumentId(item.mailboxKey, item.messageId)
+  return applyItemAttachmentDownloadUrls(
+    {
+      ...buildReviewedDetail(item.mailboxDetail, review),
+      id: itemId
+    },
+    itemId
+  )
 }
 
 async function resolveSearchItemDetail(
   item: SearchIndexDocument,
   reviewStore: ReviewStore,
-  reviewerUsername: string,
-  pstRootDir: string,
-  searchIndexStore: SearchIndexStore
+  reviewerUsername: string
 ): Promise<MessageDetail> {
   if (item.sourceType === 'mailbox') {
-    return resolveMailboxItemDetail(item, reviewStore, reviewerUsername, pstRootDir, searchIndexStore)
+    return resolveMailboxItemDetail(item, reviewStore, reviewerUsername)
   }
 
   const review = await reviewStore.getReview(item.mailboxKey, item.messageId, reviewerUsername)
@@ -2358,7 +2350,10 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   }
 
   function buildSearchResultSummary(item: SearchIndexDocument) {
-    const id = normalizeText(item.id || item.messageId)
+    const id =
+      item.sourceType === 'mailbox'
+        ? buildMailboxSearchDocumentId(item.mailboxKey, item.messageId)
+        : normalizeText(item.id || item.messageId)
     const messageId = normalizeText(item.messageId || id)
     return {
       id,
@@ -2396,7 +2391,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       scopeLabel: item.scopeLabel,
       fileName: item.fileName,
       mailboxName: item.mailboxName,
-      mailboxDetail: buildMailboxSearchPreviewDetail(item),
+      mailboxDetail: item.sourceType === 'mailbox' ? buildMailboxSearchPreviewDetail(item) : undefined,
       contentType: item.contentType,
       downloadFilename: item.downloadFilename
     }
@@ -5511,9 +5506,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       const detail = await resolveSearchItemDetail(
         item,
         reviewStore,
-        reviewerUsername,
-        pstRootDir,
-        searchIndexStore
+        reviewerUsername
       )
 
       recordAuditEvent({

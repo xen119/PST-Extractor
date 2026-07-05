@@ -10,7 +10,13 @@ import { createMemoryAppSettingsStore, type AppSettingsStore } from '../appSetti
 import { buildOpenApiDocument } from '../openApi'
 import { createPstReviewApp, type ApiSecurityConfig, type AppAuthConfig } from '../pstReviewApp'
 import { MemoryReviewStore } from '../reviewStore'
-import { MemorySearchIndexStore, type SearchIndexDocument, type SearchIndexFileFingerprint } from '../searchIndex'
+import {
+  MemorySearchIndexStore,
+  buildMailboxSearchDocumentId,
+  type SearchIndexDocument,
+  type SearchIndexFileFingerprint
+} from '../searchIndex'
+import type { MessageDetail } from '../viewer'
 
 const resolve = path.resolve
 
@@ -828,8 +834,9 @@ describe('pst review api', () => {
     const { PSTUtil } = require('../PSTUtil.class')
     const loadSpy = jest.spyOn(PSTUtil, 'detectAndLoadPSTObject')
 
-    const itemId = encodeURIComponent(mailboxItem.id || mailboxItem.messageId)
-    const detailBeforeReview = await requestJson(`${started.baseUrl}/api/items/${itemId}`)
+    const itemId = buildMailboxSearchDocumentId(mailboxItem.mailboxKey, mailboxItem.messageId)
+    const detailBeforeReview = await requestJson(`${started.baseUrl}/api/items/${encodeURIComponent(itemId)}`)
+    expect(detailBeforeReview.detail.id).toBe(itemId)
     expect(detailBeforeReview.detail.bodyText).toBe(mailboxItem.mailboxDetail?.bodyText)
     expect(detailBeforeReview.detail.bodyHtml).toBe(mailboxItem.mailboxDetail?.bodyHtml)
     expect(detailBeforeReview.detail.attachments).toHaveLength(
@@ -839,7 +846,7 @@ describe('pst review api', () => {
     expect(loadSpy).not.toHaveBeenCalled()
 
     await requestJson(
-      `${started.baseUrl}/api/items/${itemId}/review`,
+      `${started.baseUrl}/api/items/${encodeURIComponent(itemId)}/review`,
       {
         method: 'PATCH',
         headers: {
@@ -851,8 +858,9 @@ describe('pst review api', () => {
       }
     )
 
-    const detailAfterReview = await requestJson(`${started.baseUrl}/api/items/${itemId}`)
+    const detailAfterReview = await requestJson(`${started.baseUrl}/api/items/${encodeURIComponent(itemId)}`)
 
+    expect(detailAfterReview.detail.id).toBe(itemId)
     expect(detailAfterReview.detail.bodyText).toBe(mailboxItem.mailboxDetail?.bodyText)
     expect(detailAfterReview.detail.review.flagged).toBe(true)
     expect(loadSpy).not.toHaveBeenCalled()
@@ -891,7 +899,7 @@ describe('pst review api', () => {
     expect(itemDetail.detail.attachments).toHaveLength(1)
     expect(itemDetail.detail.attachments[0].isDownloadable).toBe(true)
     expect(itemDetail.detail.attachments[0].downloadUrl).toContain(
-      '/api/items/message%3A2110308/attachments/0'
+      `/api/items/${encodeURIComponent(itemDetail.detail.id || '')}/attachments/0`
     )
     expect(loadSpy).not.toHaveBeenCalled()
 
@@ -904,71 +912,210 @@ describe('pst review api', () => {
     expect(loadSpy).toHaveBeenCalled()
   })
 
-  it('recovers missing mailbox preview data once and backfills it', async () => {
-    rootDir = makeTempDir('pst-review-detail-backfill-')
+  it('resolves mailbox search hits by composite id when local message ids collide', async () => {
+    rootDir = makeTempDir('pst-review-composite-id-')
     const pstDir = path.join(rootDir, 'PST')
-    fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
-    const mailboxPath = path.join(pstDir, 'Case1', 'Search1', 'sample.pst')
-    stageFixture(enronPath, mailboxPath)
+    fs.mkdirSync(pstDir, { recursive: true })
 
-    const started = await startApp(pstDir)
+    const mailboxKeyA = path.resolve(pstDir, 'Case1', 'Search1', 'alpha.pst')
+    const mailboxKeyB = path.resolve(pstDir, 'Case1', 'Search2', 'beta.pst')
+    const sharedMessageId = 'message:shared-1'
+    const createdAtA = '2024-01-01T00:00:00.000Z'
+    const createdAtB = '2024-01-02T00:00:00.000Z'
+    const detailIdA = buildMailboxSearchDocumentId(mailboxKeyA, sharedMessageId)
+    const detailIdB = buildMailboxSearchDocumentId(mailboxKeyB, sharedMessageId)
+
+    const detailA = {
+      id: detailIdA,
+      subject: 'Alpha contract',
+      senderName: 'Alice Example',
+      senderEmailAddress: 'alice@example.com',
+      displayTo: 'Bob Example <bob@example.com>',
+      displayCC: '',
+      displayBCC: '',
+      resolvedDisplayTo: 'Bob Example <bob@example.com>',
+      resolvedDisplayCC: '',
+      resolvedDisplayBCC: '',
+      clientSubmitTime: createdAtA,
+      creationTime: createdAtA,
+      modificationTime: createdAtA,
+      messageDeliveryTime: createdAtA,
+      sortDate: createdAtA,
+      bodyPrefix: '',
+      bodyText: 'Alpha body with contract terms',
+      bodyHtml: '<p>Alpha body with contract terms</p>',
+      bodyRtf: '',
+      transportMessageHeaders: '',
+      conversationTopic: 'Alpha contract',
+      originalSubject: 'Alpha contract',
+      internetMessageId: '',
+      inReplyToId: '',
+      returnPath: '',
+      sentRepresentingName: '',
+      sentRepresentingAddressType: '',
+      sentRepresentingEmailAddress: '',
+      receivedByName: '',
+      receivedByAddressType: '',
+      receivedByAddress: '',
+      replyRecipientNames: '',
+      originalDisplayTo: 'Bob Example <bob@example.com>',
+      originalDisplayCC: '',
+      originalDisplayBCC: '',
+      attachments: []
+    } as MessageDetail
+
+    const detailB = {
+      id: detailIdB,
+      subject: 'Beta contract',
+      senderName: 'Beatrice Example',
+      senderEmailAddress: 'beatrice@example.com',
+      displayTo: 'Carol Example <carol@example.com>',
+      displayCC: '',
+      displayBCC: '',
+      resolvedDisplayTo: 'Carol Example <carol@example.com>',
+      resolvedDisplayCC: '',
+      resolvedDisplayBCC: '',
+      clientSubmitTime: createdAtB,
+      creationTime: createdAtB,
+      modificationTime: createdAtB,
+      messageDeliveryTime: createdAtB,
+      sortDate: createdAtB,
+      bodyPrefix: '',
+      bodyText: 'Beta body with contract terms',
+      bodyHtml: '<p>Beta body with contract terms</p>',
+      bodyRtf: '',
+      transportMessageHeaders: '',
+      conversationTopic: 'Beta contract',
+      originalSubject: 'Beta contract',
+      internetMessageId: '',
+      inReplyToId: '',
+      returnPath: '',
+      sentRepresentingName: '',
+      sentRepresentingAddressType: '',
+      sentRepresentingEmailAddress: '',
+      receivedByName: '',
+      receivedByAddressType: '',
+      receivedByAddress: '',
+      replyRecipientNames: '',
+      originalDisplayTo: 'Carol Example <carol@example.com>',
+      originalDisplayCC: '',
+      originalDisplayBCC: '',
+      attachments: []
+    } as MessageDetail
+
+    const store = new MemorySearchIndexStore()
+    await store.replaceMailboxDocuments(mailboxKeyA, [
+      makeSearchIndexDocument({
+        mailboxKey: mailboxKeyA,
+        scopePath: 'Case1/Search1',
+        scopeLabel: 'Case1 / Search1',
+        fileName: 'alpha.pst',
+        mailboxName: 'Alpha',
+        messageId: sharedMessageId,
+        descriptorId: 'alpha-1',
+        folderId: 'folder:alpha-1',
+        folderPath: 'Inbox',
+        subject: 'Alpha contract',
+        originalSubject: 'Alpha contract',
+        senderName: 'Alice Example',
+        senderEmailAddress: 'alice@example.com',
+        recipientText: 'Bob Example <bob@example.com>',
+        displayTo: 'Bob Example <bob@example.com>',
+        resolvedDisplayTo: 'Bob Example <bob@example.com>',
+        bodySearchText: 'contract alpha body',
+        searchText: 'contract alpha body alice example alice@example.com bob example bob@example.com',
+        searchTokens: ['contract', 'alpha', 'body'],
+        addressValues: ['alice@example.com', 'bob@example.com'],
+        subjectValues: ['alpha contract'],
+        sortDate: createdAtA,
+        sortDateMs: Date.parse(createdAtA),
+        mailboxDetail: detailA
+      })
+    ])
+    await store.replaceMailboxDocuments(mailboxKeyB, [
+      makeSearchIndexDocument({
+        mailboxKey: mailboxKeyB,
+        scopePath: 'Case1/Search2',
+        scopeLabel: 'Case1 / Search2',
+        fileName: 'beta.pst',
+        mailboxName: 'Beta',
+        messageId: sharedMessageId,
+        descriptorId: 'beta-1',
+        folderId: 'folder:beta-1',
+        folderPath: 'Inbox',
+        subject: 'Beta contract',
+        originalSubject: 'Beta contract',
+        senderName: 'Beatrice Example',
+        senderEmailAddress: 'beatrice@example.com',
+        recipientText: 'Carol Example <carol@example.com>',
+        displayTo: 'Carol Example <carol@example.com>',
+        resolvedDisplayTo: 'Carol Example <carol@example.com>',
+        bodySearchText: 'contract beta body',
+        searchText: 'contract beta body beatrice example beatrice@example.com carol example carol@example.com',
+        searchTokens: ['contract', 'beta', 'body'],
+        addressValues: ['beatrice@example.com', 'carol@example.com'],
+        subjectValues: ['beta contract'],
+        sortDate: createdAtB,
+        sortDateMs: Date.parse(createdAtB),
+        mailboxDetail: detailB
+      })
+    ])
+    await store.replaceFileFingerprints('mailboxes', [
+      makeSearchIndexFingerprint({
+        source: 'mailboxes',
+        mailboxKey: mailboxKeyA,
+        fileName: 'alpha.pst',
+        scopePath: 'Case1/Search1',
+        scopeLabel: 'Case1 / Search1',
+        size: 1024,
+        modifiedAt: createdAtA
+      }),
+      makeSearchIndexFingerprint({
+        source: 'mailboxes',
+        mailboxKey: mailboxKeyB,
+        fileName: 'beta.pst',
+        scopePath: 'Case1/Search2',
+        scopeLabel: 'Case1 / Search2',
+        size: 1024,
+        modifiedAt: createdAtB
+      })
+    ])
+
+    const started = await startApp(pstDir, undefined, undefined, undefined, undefined, undefined, {
+      searchIndexStore: store,
+      skipInitialRefresh: true
+    })
     server = started.server
     reviewStore = started.reviewStore
     searchIndexStore = started.searchIndexStore
 
-    const searchResults = await started.searchIndexStore.search({
-      scope: 'all',
-      query: '',
-      mode: 'and',
-      mailOnly: true,
-      sort: 'date-desc',
-      page: 1,
-      pageSize: 50,
-      reviewFlaggedOnly: false,
-      reviewTaggedOnly: false,
-      reviewTag: ''
-    })
-    const mailboxItem = searchResults.items.find((item) => item.sourceType === 'mailbox')
-    expect(mailboxItem).toBeTruthy()
-    if (!mailboxItem) {
-      throw new Error('Expected a mailbox search result')
-    }
-
-    await started.searchIndexStore.replaceMailboxDocuments(
-      mailboxItem.mailboxKey,
-      searchResults.items
-        .filter((item) => item.mailboxKey === mailboxItem.mailboxKey)
-        .map((item) => {
-          const { mailboxDetail, ...rest } = item
-          return rest
-        })
+    const searchResults = await requestJson(
+      `${started.baseUrl}/api/search?scope=all&query=${encodeURIComponent('contract')}&mailOnly=1&pageSize=20`
     )
-
-    const { PSTUtil } = require('../PSTUtil.class')
-    const loadSpy = jest.spyOn(PSTUtil, 'detectAndLoadPSTObject')
-    loadSpy.mockClear()
-
-    const response = await fetch(
-      `${started.baseUrl}/api/items/${encodeURIComponent(mailboxItem.id || mailboxItem.messageId)}`
+    const mailboxHits = searchResults.page.items.filter(
+      (item: { sourceType?: string }) => item.sourceType === 'mailbox'
     )
-    const payload = await readJson(response)
+    expect(mailboxHits).toHaveLength(2)
 
-    expect(response.status).toBe(200)
-    expect(payload.detail.bodyText).toBe(mailboxItem.mailboxDetail?.bodyText)
-    expect(payload.detail.review.flagged).toBe(false)
-    expect(loadSpy).toHaveBeenCalled()
+    const hitIds = mailboxHits.map((item: { id: string }) => item.id)
+    expect(new Set(hitIds).size).toBe(2)
+    expect(hitIds).toContain(detailIdA)
+    expect(hitIds).toContain(detailIdB)
 
-    const backfilled = await started.searchIndexStore.findDocumentById(mailboxItem.id || mailboxItem.messageId)
-    expect(backfilled?.mailboxDetail).toBeTruthy()
+    const itemA = mailboxHits.find((item: { id: string }) => item.id === detailIdA)
+    const itemB = mailboxHits.find((item: { id: string }) => item.id === detailIdB)
+    expect(itemA?.messageId).toBe(sharedMessageId)
+    expect(itemB?.messageId).toBe(sharedMessageId)
+    expect(itemA?.mailboxDetail?.bodyText).toBe('Alpha body with contract terms')
+    expect(itemB?.mailboxDetail?.bodyText).toBe('Beta body with contract terms')
 
-    const loadCountAfterFirstRequest = loadSpy.mock.calls.length
-    const secondResponse = await fetch(
-      `${started.baseUrl}/api/items/${encodeURIComponent(mailboxItem.id || mailboxItem.messageId)}`
-    )
-    expect(secondResponse.status).toBe(200)
-    const secondPayload = await readJson(secondResponse)
-    expect(secondPayload.detail.bodyText).toBe(mailboxItem.mailboxDetail?.bodyText)
-    expect(loadSpy.mock.calls.length).toBe(loadCountAfterFirstRequest)
+    const detailResponseA = await requestJson(`${started.baseUrl}/api/items/${encodeURIComponent(detailIdA)}`)
+    const detailResponseB = await requestJson(`${started.baseUrl}/api/items/${encodeURIComponent(detailIdB)}`)
+
+    expect(detailResponseA.detail.id).toBe(detailIdA)
+    expect(detailResponseA.detail.bodyText).toBe('Alpha body with contract terms')
+    expect(detailResponseB.detail.id).toBe(detailIdB)
+    expect(detailResponseB.detail.bodyText).toBe('Beta body with contract terms')
   })
 
   it('moves PSTs into and out of the removed archive without deleting them', async () => {

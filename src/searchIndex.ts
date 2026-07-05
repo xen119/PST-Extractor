@@ -296,6 +296,39 @@ function uniqueTextValues(values: string[]): string[] {
   return [...new Set(values.map((value) => normalizeText(value)).filter(Boolean))]
 }
 
+export function buildMailboxSearchDocumentId(mailboxKey: string, messageId: string): string {
+  return `${encodeURIComponent(normalizeText(mailboxKey))}::${encodeURIComponent(normalizeText(messageId))}`
+}
+
+export function parseMailboxSearchDocumentId(
+  itemId: string
+): { mailboxKey: string; messageId: string } | null {
+  const normalized = normalizeText(itemId)
+  if (!normalized) {
+    return null
+  }
+
+  const separatorIndex = normalized.indexOf('::')
+  if (separatorIndex < 0) {
+    return null
+  }
+
+  const mailboxKeyPart = normalized.slice(0, separatorIndex)
+  const messageIdPart = normalized.slice(separatorIndex + 2)
+  if (!mailboxKeyPart || !messageIdPart) {
+    return null
+  }
+
+  try {
+    return {
+      mailboxKey: decodeURIComponent(mailboxKeyPart),
+      messageId: decodeURIComponent(messageIdPart)
+    }
+  } catch {
+    return null
+  }
+}
+
 function compactMailboxDetail(detail: MessageDetail): MessageDetail {
   const cloned = cloneMessageDetail(detail)
   return {
@@ -1392,6 +1425,14 @@ export class MemorySearchIndexStore implements SearchIndexStore {
     if (!normalizedId) {
       return null
     }
+    const parsedId = parseMailboxSearchDocumentId(normalizedId)
+    if (parsedId) {
+      const mailbox = this.documents.get(parsedId.mailboxKey)
+      const exactRecord = mailbox?.get(parsedId.messageId) || null
+      if (exactRecord) {
+        return exactRecord
+      }
+    }
     for (const mailbox of this.documents.values()) {
       for (const record of mailbox.values()) {
         if (normalizeText(record.id || record.messageId) === normalizedId || normalizeText(record.messageId) === normalizedId) {
@@ -1770,6 +1811,16 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     const normalizedId = normalizeText(id)
     if (!normalizedId) {
       return null
+    }
+    const parsedId = parseMailboxSearchDocumentId(normalizedId)
+    if (parsedId) {
+      const exactRecord = await this.documents.findOne({
+        mailboxKey: parsedId.mailboxKey,
+        messageId: parsedId.messageId
+      })
+      if (exactRecord) {
+        return exactRecord
+      }
     }
     return this.documents.findOne({
       $or: [{ messageId: normalizedId }, { id: normalizedId }]
