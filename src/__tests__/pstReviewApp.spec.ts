@@ -794,7 +794,7 @@ describe('pst review api', () => {
     loadSpy.mockRestore()
   })
 
-  it('serves mailbox detail from snapshots and refreshes them after review changes', async () => {
+  it('serves mailbox preview from indexed search docs and overlays review changes', async () => {
     rootDir = makeTempDir('pst-review-detail-cache-')
     const pstDir = path.join(rootDir, 'PST')
     fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
@@ -806,62 +806,40 @@ describe('pst review api', () => {
     reviewStore = started.reviewStore
     searchIndexStore = started.searchIndexStore
 
-    const opened = await requestJson(`${started.baseUrl}/api/psts/open`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        scopePath: 'Case1/Search1',
-        fileName: 'sample.pst'
-      })
+    const searchResults = await started.searchIndexStore.search({
+      scope: 'all',
+      query: '',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'date-desc',
+      page: 1,
+      pageSize: 50,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: ''
     })
-
-    const folder = findMailFolder(opened.tree)
-    expect(folder).toBeTruthy()
-
-    const folderPage = await requestJson(
-      `${started.baseUrl}/api/sessions/${opened.sessionId}/folders/${encodeURIComponent(
-        folder!.id
-      )}/messages?page=1&pageSize=20`
-    )
-    const message = folderPage.page.items.find((item: { isMailLike: boolean }) => item.isMailLike)
-    expect(message).toBeTruthy()
-    if (!message) {
-      throw new Error('Expected a mailbox message')
+    const mailboxItem = searchResults.items.find((item) => item.sourceType === 'mailbox')
+    expect(mailboxItem).toBeTruthy()
+    if (!mailboxItem) {
+      throw new Error('Expected a mailbox search result')
     }
-
-    const snapshotBeforeDetail = await started.searchIndexStore.findMailboxDetail(mailboxPath, message.id)
-    expect(snapshotBeforeDetail).toBeTruthy()
+    expect(mailboxItem.mailboxDetail).toBeTruthy()
 
     const { PSTUtil } = require('../PSTUtil.class')
     const loadSpy = jest.spyOn(PSTUtil, 'detectAndLoadPSTObject')
-    const reviewSpy = jest.spyOn(started.reviewStore, 'getReview')
 
-    const detailOne = await requestJson(
-      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(message.id)}`
+    const itemId = encodeURIComponent(mailboxItem.id || mailboxItem.messageId)
+    const detailBeforeReview = await requestJson(`${started.baseUrl}/api/items/${itemId}`)
+    expect(detailBeforeReview.detail.bodyText).toBe(mailboxItem.mailboxDetail?.bodyText)
+    expect(detailBeforeReview.detail.bodyHtml).toBe(mailboxItem.mailboxDetail?.bodyHtml)
+    expect(detailBeforeReview.detail.attachments).toHaveLength(
+      mailboxItem.mailboxDetail?.attachments.length || 0
     )
-    const extractOne = await requestJson(
-      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
-        message.id
-      )}/extract?fields=all`
-    )
-    const detailTwo = await requestJson(
-      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(message.id)}`
-    )
-    const itemDetail = await requestJson(`${started.baseUrl}/api/items/${encodeURIComponent(message.id)}`)
-
-    expect(detailTwo.detail).toEqual(detailOne.detail)
-    expect(itemDetail.detail.bodyText).toBe(detailOne.detail.bodyText)
-    expect(itemDetail.detail.review.flagged).toBe(detailOne.detail.review.flagged)
-    expect(extractOne.record.review.flagged).toBe(detailOne.detail.review.flagged)
+    expect(detailBeforeReview.detail.review.flagged).toBe(false)
     expect(loadSpy).not.toHaveBeenCalled()
-    expect(reviewSpy).toHaveBeenCalledTimes(2)
 
     await requestJson(
-      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
-        message.id
-      )}/review`,
+      `${started.baseUrl}/api/items/${itemId}/review`,
       {
         method: 'PATCH',
         headers: {
@@ -873,19 +851,11 @@ describe('pst review api', () => {
       }
     )
 
-    const detailAfterUpdate = await requestJson(
-      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(message.id)}`
-    )
-    const extractAfterUpdate = await requestJson(
-      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(
-        message.id
-      )}/extract?fields=all`
-    )
+    const detailAfterReview = await requestJson(`${started.baseUrl}/api/items/${itemId}`)
 
-    expect(detailAfterUpdate.detail.review.flagged).toBe(true)
-    expect(extractAfterUpdate.record.review.flagged).toBe(true)
+    expect(detailAfterReview.detail.bodyText).toBe(mailboxItem.mailboxDetail?.bodyText)
+    expect(detailAfterReview.detail.review.flagged).toBe(true)
     expect(loadSpy).not.toHaveBeenCalled()
-    expect(reviewSpy).toHaveBeenCalledTimes(3)
   })
 
   it('serves mailbox item attachments through the item route and opens PST only on download', async () => {
@@ -934,7 +904,7 @@ describe('pst review api', () => {
     expect(loadSpy).toHaveBeenCalled()
   })
 
-  it('backfills a missing mailbox snapshot from PST once and reuses it thereafter', async () => {
+  it('recovers missing mailbox preview data once and backfills it', async () => {
     rootDir = makeTempDir('pst-review-detail-backfill-')
     const pstDir = path.join(rootDir, 'PST')
     fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
@@ -946,52 +916,59 @@ describe('pst review api', () => {
     reviewStore = started.reviewStore
     searchIndexStore = started.searchIndexStore
 
-    const opened = await requestJson(`${started.baseUrl}/api/psts/open`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        scopePath: 'Case1/Search1',
-        fileName: 'sample.pst'
-      })
+    const searchResults = await started.searchIndexStore.search({
+      scope: 'all',
+      query: '',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'date-desc',
+      page: 1,
+      pageSize: 50,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: ''
     })
-
-    const folder = findMailFolder(opened.tree)
-    expect(folder).toBeTruthy()
-
-    const folderPage = await requestJson(
-      `${started.baseUrl}/api/sessions/${opened.sessionId}/folders/${encodeURIComponent(
-        folder!.id
-      )}/messages?page=1&pageSize=20`
-    )
-    const message = folderPage.page.items.find((item: { isMailLike: boolean }) => item.isMailLike)
-    expect(message).toBeTruthy()
-    if (!message) {
-      throw new Error('Expected a mailbox message')
+    const mailboxItem = searchResults.items.find((item) => item.sourceType === 'mailbox')
+    expect(mailboxItem).toBeTruthy()
+    if (!mailboxItem) {
+      throw new Error('Expected a mailbox search result')
     }
 
-    await started.searchIndexStore.deleteMailboxDetails(mailboxPath)
+    await started.searchIndexStore.replaceMailboxDocuments(
+      mailboxItem.mailboxKey,
+      searchResults.items
+        .filter((item) => item.mailboxKey === mailboxItem.mailboxKey)
+        .map((item) => {
+          const { mailboxDetail, ...rest } = item
+          return rest
+        })
+    )
 
     const { PSTUtil } = require('../PSTUtil.class')
     const loadSpy = jest.spyOn(PSTUtil, 'detectAndLoadPSTObject')
-    const upsertSpy = jest.spyOn(started.searchIndexStore, 'upsertMailboxDetail')
+    loadSpy.mockClear()
 
-    const detailOne = await requestJson(
-      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(message.id)}`
+    const response = await fetch(
+      `${started.baseUrl}/api/items/${encodeURIComponent(mailboxItem.id || mailboxItem.messageId)}`
     )
-    const loadCountAfterFirstDetail = loadSpy.mock.calls.length
-    const upsertCountAfterFirstDetail = upsertSpy.mock.calls.length
-    const detailTwo = await requestJson(
-      `${started.baseUrl}/api/sessions/${opened.sessionId}/messages/${encodeURIComponent(message.id)}`
-    )
+    const payload = await readJson(response)
 
-    expect(detailTwo.detail).toEqual(detailOne.detail)
-    expect(loadCountAfterFirstDetail).toBeGreaterThan(0)
-    expect(loadSpy.mock.calls.length).toBe(loadCountAfterFirstDetail)
-    expect(upsertSpy).toHaveBeenCalledTimes(1)
-    expect(upsertCountAfterFirstDetail).toBe(1)
-    expect(await started.searchIndexStore.findMailboxDetail(mailboxPath, message.id)).toBeTruthy()
+    expect(response.status).toBe(200)
+    expect(payload.detail.bodyText).toBe(mailboxItem.mailboxDetail?.bodyText)
+    expect(payload.detail.review.flagged).toBe(false)
+    expect(loadSpy).toHaveBeenCalled()
+
+    const backfilled = await started.searchIndexStore.findDocumentById(mailboxItem.id || mailboxItem.messageId)
+    expect(backfilled?.mailboxDetail).toBeTruthy()
+
+    const loadCountAfterFirstRequest = loadSpy.mock.calls.length
+    const secondResponse = await fetch(
+      `${started.baseUrl}/api/items/${encodeURIComponent(mailboxItem.id || mailboxItem.messageId)}`
+    )
+    expect(secondResponse.status).toBe(200)
+    const secondPayload = await readJson(secondResponse)
+    expect(secondPayload.detail.bodyText).toBe(mailboxItem.mailboxDetail?.bodyText)
+    expect(loadSpy.mock.calls.length).toBe(loadCountAfterFirstRequest)
   })
 
   it('moves PSTs into and out of the removed archive without deleting them', async () => {
@@ -1701,6 +1678,88 @@ describe('pst review api', () => {
     expect(exactTeamsSearch.page.items[0].scopePath).toBe('Case2/Search2')
   })
 
+  it('honors casePath search scoping and rejects unauthorized case access', async () => {
+    rootDir = makeTempDir('pst-review-api-case-path-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
+    fs.mkdirSync(path.join(pstDir, 'Case2', 'Search2'), { recursive: true })
+    stageFixture(enronPath, path.join(pstDir, 'Case1', 'Search1', 'case-one.pst'))
+    stageFixture(enronPath, path.join(pstDir, 'Case2', 'Search2', 'case-two.pst'))
+
+    const authUserStore = createMemoryAuthUserStore([
+      { username: 'admin', password: 'pst-extractor' },
+      { username: 'bob', password: 'bob-password' }
+    ])
+    const started = await startApp(
+      pstDir,
+      undefined,
+      {
+        username: 'admin',
+        password: 'pst-extractor',
+        sessionTtlMinutes: 180
+      },
+      authUserStore
+    )
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    async function login(username: string, password: string): Promise<string> {
+      const response = await fetch(`${started.baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ username, password })
+      })
+      expect(response.status).toBe(200)
+      return getCookiePair(getSetCookieHeader(response))
+    }
+
+    const adminCookie = await login('admin', 'pst-extractor')
+    await requestJson(`${started.baseUrl}/api/auth/users/bob/access`, {
+      method: 'PUT',
+      headers: {
+        Cookie: adminCookie,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        assignedCasePaths: ['Case1']
+      })
+    })
+
+    const bobCookie = await login('bob', 'bob-password')
+
+    const allowedSearch = await requestJson(
+      `${started.baseUrl}/api/search?scope=all&casePath=${encodeURIComponent(
+        'Case1'
+      )}&sourceType=mailbox&query=&mode=and&page=1&pageSize=20&mailOnly=1&sort=date-desc`,
+      {
+        headers: {
+          Cookie: bobCookie
+        }
+      }
+    )
+    expect(allowedSearch.page.total).toBeGreaterThan(0)
+    expect(allowedSearch.page.items.every((item: { scopePath?: string }) => String(item.scopePath || '').startsWith('Case1'))).toBe(
+      true
+    )
+
+    const deniedResponse = await fetch(
+      `${started.baseUrl}/api/search?scope=all&casePath=${encodeURIComponent(
+        'Case2'
+      )}&sourceType=mailbox&query=&mode=and&page=1&pageSize=20&mailOnly=1&sort=date-desc`,
+      {
+        headers: {
+          Cookie: bobCookie
+        }
+      }
+    )
+    expect(deniedResponse.status).toBe(403)
+    const deniedPayload = await readJson(deniedResponse)
+    expect(deniedPayload.error).toBe('Case access required')
+  })
+
   it('isolates review state and flagged bundles per authenticated user', async () => {
     rootDir = makeTempDir('pst-review-api-review-scope-')
     const pstDir = path.join(rootDir, 'PST')
@@ -2339,8 +2398,8 @@ describe('pst review api', () => {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          password: 'jane-password',
-          confirmPassword: 'jane-password'
+          password: 'JanePassword1!',
+          confirmPassword: 'JanePassword1!'
         })
       }
     )
@@ -2355,7 +2414,7 @@ describe('pst review api', () => {
       },
       body: JSON.stringify({
         username: 'jane.doe@example.com',
-        password: 'jane-password'
+        password: 'JanePassword1!'
       })
     })
     const emailLoginPayload = await readJson(emailLoginResponse)
@@ -2523,8 +2582,8 @@ describe('pst review api', () => {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          password: 'secret123',
-          confirmPassword: 'secret123'
+          password: 'Secret12345!',
+          confirmPassword: 'Secret12345!'
         })
       }
     )
@@ -2550,8 +2609,8 @@ describe('pst review api', () => {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          password: 'secret123',
-          confirmPassword: 'secret123'
+          password: 'Secret12345!',
+          confirmPassword: 'Secret12345!'
         })
       }
     )
@@ -2616,7 +2675,7 @@ describe('pst review api', () => {
       },
       body: JSON.stringify({
         username: 'alice',
-        password: 'secret123'
+        password: 'Secret12345!'
       })
     })
     const aliceLoginPayload = await readJson(aliceLoginResponse)
@@ -2664,7 +2723,7 @@ describe('pst review api', () => {
       },
       body: JSON.stringify({
         username: 'alice',
-        password: 'secret123'
+        password: 'Secret12345!'
       })
     })
     const aliceRecoveryLoginPayload = await readJson(aliceRecoveryLoginResponse)
@@ -2807,7 +2866,7 @@ describe('pst review api', () => {
       },
       body: JSON.stringify({
         username: 'alice',
-        password: 'secret123'
+        password: 'Secret12345!'
       })
     })
     const aliceRestartLoginPayload = await readJson(aliceRestartLoginResponse)

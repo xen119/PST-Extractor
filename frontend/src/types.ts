@@ -147,6 +147,7 @@ export interface MessageSummary {
   previewHtml?: string
   previewUrl?: string
   downloadUrl?: string
+  mailboxDetail?: MessageDetail
 }
 
 export interface ReviewFilters {

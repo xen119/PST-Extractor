@@ -14,7 +14,6 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
-  ScanLine,
   Search,
   Send,
   Settings,
@@ -34,6 +33,7 @@ import {
   type AuthView,
   type InviteStep
 } from '@/components/auth'
+import { AllItemsDialog } from '@/components/all-items-dialog'
 import { AppShell, EmailPreview, EmptyState, MessageList, Sidebar, TagManagerDialog } from '@/components/layout'
 import { Badge, Button, Dialog, DialogContent, DialogDescription, DialogTitle, IconButton, Input, PopoverClose, ScrollArea, Separator } from '@/components/ui'
 import { deriveSearchMode, normalizeSearchResultsPage } from '@/lib/search'
@@ -69,6 +69,7 @@ import type {
   SmtpSettingsResponse,
   SearchIndexRefreshSource,
   SearchIndexRefreshStatus,
+  ReviewState,
   UserInvite,
   UsersResponse
 } from '@/types'
@@ -105,7 +106,6 @@ const DEFAULT_SMTP_FORM: SmtpFormState = {
 }
 
 const SEARCH_INDEX_REFRESH_POLL_INTERVAL_MS = 2000
-const MAILBOX_OPEN_WARMUP_DELAY_MS = 1200
 const SEARCH_INDEX_REFRESH_SOURCES: SearchIndexRefreshSource[] = ['mailboxes', 'items']
 
 function getInviteToken(pathname = window.location.pathname): string | null {
@@ -407,6 +407,7 @@ export function App() {
   const [clearFlagsDialogOpen, setClearFlagsDialogOpen] = React.useState(false)
   const [clearFlagsLoading, setClearFlagsLoading] = React.useState(false)
   const [clearFlagsError, setClearFlagsError] = React.useState('')
+  const [allItemsDialogOpen, setAllItemsDialogOpen] = React.useState(false)
   const [searchIndexRefreshStatuses, setSearchIndexRefreshStatuses] = React.useState<
     Record<SearchIndexRefreshSource, SearchIndexRefreshStatus | null>
   >({
@@ -443,6 +444,8 @@ export function App() {
   const mailboxDetailCacheRef = React.useRef(new Map<string, MessageDetail>())
   const mailboxPreviewCacheRef = React.useRef(new Map<string, MessageDetail>())
   const mailboxDetailInFlightRef = React.useRef(new Map<string, Promise<MessageDetail>>())
+  const indexedItemDetailCacheRef = React.useRef(new Map<string, MessageDetail>())
+  const indexedItemDetailInFlightRef = React.useRef(new Map<string, Promise<MessageDetail>>())
   const selectedPreviewOriginRef = React.useRef<'session' | 'search-index' | 'item'>('session')
 
   const catalogLoadKeyRef = React.useRef('')
@@ -590,6 +593,150 @@ export function App() {
     }
   }
 
+  function getIndexedItemDetailCacheKey(itemId: string): string {
+    return normalizeText(itemId)
+  }
+
+  function clearIndexedItemDetailCache(itemId?: string): void {
+    if (!itemId) {
+      indexedItemDetailCacheRef.current.clear()
+      indexedItemDetailInFlightRef.current.clear()
+      return
+    }
+
+    const cacheKey = getIndexedItemDetailCacheKey(itemId)
+    if (!cacheKey) {
+      return
+    }
+    indexedItemDetailCacheRef.current.delete(cacheKey)
+    indexedItemDetailInFlightRef.current.delete(cacheKey)
+  }
+
+  function cacheIndexedItemDetail(detail: MessageDetail): void {
+    const cacheKey = getIndexedItemDetailCacheKey(detail.id || '')
+    if (!cacheKey) {
+      return
+    }
+    indexedItemDetailCacheRef.current.set(cacheKey, detail)
+  }
+
+  function loadIndexedItemDetail(itemId: string): Promise<MessageDetail> {
+    const cacheKey = getIndexedItemDetailCacheKey(itemId)
+    if (!cacheKey) {
+      return Promise.reject(new Error('Item id is required'))
+    }
+
+    const cachedDetail = indexedItemDetailCacheRef.current.get(cacheKey)
+    if (cachedDetail) {
+      return Promise.resolve(cachedDetail)
+    }
+
+    const inFlightRequest = indexedItemDetailInFlightRef.current.get(cacheKey)
+    if (inFlightRequest) {
+      return inFlightRequest
+    }
+
+    const request = api.item.detail(cacheKey).then((response) => {
+      if (indexedItemDetailInFlightRef.current.get(cacheKey) === request) {
+        indexedItemDetailInFlightRef.current.delete(cacheKey)
+        cacheIndexedItemDetail(response.detail)
+      }
+      return response.detail
+    })
+
+    indexedItemDetailInFlightRef.current.set(cacheKey, request)
+    return request.catch((error) => {
+      if (indexedItemDetailInFlightRef.current.get(cacheKey) === request) {
+        indexedItemDetailInFlightRef.current.delete(cacheKey)
+      }
+      throw error
+    })
+  }
+
+  function patchIndexedItemReview(itemId: string, review: ReviewState): void {
+    const cacheKey = getIndexedItemDetailCacheKey(itemId)
+    if (!cacheKey) {
+      return
+    }
+
+    const cachedDetail = indexedItemDetailCacheRef.current.get(cacheKey)
+    if (cachedDetail) {
+      indexedItemDetailCacheRef.current.set(cacheKey, {
+        ...cachedDetail,
+        review
+      })
+    }
+
+    setSelectedMessage((current) =>
+      current && normalizeText(current.id || '') === cacheKey ? { ...current, review } : current
+    )
+    setCurrentPage((current) =>
+      current
+        ? {
+            ...current,
+            items: current.items.map((item) =>
+              normalizeText(item.id || '') === cacheKey
+                ? {
+                    ...item,
+                    review
+                  }
+                : item
+            )
+          }
+      : current
+    )
+  }
+
+  async function openIndexedItemPreview(
+    item: MessageSummary,
+    options: { persistSelection?: boolean } = {}
+  ): Promise<void> {
+    const itemId = normalizeText(item.id || '')
+    if (!itemId) {
+      return
+    }
+
+    selectedPreviewOriginRef.current = 'item'
+    setSelectedMessageId(itemId)
+    if (options.persistSelection) {
+      writeWorkspaceStorageItem('messageId', true, username, itemId)
+    }
+
+    const requestId = invalidateMessagePreview(true)
+
+    try {
+      const indexedPreviewDetail = item.mailboxDetail
+      if (indexedPreviewDetail) {
+        cacheIndexedItemDetail(indexedPreviewDetail)
+        setSelectedMessage(indexedPreviewDetail)
+        setMessageLoading(false)
+        return
+      }
+
+      const cachedDetail = indexedItemDetailCacheRef.current.get(itemId)
+      if (cachedDetail) {
+        setSelectedMessage(cachedDetail)
+        setMessageLoading(false)
+        return
+      }
+
+      const detail = await loadIndexedItemDetail(itemId)
+      if (messagePreviewRequestRef.current !== requestId) {
+        return
+      }
+      setSelectedMessage(detail)
+    } catch (error) {
+      if (messagePreviewRequestRef.current === requestId) {
+        setSelectedMessage(null)
+        setAuthError(error instanceof Error ? error.message : 'Unable to load item detail')
+      }
+    } finally {
+      if (messagePreviewRequestRef.current === requestId) {
+        setMessageLoading(false)
+      }
+    }
+  }
+
   function loadMailboxMessageDetail(messageId: string): Promise<MessageDetail> {
     if (!sessionId) {
       return Promise.reject(new Error('Mailbox session not available'))
@@ -631,19 +778,6 @@ export function App() {
     })
   }
 
-  function scheduleMailboxOpen(
-    fileName: string,
-    scopePath: string,
-    catalogResponse?: PstCatalogResponse,
-    options: OpenMailboxOptions = {}
-  ): void {
-    clearMailboxOpenTimer()
-    mailboxOpenTimerRef.current = window.setTimeout(() => {
-      mailboxOpenTimerRef.current = null
-      void openMailbox(fileName, scopePath, catalogResponse, options)
-    }, MAILBOX_OPEN_WARMUP_DELAY_MS)
-  }
-
   React.useEffect(() => () => clearMailboxOpenTimer(), [])
 
   function prefetchMailboxMessageDetail(messageId: string): void {
@@ -665,11 +799,12 @@ export function App() {
     if (page.page !== pageIndex) {
       setPageIndex(page.page)
     }
+    if (selectedMessageId) {
+      return
+    }
     const storedMessageId = readWorkspaceStorageItem('messageId', true, username, '')
-    const nextMessageId = page.items.some((item) => item.id === selectedMessageId)
-      ? selectedMessageId
-      : page.items.find((item) => item.id === storedMessageId)?.id || page.items[0]?.id || ''
-    if (nextMessageId && nextMessageId !== selectedMessageId) {
+    const nextMessageId = page.items.find((item) => item.id === storedMessageId)?.id || page.items[0]?.id || ''
+    if (nextMessageId) {
       const nextMessage = page.items.find((item) => item.id === nextMessageId)
       if (nextMessage) {
         void openMessageSummary(nextMessage)
@@ -1235,6 +1370,9 @@ export function App() {
     if (selectedPageItem.sourceType && selectedPageItem.sourceType !== 'mailbox') {
       return
     }
+    if (selectedPreviewOriginRef.current === 'item') {
+      return
+    }
 
     if (workspaceMode === 'search' && selectedPageItem.sourceType === 'mailbox') {
       const previewKey = getMailboxPreviewKey(
@@ -1244,6 +1382,14 @@ export function App() {
         'search'
       )
       selectedPreviewOriginRef.current = 'search-index'
+      const indexedPreviewDetail = selectedPageItem.mailboxDetail
+      if (indexedPreviewDetail) {
+        previewRequestKeyRef.current = previewKey
+        cacheIndexedItemDetail(indexedPreviewDetail)
+        setSelectedMessage(indexedPreviewDetail)
+        setMessageLoading(false)
+        return
+      }
       const cachedPreviewDetail = mailboxPreviewCacheRef.current.get(previewKey)
       if (cachedPreviewDetail) {
         previewRequestKeyRef.current = previewKey
@@ -1411,6 +1557,9 @@ export function App() {
 
   React.useEffect(() => {
     if (!workspaceReady || !sessionId || !currentPage?.items?.length) {
+      return
+    }
+    if (selectedPreviewOriginRef.current === 'item') {
       return
     }
 
@@ -1635,11 +1784,13 @@ export function App() {
       setSmtpMessage('')
       setActivityEntries([])
       setActivityError('')
+      setAllItemsDialogOpen(false)
       setAuthView('login')
       setAuthMessage('')
       setAuthError('')
       setSearchIndexRefreshStatuses({ mailboxes: null, items: null })
       setSearchIndexRefreshActionBusyBySource({ mailboxes: false, items: false })
+      clearIndexedItemDetailCache()
       stopSearchIndexRefreshPolling('mailboxes')
       stopSearchIndexRefreshPolling('items')
     }
@@ -2177,26 +2328,8 @@ export function App() {
 
   async function openMessageSummary(message: MessageSummary): Promise<void> {
     if (message.sourceType && message.sourceType !== 'mailbox') {
-      selectedPreviewOriginRef.current = 'item'
-      const requestId = invalidateMessagePreview(true)
-      setSelectedMessageId(message.id)
-      writeWorkspaceStorageItem('messageId', true, username, message.id)
       setWorkspaceMode('search')
-      try {
-        const response = await api.item.detail(message.id)
-        if (messagePreviewRequestRef.current !== requestId) {
-          return
-        }
-        setSelectedMessage(response.detail)
-      } catch (error) {
-        if (messagePreviewRequestRef.current === requestId) {
-          setAuthError(error instanceof Error ? error.message : 'Unable to load item detail')
-        }
-      } finally {
-        if (messagePreviewRequestRef.current === requestId) {
-          setMessageLoading(false)
-        }
-      }
+      await openIndexedItemPreview(message, { persistSelection: true })
       return
     }
 
@@ -2204,58 +2337,16 @@ export function App() {
     const currentScopePath = selectedScopePath || selectedCasePath
 
     if (workspaceMode === 'search' && message.sourceType === 'mailbox') {
-      selectedPreviewOriginRef.current = 'search-index'
-      setSelectedMessageId(message.id)
-      writeWorkspaceStorageItem('messageId', true, username, message.id)
       setWorkspaceMode('search')
+      await openIndexedItemPreview(message, { persistSelection: true })
       return
     }
 
     selectedPreviewOriginRef.current = 'session'
 
     if (!isSameMailboxContext(message, currentFileName, currentScopePath)) {
-      const nextFileName = message.fileName || currentFileName
-      const nextScopePath = message.scopePath || currentScopePath
-      if (nextFileName && nextScopePath) {
-        const requestId = invalidateMessagePreview(true)
-        const nextCasePath = getCasePathFromScopePath(nextScopePath)
-        skipNextMailboxOpenRef.current = `${normalizeText(nextFileName)}::${normalizeText(nextScopePath)}`
-        if (workspaceMode === 'search' && sourceType === 'mailbox' && searchScope !== 'pst') {
-          skipNextMessageReloadRef.current = true
-        }
-        setSelectedMessageId(message.id)
-        writeWorkspaceStorageItem('messageId', true, username, message.id)
-        setWorkspaceMode('search')
-        setSelectedPstFileName(nextFileName)
-        setSelectedCasePath(nextCasePath)
-        setSelectedScopePath(nextScopePath)
-        writeWorkspaceStorageItem('casePath', true, username, nextCasePath)
-        writeWorkspaceStorageItem('scopePath', true, username, nextScopePath)
-        writeWorkspaceStorageItem('pstFileName', true, username, nextFileName)
-        try {
-          const response = await api.item.detail(message.id)
-          if (messagePreviewRequestRef.current !== requestId) {
-            return
-          }
-          setSelectedMessage(response.detail)
-          const nextPreviewKey = getMailboxPreviewKey(message.id, nextFileName, nextScopePath)
-          previewRequestKeyRef.current = nextPreviewKey
-          mailboxPreviewCacheRef.current.set(nextPreviewKey, response.detail)
-          scheduleMailboxOpen(nextFileName, nextScopePath, catalog || undefined, {
-            preserveWorkspaceMode: true,
-            preservePreview: true
-          })
-        } catch (error) {
-          if (messagePreviewRequestRef.current === requestId) {
-            setAuthError(error instanceof Error ? error.message : 'Unable to load item detail')
-          }
-        } finally {
-          if (messagePreviewRequestRef.current === requestId) {
-            setMessageLoading(false)
-          }
-        }
-        return
-      }
+      await openIndexedItemPreview(message, { persistSelection: true })
+      return
     }
 
     await openMessage(message.id)
@@ -2295,7 +2386,7 @@ export function App() {
   }
 
   async function downloadEml(): Promise<void> {
-    if (selectedPreviewOriginRef.current === 'search-index' && selectedMessageId) {
+    if (selectedPreviewOriginRef.current !== 'session' && selectedMessageId) {
       triggerDownload(api.item.messageEmlUrl(selectedMessageId), `${selectedMessageId}.eml`)
       return
     }
@@ -2308,15 +2399,18 @@ export function App() {
     if (!selectedMessageId) {
       return
     }
-    if (selectedPreviewOriginRef.current === 'search-index' || selectedMessage?.archivePath || !sessionId) {
+    if (selectedPreviewOriginRef.current !== 'session' || selectedMessage?.archivePath || !sessionId) {
       await api.item.updateReview(selectedMessageId, {
         flagged: !(selectedMessage?.review?.flagged ?? false),
         tags: selectedMessage?.review?.tags || []
       })
-      await refreshCurrentPage()
-      const response = await api.item.detail(selectedMessageId)
-      setSelectedMessage(response.detail)
-      updateSearchMailboxPreviewCache(selectedMessageId, response.detail)
+      const review: ReviewState = {
+        flagged: !(selectedMessage?.review?.flagged ?? false),
+        tags: selectedMessage?.review?.tags || [],
+        createdAt: selectedMessage?.review?.createdAt || '',
+        updatedAt: new Date().toISOString()
+      }
+      patchIndexedItemReview(selectedMessageId, review)
       return
     }
     await api.session.updateReview(sessionId, selectedMessageId, {
@@ -2332,12 +2426,14 @@ export function App() {
     if (!selectedMessageId) {
       return
     }
-    if (selectedPreviewOriginRef.current === 'search-index' || selectedMessage?.archivePath || !sessionId) {
+    if (selectedPreviewOriginRef.current !== 'session' || selectedMessage?.archivePath || !sessionId) {
       await api.item.clearReview(selectedMessageId)
-      await refreshCurrentPage()
-      const response = await api.item.detail(selectedMessageId)
-      setSelectedMessage(response.detail)
-      updateSearchMailboxPreviewCache(selectedMessageId, response.detail)
+      patchIndexedItemReview(selectedMessageId, {
+        flagged: false,
+        tags: [],
+        createdAt: selectedMessage?.review?.createdAt || '',
+        updatedAt: new Date().toISOString()
+      })
       return
     }
     await api.session.clearReview(sessionId, selectedMessageId)
@@ -2350,14 +2446,16 @@ export function App() {
     if (!selectedMessageId) {
       return
     }
-    if (selectedPreviewOriginRef.current === 'search-index' || selectedMessage?.archivePath || !sessionId) {
+    if (selectedPreviewOriginRef.current !== 'session' || selectedMessage?.archivePath || !sessionId) {
       await api.item.updateReview(selectedMessageId, {
         tags: Array.from(new Set([...(selectedMessage?.review?.tags || []), tag]))
       })
-      await refreshCurrentPage()
-      const response = await api.item.detail(selectedMessageId)
-      setSelectedMessage(response.detail)
-      updateSearchMailboxPreviewCache(selectedMessageId, response.detail)
+      patchIndexedItemReview(selectedMessageId, {
+        flagged: Boolean(selectedMessage?.review?.flagged),
+        tags: Array.from(new Set([...(selectedMessage?.review?.tags || []), tag])),
+        createdAt: selectedMessage?.review?.createdAt || '',
+        updatedAt: new Date().toISOString()
+      })
       return
     }
     await api.session.updateReview(sessionId, selectedMessageId, {
@@ -2372,14 +2470,16 @@ export function App() {
     if (!selectedMessageId) {
       return
     }
-    if (selectedPreviewOriginRef.current === 'search-index' || selectedMessage?.archivePath || !sessionId) {
+    if (selectedPreviewOriginRef.current !== 'session' || selectedMessage?.archivePath || !sessionId) {
       await api.item.updateReview(selectedMessageId, {
         tags: (selectedMessage?.review?.tags || []).filter((item) => item !== tag)
       })
-      await refreshCurrentPage()
-      const response = await api.item.detail(selectedMessageId)
-      setSelectedMessage(response.detail)
-      updateSearchMailboxPreviewCache(selectedMessageId, response.detail)
+      patchIndexedItemReview(selectedMessageId, {
+        flagged: Boolean(selectedMessage?.review?.flagged),
+        tags: (selectedMessage?.review?.tags || []).filter((item) => item !== tag),
+        createdAt: selectedMessage?.review?.createdAt || '',
+        updatedAt: new Date().toISOString()
+      })
       return
     }
     await api.session.updateReview(sessionId, selectedMessageId, {
@@ -2448,6 +2548,7 @@ export function App() {
         }
         setHiddenRules(hiddenRulesResponse.items || [])
         clearMailboxPreviewCacheForRefresh(source)
+        clearIndexedItemDetailCache()
         await refreshCurrentPageRef.current()
         if (searchIndexRefreshPollJobIdRef.current[source] !== jobId) {
           return
@@ -2507,6 +2608,7 @@ export function App() {
       if (status.status === 'succeeded') {
         await api.hiddenFilters.list().then((result) => setHiddenRules(result.items || []))
         clearMailboxPreviewCacheForRefresh(source)
+        clearIndexedItemDetailCache()
         await refreshCurrentPage()
         setSearchIndexRefreshStatuses((current) => ({ ...current, [source]: null }))
       }
@@ -2741,6 +2843,9 @@ export function App() {
           setMailboxSearchScopePath(selectedScopePath || selectedCasePath)
         }
         writeWorkspaceStorageItem('sourceType', true, username, value)
+      }}
+      onOpenAllItems={() => {
+        setAllItemsDialogOpen(true)
       }}
       canRefreshSearchIndex={canManageUsers}
       searchIndexRefreshStatuses={searchIndexRefreshStatuses}
@@ -3192,6 +3297,21 @@ export function App() {
           </div>
         </DialogContent>
       </Dialog>
+
+      <AllItemsDialog
+        open={allItemsDialogOpen}
+        selectedItemId={selectedMessageId}
+        selectedCasePath={selectedCasePath}
+        onOpenChange={(open) => {
+          setAllItemsDialogOpen(open)
+        }}
+        onSelectItem={(item) => {
+          void openIndexedItemPreview(item)
+        }}
+        onReviewChange={(itemId, review) => {
+          patchIndexedItemReview(itemId, review)
+        }}
+      />
     </>
   ) : null
 

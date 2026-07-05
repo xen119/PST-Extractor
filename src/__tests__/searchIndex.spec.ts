@@ -92,7 +92,7 @@ describe('search index cache', () => {
         messageId: 'message:2',
         descriptorId: '2',
         folderId: 'folder:2',
-        folderPath: 'Inbox',
+        folderPath: 'Archive',
         order: 2,
         subject: 'Budget Review',
         originalSubject: 'Budget Review',
@@ -109,6 +109,35 @@ describe('search index cache', () => {
         subjectValues: ['budget review'],
         sortDateMs: Date.parse('2024-01-02T00:00:00.000Z'),
         updatedAt: new Date('2024-01-02T00:00:00.000Z').toISOString()
+      })
+    ])
+    await store.replaceMailboxDocuments('C:/PST/Case10/Search1/gamma.pst', [
+      makeDocument({
+        mailboxKey: 'C:/PST/Case10/Search1/gamma.pst',
+        scopePath: 'Case10/Search1',
+        scopeLabel: 'Case10 / Search1',
+        fileName: 'gamma.pst',
+        mailboxName: 'Gamma',
+        messageId: 'message:10',
+        descriptorId: '10',
+        folderId: 'folder:10',
+        folderPath: 'Inbox',
+        order: 3,
+        subject: 'Case Ten',
+        originalSubject: 'Case Ten',
+        senderName: 'Zed Example',
+        senderEmailAddress: 'zed@example.com',
+        recipientText: 'Zed Example <zed@example.com>',
+        displayTo: 'Zed Example <zed@example.com>',
+        resolvedDisplayTo: 'Zed Example <zed@example.com>',
+        bodySearchText: 'case ten',
+        searchText: 'case ten zed example zed@example.com ipm.note mail',
+        searchTokens: ['case', 'ten', 'zed', 'example'],
+        addressValues: ['zed@example.com'],
+        subjectValues: ['case ten'],
+        sortDateMs: Date.parse('2024-01-03T00:00:00.000Z'),
+        sortDate: '2024-01-03T00:00:00.000Z',
+        updatedAt: new Date('2024-01-03T00:00:00.000Z').toISOString()
       })
     ])
 
@@ -234,6 +263,143 @@ describe('search index cache', () => {
     })
     expect(activeMailboxMatch.total).toBe(1)
     expect(activeMailboxMatch.items[0].mailboxKey).toBe('C:/PST/Case1/Search1/alpha.pst')
+
+    const caseScoped = await store.search({
+      scope: 'all',
+      casePath: 'Case1',
+      query: '',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'date-desc',
+      page: 1,
+      pageSize: 20,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: ''
+    })
+    expect(caseScoped.total).toBe(2)
+    expect(caseScoped.items.every((item) => item.scopePath.startsWith('Case1/'))).toBe(true)
+    expect(caseScoped.items.some((item) => item.scopePath.startsWith('Case10/'))).toBe(false)
+
+    const subjectAsc = await store.search({
+      scope: 'all',
+      casePath: 'Case1',
+      query: '',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'subject-asc',
+      page: 1,
+      pageSize: 20,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: ''
+    })
+    expect(subjectAsc.items.map((item) => item.messageId)).toEqual(['message:2', 'message:1'])
+
+    const subjectDesc = await store.search({
+      scope: 'all',
+      casePath: 'Case1',
+      query: '',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'subject-desc',
+      page: 1,
+      pageSize: 20,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: ''
+    })
+    expect(subjectDesc.items.map((item) => item.messageId)).toEqual(['message:1', 'message:2'])
+
+    const senderAsc = await store.search({
+      scope: 'all',
+      casePath: 'Case1',
+      query: '',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'sender-asc',
+      page: 1,
+      pageSize: 20,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: ''
+    })
+    expect(senderAsc.items.map((item) => item.messageId)).toEqual(['message:1', 'message:2'])
+
+    const senderDesc = await store.search({
+      scope: 'all',
+      casePath: 'Case1',
+      query: '',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'sender-desc',
+      page: 1,
+      pageSize: 20,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: ''
+    })
+    expect(senderDesc.items.map((item) => item.messageId)).toEqual(['message:2', 'message:1'])
+
+    const locationAsc = await store.search({
+      scope: 'all',
+      casePath: 'Case1',
+      query: '',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'location-asc',
+      page: 1,
+      pageSize: 20,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: ''
+    })
+    expect(locationAsc.items.map((item) => item.messageId)).toEqual(['message:2', 'message:1'])
+
+    const locationDesc = await store.search({
+      scope: 'all',
+      casePath: 'Case1',
+      query: '',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'location-desc',
+      page: 1,
+      pageSize: 20,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: ''
+    })
+    expect(locationDesc.items.map((item) => item.messageId)).toEqual(['message:1', 'message:2'])
+
+    const dateAsc = await store.search({
+      scope: 'all',
+      casePath: 'Case1',
+      query: '',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'date-asc',
+      page: 1,
+      pageSize: 20,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: ''
+    })
+    expect(dateAsc.items.map((item) => item.messageId)).toEqual(['message:1', 'message:2'])
+
+    const dateDesc = await store.search({
+      scope: 'all',
+      casePath: 'Case1',
+      query: '',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'date-desc',
+      page: 1,
+      pageSize: 20,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: ''
+    })
+    expect(dateDesc.items.map((item) => item.messageId)).toEqual(['message:2', 'message:1'])
 
     const hiddenRule = await store.upsertHiddenRule({
       kind: 'subject',
@@ -535,7 +701,7 @@ describe('search index cache', () => {
     }
   })
 
-  it('rebuilds and removes mailbox detail snapshots during refresh', async () => {
+  it('stores mailbox preview payloads on search documents during refresh', async () => {
     const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pst-extractor-mailbox-snapshot-'))
     try {
       const scopeDir = path.join(rootDir, 'Case1', 'Search1')
@@ -553,16 +719,7 @@ describe('search index cache', () => {
       } as ReviewStore
 
       class TrackingSearchIndexStore extends MemorySearchIndexStore {
-        detailReplaceCount = 0
         mailboxDeleteCount = 0
-
-        override async replaceMailboxDetails(
-          mailboxKey: string,
-          details: Parameters<MemorySearchIndexStore['replaceMailboxDetails']>[1]
-        ): Promise<void> {
-          this.detailReplaceCount += 1
-          await super.replaceMailboxDetails(mailboxKey, details)
-        }
 
         override async deleteMailboxDocuments(mailboxKey: string): Promise<void> {
           this.mailboxDeleteCount += 1
@@ -578,7 +735,6 @@ describe('search index cache', () => {
         store
       )
       expect(firstPlan.mailboxCount).toBeGreaterThan(0)
-      expect(store.detailReplaceCount).toBeGreaterThan(0)
 
       const initialSearch = await store.search({
         scope: 'all',
@@ -598,9 +754,12 @@ describe('search index cache', () => {
         throw new Error('Expected a mailbox search result')
       }
 
-      const snapshot = await store.findMailboxDetail(mailboxItem.mailboxKey, mailboxItem.messageId)
-      expect(snapshot).toBeTruthy()
-      expect(snapshot?.id).toBe(mailboxItem.messageId)
+      expect(mailboxItem.mailboxDetail).toBeTruthy()
+      expect(mailboxItem.mailboxDetail?.id).toBe(mailboxItem.messageId)
+      expect(
+        (mailboxItem.mailboxDetail?.bodyText || mailboxItem.mailboxDetail?.bodyHtml || '').length
+      ).toBeGreaterThan(0)
+      expect(Array.isArray(mailboxItem.mailboxDetail?.attachments)).toBe(true)
 
       const refreshedAt = new Date(Date.now() + 60_000)
       fs.utimesSync(mailboxPath, refreshedAt, refreshedAt)
@@ -612,8 +771,7 @@ describe('search index cache', () => {
         store
       )
       expect(secondPlan.changedCount).toBeGreaterThan(0)
-      expect(store.detailReplaceCount).toBeGreaterThan(1)
-      expect(await store.findMailboxDetail(mailboxItem.mailboxKey, mailboxItem.messageId)).toBeTruthy()
+      expect(await store.findDocumentById(mailboxItem.id || mailboxItem.messageId)).toBeTruthy()
 
       fs.unlinkSync(mailboxPath)
       const thirdPlan = await refreshSearchIndexSourceFromCatalog(
@@ -624,7 +782,7 @@ describe('search index cache', () => {
       )
       expect(thirdPlan.removedCount).toBeGreaterThan(0)
       expect(store.mailboxDeleteCount).toBeGreaterThan(0)
-      expect(await store.findMailboxDetail(mailboxItem.mailboxKey, mailboxItem.messageId)).toBeNull()
+      expect(await store.findDocumentById(mailboxItem.id || mailboxItem.messageId)).toBeNull()
     } finally {
       fs.rmSync(rootDir, { recursive: true, force: true })
     }

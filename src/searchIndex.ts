@@ -76,6 +76,7 @@ export interface SearchIndexDocument {
   previewKind?: 'text' | 'html' | 'binary'
   previewText?: string
   previewHtml?: string
+  mailboxDetail?: MessageDetail
   review: ReviewState
   reviewStates: Array<{
     reviewerUsername: string
@@ -96,13 +97,6 @@ export interface SearchIndexFileFingerprint {
   updatedAt: string
 }
 
-export interface MailboxDetailSnapshotRecord {
-  mailboxKey: string
-  messageId: string
-  detail: MessageDetail
-  updatedAt: string
-}
-
 export interface SearchIndexRefreshPlan {
   source: SearchIndexRefreshSource
   mailboxCount: number
@@ -119,6 +113,7 @@ export interface SearchIndexRefreshPlan {
 export interface SearchIndexSearchOptions {
   scope: SearchScope
   scopePath?: string
+  casePath?: string
   mailboxKey?: string
   allowedMailboxKeys?: string[]
   reviewerUsername?: string
@@ -161,11 +156,8 @@ export interface SearchIndexStore {
   kind: 'memory' | 'mongo'
   isPersistent: boolean
   replaceMailboxDocuments(mailboxKey: string, documents: SearchIndexDocument[]): Promise<void>
+  upsertMailboxDocument(mailboxKey: string, document: SearchIndexDocument): Promise<void>
   deleteMailboxDocuments(mailboxKey: string): Promise<void>
-  replaceMailboxDetails(mailboxKey: string, details: MessageDetail[]): Promise<void>
-  upsertMailboxDetail(mailboxKey: string, detail: MessageDetail): Promise<void>
-  deleteMailboxDetails(mailboxKey: string): Promise<void>
-  findMailboxDetail(mailboxKey: string, messageId: string): Promise<MessageDetail | null>
   updateReviewState(
     mailboxKey: string,
     messageId: string,
@@ -187,11 +179,6 @@ export interface SearchIndexStore {
   deleteFileFingerprints(source: SearchIndexRefreshSource, mailboxKeys: string[]): Promise<void>
   promoteStagedDocuments?(
     stagingDocumentsCollectionName: string,
-    changedMailboxKeys?: string[],
-    removedMailboxKeys?: string[]
-  ): Promise<void>
-  promoteStagedMailboxDetails?(
-    stagingMailboxDetailsCollectionName: string,
     changedMailboxKeys?: string[],
     removedMailboxKeys?: string[]
   ): Promise<void>
@@ -226,23 +213,6 @@ interface SearchIndexCollectionLike {
     }
   }
   countDocuments: (filter: Record<string, unknown>) => Promise<number>
-}
-
-interface MailboxDetailCollectionLike {
-  createIndex?: (index: Record<string, 1 | -1>, options?: { unique?: boolean; name?: string }) => Promise<unknown>
-  findOne: (filter: Record<string, unknown>) => Promise<MailboxDetailSnapshotRecord | null>
-  updateOne: (
-    filter: Record<string, unknown>,
-    update: Record<string, unknown>,
-    options?: { upsert?: boolean }
-  ) => Promise<unknown>
-  deleteMany: (filter: Record<string, unknown>) => Promise<{ deletedCount?: number }>
-  find: (filter: Record<string, unknown>) => {
-    sort: (sort: Record<string, 1 | -1>) => {
-      toArray: () => Promise<MailboxDetailSnapshotRecord[]>
-    }
-  }
-  insertMany: (documents: MailboxDetailSnapshotRecord[]) => Promise<unknown>
 }
 
 interface HiddenRuleCollectionLike {
@@ -281,14 +251,11 @@ interface FileFingerprintCollectionLike {
 const DEFAULT_INDEX_COLLECTION = 'pst_search_documents'
 const DEFAULT_RULE_COLLECTION = 'pst_search_hidden_rules'
 const DEFAULT_FINGERPRINT_COLLECTION = 'pst_search_file_fingerprints'
-const DEFAULT_MAILBOX_DETAIL_COLLECTION = 'pst_mailbox_detail_snapshots'
-const MAX_MAILBOX_DETAIL_SNAPSHOT_BYTES = 12 * 1024 * 1024
 
 export interface MongoSearchIndexStoreConnectOptions {
   documentsCollectionName?: string
   rulesCollectionName?: string
   fingerprintsCollectionName?: string
-  mailboxDetailsCollectionName?: string
 }
 
 function normalizeText(value: unknown): string {
@@ -329,52 +296,16 @@ function uniqueTextValues(values: string[]): string[] {
   return [...new Set(values.map((value) => normalizeText(value)).filter(Boolean))]
 }
 
-function cloneMailboxDetail(detail: MessageDetail): MessageDetail {
-  return cloneMessageDetail(detail)
-}
-
-function isMailboxDetailSnapshotWithinSizeLimit(detail: MessageDetail): boolean {
-  try {
-    return Buffer.byteLength(JSON.stringify(detail), 'utf8') <= MAX_MAILBOX_DETAIL_SNAPSHOT_BYTES
-  } catch {
-    return false
-  }
-}
-
-function buildMailboxDetailSnapshotRecord(
-  mailboxKey: string,
-  detail: MessageDetail
-): MailboxDetailSnapshotRecord | null {
-  const normalizedMailboxKey = normalizeText(mailboxKey)
-  const messageId = normalizeText(detail.id)
-  if (!normalizedMailboxKey || !messageId) {
-    return null
-  }
-  const clonedDetail = cloneMailboxDetail(detail)
-  if (!isMailboxDetailSnapshotWithinSizeLimit(clonedDetail)) {
-    return null
-  }
+function compactMailboxDetail(detail: MessageDetail): MessageDetail {
+  const cloned = cloneMessageDetail(detail)
   return {
-    mailboxKey: normalizedMailboxKey,
-    messageId,
-    detail: clonedDetail,
-    updatedAt: new Date().toISOString()
+    ...cloned,
+    attachments: (cloned.attachments || []).map((attachment) => ({
+      ...attachment,
+      downloadUrl: '',
+      embeddedMessage: attachment.embeddedMessage ? compactMailboxDetail(attachment.embeddedMessage) : null
+    }))
   }
-}
-
-function dedupeMailboxDetailSnapshots(
-  mailboxKey: string,
-  details: MessageDetail[]
-): MailboxDetailSnapshotRecord[] {
-  const records = new Map<string, MailboxDetailSnapshotRecord>()
-  for (const detail of details) {
-    const record = buildMailboxDetailSnapshotRecord(mailboxKey, detail)
-    if (!record) {
-      continue
-    }
-    records.set(record.messageId, record)
-  }
-  return [...records.values()]
 }
 
 function uniqueFingerprintValues(values: SearchIndexFileFingerprint[]): SearchIndexFileFingerprint[] {
@@ -654,35 +585,160 @@ function resolveReviewTagValues(
   return review ? buildReviewTagValues(review) : []
 }
 
-function sortDocuments(left: SearchIndexDocument, right: SearchIndexDocument, sort: string): number {
-  if (sort === 'order') {
-    if (left.scopeLabel !== right.scopeLabel) {
-      return left.scopeLabel.localeCompare(right.scopeLabel, undefined, { sensitivity: 'base' })
-    }
-    if (left.fileName !== right.fileName) {
-      return left.fileName.localeCompare(right.fileName, undefined, { sensitivity: 'base' })
-    }
-    if (left.folderPath !== right.folderPath) {
-      return left.folderPath.localeCompare(right.folderPath, undefined, { sensitivity: 'base' })
-    }
-    return left.order - right.order
+function compareTextValues(left: string, right: string, direction: 'asc' | 'desc'): number {
+  const normalizedLeft = normalizeText(left)
+  const normalizedRight = normalizeText(right)
+  if (normalizedLeft === normalizedRight) {
+    return 0
+  }
+  if (!normalizedLeft) {
+    return 1
+  }
+  if (!normalizedRight) {
+    return -1
+  }
+  const comparison = normalizedLeft.localeCompare(normalizedRight, undefined, { sensitivity: 'base' })
+  return direction === 'asc' ? comparison : -comparison
+}
+
+function compareNumberValues(left: number | null | undefined, right: number | null | undefined, direction: 'asc' | 'desc'): number {
+  const leftValue = typeof left === 'number' && Number.isFinite(left) ? left : null
+  const rightValue = typeof right === 'number' && Number.isFinite(right) ? right : null
+  if (leftValue === rightValue) {
+    return 0
+  }
+  if (leftValue === null) {
+    return 1
+  }
+  if (rightValue === null) {
+    return -1
+  }
+  return direction === 'asc' ? leftValue - rightValue : rightValue - leftValue
+}
+
+function getDocumentSubjectSortText(document: SearchIndexDocument): string {
+  return normalizeText(document.subject || document.originalSubject || '')
+}
+
+function getDocumentSenderSortText(document: SearchIndexDocument): string {
+  return normalizeText(document.senderName || document.senderEmailAddress || '')
+}
+
+function getDocumentLocationSortText(document: SearchIndexDocument): string {
+  const locationParts =
+    document.sourceType === 'mailbox'
+      ? [document.scopeLabel, document.folderPath || document.mailboxName || document.fileName || document.scopePath]
+      : [document.scopeLabel, document.archiveEntryPath || document.archivePath || document.fileName || document.scopePath]
+  return normalizeText(locationParts.filter(Boolean).join(' · '))
+}
+
+function compareDefaultDocuments(left: SearchIndexDocument, right: SearchIndexDocument): number {
+  const scopeLabelComparison = compareTextValues(left.scopeLabel, right.scopeLabel, 'asc')
+  if (scopeLabelComparison) {
+    return scopeLabelComparison
   }
 
-  const leftDate = left.sortDateMs ?? Number.MIN_SAFE_INTEGER
-  const rightDate = right.sortDateMs ?? Number.MIN_SAFE_INTEGER
-  if (leftDate !== rightDate) {
-    return rightDate - leftDate
+  const fileNameComparison = compareTextValues(left.fileName, right.fileName, 'asc')
+  if (fileNameComparison) {
+    return fileNameComparison
   }
-  if (left.scopeLabel !== right.scopeLabel) {
-    return left.scopeLabel.localeCompare(right.scopeLabel, undefined, { sensitivity: 'base' })
+
+  const folderPathComparison = compareTextValues(left.folderPath, right.folderPath, 'asc')
+  if (folderPathComparison) {
+    return folderPathComparison
   }
-  if (left.fileName !== right.fileName) {
-    return left.fileName.localeCompare(right.fileName, undefined, { sensitivity: 'base' })
+
+  const archivePathComparison = compareTextValues(left.archivePath || '', right.archivePath || '', 'asc')
+  if (archivePathComparison) {
+    return archivePathComparison
   }
-  if (left.folderPath !== right.folderPath) {
-    return left.folderPath.localeCompare(right.folderPath, undefined, { sensitivity: 'base' })
+
+  const archiveEntryPathComparison = compareTextValues(left.archiveEntryPath || '', right.archiveEntryPath || '', 'asc')
+  if (archiveEntryPathComparison) {
+    return archiveEntryPathComparison
   }
-  return left.order - right.order
+
+  const orderComparison = compareNumberValues(left.order, right.order, 'asc')
+  if (orderComparison) {
+    return orderComparison
+  }
+
+  return compareTextValues(left.messageId, right.messageId, 'asc')
+}
+
+function sortDocuments(left: SearchIndexDocument, right: SearchIndexDocument, sort: string): number {
+  switch (sort) {
+    case 'order': {
+      const scopeLabelComparison = compareTextValues(left.scopeLabel, right.scopeLabel, 'asc')
+      if (scopeLabelComparison) {
+        return scopeLabelComparison
+      }
+
+      const fileNameComparison = compareTextValues(left.fileName, right.fileName, 'asc')
+      if (fileNameComparison) {
+        return fileNameComparison
+      }
+
+      const folderPathComparison = compareTextValues(left.folderPath, right.folderPath, 'asc')
+      if (folderPathComparison) {
+        return folderPathComparison
+      }
+
+      const archivePathComparison = compareTextValues(left.archivePath || '', right.archivePath || '', 'asc')
+      if (archivePathComparison) {
+        return archivePathComparison
+      }
+
+      const archiveEntryPathComparison = compareTextValues(left.archiveEntryPath || '', right.archiveEntryPath || '', 'asc')
+      if (archiveEntryPathComparison) {
+        return archiveEntryPathComparison
+      }
+
+      const orderComparison = compareNumberValues(left.order, right.order, 'asc')
+      if (orderComparison) {
+        return orderComparison
+      }
+
+      return compareTextValues(left.messageId, right.messageId, 'asc')
+    }
+    case 'subject-asc':
+    case 'subject-desc': {
+      const comparison = compareTextValues(
+        getDocumentSubjectSortText(left),
+        getDocumentSubjectSortText(right),
+        sort.endsWith('asc') ? 'asc' : 'desc'
+      )
+      return comparison || compareDefaultDocuments(left, right)
+    }
+    case 'sender-asc':
+    case 'sender-desc': {
+      const comparison = compareTextValues(
+        getDocumentSenderSortText(left),
+        getDocumentSenderSortText(right),
+        sort.endsWith('asc') ? 'asc' : 'desc'
+      )
+      return comparison || compareDefaultDocuments(left, right)
+    }
+    case 'location-asc':
+    case 'location-desc': {
+      const comparison = compareTextValues(
+        getDocumentLocationSortText(left),
+        getDocumentLocationSortText(right),
+        sort.endsWith('asc') ? 'asc' : 'desc'
+      )
+      return comparison || compareDefaultDocuments(left, right)
+    }
+    case 'date-asc':
+    case 'date-desc':
+    default: {
+      const comparison = compareNumberValues(
+        left.sortDateMs,
+        right.sortDateMs,
+        sort === 'date-asc' ? 'asc' : 'desc'
+      )
+      return comparison || compareDefaultDocuments(left, right)
+    }
+  }
 }
 
 function buildSearchClause(term: { text: string; phrase: boolean }): Record<string, unknown> {
@@ -743,11 +799,29 @@ function buildFilterMatch(
     if (options.mailboxKey) {
       allowedMailboxKeys.push(normalizeText(options.mailboxKey))
     }
-  } else if (options.scope === 'search') {
+  }
+
+  const scopePathClauses: Record<string, unknown>[] = []
+  if (options.scope === 'search') {
     const scopePath = normalizeText(options.scopePath)
     if (scopePath) {
-      filter.scopePath = scopePath
+      scopePathClauses.push({ scopePath })
     }
+  }
+
+  const casePath = normalizeText(options.casePath)
+  if (casePath) {
+    scopePathClauses.push({
+      scopePath: {
+        $regex: `^${escapeRegex(casePath)}(?:/|$)`
+      }
+    })
+  }
+
+  if (scopePathClauses.length === 1) {
+    Object.assign(filter, scopePathClauses[0])
+  } else if (scopePathClauses.length > 1) {
+    filter.$and = scopePathClauses
   }
 
   if (options.mailOnly) {
@@ -805,30 +879,107 @@ function buildFilterMatch(
 
   const searchExpression = buildSearchExpression(options.query, options.mode)
   if (Object.keys(searchExpression).length) {
-    Object.assign(filter, searchExpression)
+    if (filter.$and) {
+      ;(filter.$and as Record<string, unknown>[]).push(searchExpression)
+    } else {
+      Object.assign(filter, searchExpression)
+    }
   }
 
   return filter
 }
 
 function createSortSpec(sort: string): Record<string, 1 | -1> {
-  if (sort === 'order') {
-    return {
-      scopeLabel: 1,
-      fileName: 1,
-      folderPath: 1,
-      order: 1,
-      messageId: 1
-    }
-  }
-
-  return {
-    sortDateMs: -1,
-    scopeLabel: 1,
-    fileName: 1,
-    folderPath: 1,
-    order: 1,
-    messageId: 1
+  switch (sort) {
+    case 'order':
+      return {
+        scopeLabel: 1,
+        fileName: 1,
+        folderPath: 1,
+        archivePath: 1,
+        archiveEntryPath: 1,
+        order: 1,
+        messageId: 1
+      }
+    case 'subject-asc':
+      return {
+        subject: 1,
+        originalSubject: 1,
+        scopeLabel: 1,
+        fileName: 1,
+        folderPath: 1,
+        order: 1,
+        messageId: 1
+      }
+    case 'subject-desc':
+      return {
+        subject: -1,
+        originalSubject: -1,
+        scopeLabel: 1,
+        fileName: 1,
+        folderPath: 1,
+        order: 1,
+        messageId: 1
+      }
+    case 'sender-asc':
+      return {
+        senderName: 1,
+        senderEmailAddress: 1,
+        scopeLabel: 1,
+        fileName: 1,
+        folderPath: 1,
+        order: 1,
+        messageId: 1
+      }
+    case 'sender-desc':
+      return {
+        senderName: -1,
+        senderEmailAddress: -1,
+        scopeLabel: 1,
+        fileName: 1,
+        folderPath: 1,
+        order: 1,
+        messageId: 1
+      }
+    case 'location-asc':
+      return {
+        scopeLabel: 1,
+        folderPath: 1,
+        archivePath: 1,
+        archiveEntryPath: 1,
+        fileName: 1,
+        order: 1,
+        messageId: 1
+      }
+    case 'location-desc':
+      return {
+        scopeLabel: -1,
+        folderPath: -1,
+        archivePath: -1,
+        archiveEntryPath: -1,
+        fileName: -1,
+        order: -1,
+        messageId: -1
+      }
+    case 'date-asc':
+      return {
+        sortDateMs: 1,
+        scopeLabel: 1,
+        fileName: 1,
+        folderPath: 1,
+        order: 1,
+        messageId: 1
+      }
+    case 'date-desc':
+    default:
+      return {
+        sortDateMs: -1,
+        scopeLabel: 1,
+        fileName: 1,
+        folderPath: 1,
+        order: 1,
+        messageId: 1
+      }
   }
 }
 
@@ -928,6 +1079,7 @@ export function buildSearchIndexDocumentsFromSession(
 
   for (const message of session.messages.values()) {
     const bodySearchText = normalizeExactValue(session.searchTextByMessageId.get(message.id) || '')
+    const snapshot = session.messageDetailSnapshots.get(message.id) || null
     documents.push(
       toDocument(
         {
@@ -965,7 +1117,8 @@ export function buildSearchIndexDocumentsFromSession(
           importance: message.importance,
           hasAttachments: message.hasAttachments,
           isRead: message.isRead,
-          isMailLike: message.isMailLike
+          isMailLike: message.isMailLike,
+          mailboxDetail: snapshot ? compactMailboxDetail(snapshot) : undefined
         },
         bodySearchText,
         reviewStatesByMessageId.get(message.id) || []
@@ -1108,7 +1261,6 @@ export class MemorySearchIndexStore implements SearchIndexStore {
   public kind: 'memory' = 'memory'
   public isPersistent = false
   private readonly documents = new Map<string, Map<string, SearchIndexDocument>>()
-  private readonly mailboxDetails = new Map<string, Map<string, MessageDetail>>()
   private readonly hiddenRules = new MemoryHiddenRuleStore()
   private readonly fingerprints = new Map<string, SearchIndexFileFingerprint>()
 
@@ -1125,43 +1277,24 @@ export class MemorySearchIndexStore implements SearchIndexStore {
     this.documents.set(key, records)
   }
 
+  async upsertMailboxDocument(mailboxKey: string, document: SearchIndexDocument): Promise<void> {
+    const key = normalizeText(mailboxKey)
+    const mailbox = this.documents.get(key) || new Map<string, SearchIndexDocument>()
+    const [normalizedDocument] = dedupeSearchIndexDocuments([document])
+    if (!normalizedDocument) {
+      return
+    }
+    mailbox.set(normalizedDocument.messageId, {
+      ...normalizedDocument,
+      mailboxKey: key,
+      sourceType: normalizeSourceType(normalizedDocument.sourceType)
+    })
+    this.documents.set(key, mailbox)
+  }
+
   async deleteMailboxDocuments(mailboxKey: string): Promise<void> {
     const key = normalizeText(mailboxKey)
     this.documents.delete(key)
-    this.mailboxDetails.delete(key)
-  }
-
-  async replaceMailboxDetails(mailboxKey: string, details: MessageDetail[]): Promise<void> {
-    const key = normalizeText(mailboxKey)
-    const records = new Map<string, MessageDetail>()
-    for (const record of dedupeMailboxDetailSnapshots(key, details)) {
-      records.set(record.messageId, cloneMailboxDetail(record.detail))
-    }
-    this.mailboxDetails.set(key, records)
-  }
-
-  async upsertMailboxDetail(mailboxKey: string, detail: MessageDetail): Promise<void> {
-    const record = buildMailboxDetailSnapshotRecord(mailboxKey, detail)
-    if (!record) {
-      return
-    }
-    const key = normalizeText(mailboxKey)
-    const mailbox = this.mailboxDetails.get(key) || new Map<string, MessageDetail>()
-    mailbox.set(record.messageId, cloneMailboxDetail(record.detail))
-    this.mailboxDetails.set(key, mailbox)
-  }
-
-  async deleteMailboxDetails(mailboxKey: string): Promise<void> {
-    this.mailboxDetails.delete(normalizeText(mailboxKey))
-  }
-
-  async findMailboxDetail(mailboxKey: string, messageId: string): Promise<MessageDetail | null> {
-    const mailbox = this.mailboxDetails.get(normalizeText(mailboxKey))
-    if (!mailbox) {
-      return null
-    }
-    const detail = mailbox.get(normalizeText(messageId))
-    return detail ? cloneMailboxDetail(detail) : null
   }
 
   async updateReviewState(
@@ -1201,7 +1334,6 @@ export class MemorySearchIndexStore implements SearchIndexStore {
 
   async clearAllDocuments(): Promise<void> {
     this.documents.clear()
-    this.mailboxDetails.clear()
   }
 
   async listFileFingerprints(source: SearchIndexRefreshSource): Promise<SearchIndexFileFingerprint[]> {
@@ -1304,7 +1436,6 @@ export class MemorySearchIndexStore implements SearchIndexStore {
 
   async close(): Promise<void> {
     this.documents.clear()
-    this.mailboxDetails.clear()
     this.hiddenRules.clear()
     this.fingerprints.clear()
   }
@@ -1327,6 +1458,17 @@ function matchesDocument(
     }
   } else if (options.scope === 'search') {
     if (options.scopePath && record.scopePath !== normalizeText(options.scopePath)) {
+      return false
+    }
+  }
+
+  const casePath = normalizeText(options.casePath)
+  if (casePath) {
+    const normalizedScopePath = normalizeText(record.scopePath)
+    if (
+      !normalizedScopePath ||
+      (normalizedScopePath !== casePath && !normalizedScopePath.startsWith(`${casePath}/`))
+    ) {
       return false
     }
   }
@@ -1486,13 +1628,11 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     private readonly documents: SearchIndexCollectionLike,
     private readonly rules: HiddenRuleCollectionLike,
     private readonly fingerprints: FileFingerprintCollectionLike,
-    private readonly mailboxDetails?: MailboxDetailCollectionLike,
     private readonly client?: MongoClient,
     private readonly dbName = 'pst-extractor',
     private readonly documentsCollectionName = DEFAULT_INDEX_COLLECTION,
     private readonly rulesCollectionName = DEFAULT_RULE_COLLECTION,
-    private readonly fingerprintsCollectionName = DEFAULT_FINGERPRINT_COLLECTION,
-    private readonly mailboxDetailsCollectionName = DEFAULT_MAILBOX_DETAIL_COLLECTION
+    private readonly fingerprintsCollectionName = DEFAULT_FINGERPRINT_COLLECTION
   ) {}
 
   static async connect(
@@ -1510,9 +1650,6 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     const fingerprints = db.collection<SearchIndexFileFingerprint>(
       options.fingerprintsCollectionName || DEFAULT_FINGERPRINT_COLLECTION
     )
-    const mailboxDetails = db.collection<MailboxDetailSnapshotRecord>(
-      options.mailboxDetailsCollectionName || DEFAULT_MAILBOX_DETAIL_COLLECTION
-    )
     await documents.createIndex?.({ mailboxKey: 1, messageId: 1 }, { unique: true })
     await documents.createIndex?.({ messageId: 1 })
     await documents.createIndex?.({ sourceType: 1, scopePath: 1 })
@@ -1528,19 +1665,15 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     await rules.createIndex?.({ updatedAt: -1 })
     await fingerprints.createIndex?.({ source: 1, mailboxKey: 1 }, { unique: true })
     await fingerprints.createIndex?.({ source: 1, updatedAt: -1 })
-    await mailboxDetails.createIndex?.({ mailboxKey: 1, messageId: 1 }, { unique: true })
-    await mailboxDetails.createIndex?.({ mailboxKey: 1, updatedAt: -1 })
     return new MongoSearchIndexStore(
       documents as unknown as SearchIndexCollectionLike,
       rules as unknown as HiddenRuleCollectionLike,
       fingerprints as unknown as FileFingerprintCollectionLike,
-      mailboxDetails as unknown as MailboxDetailCollectionLike,
       client,
       dbName,
       options.documentsCollectionName || DEFAULT_INDEX_COLLECTION,
       options.rulesCollectionName || DEFAULT_RULE_COLLECTION,
-      options.fingerprintsCollectionName || DEFAULT_FINGERPRINT_COLLECTION,
-      options.mailboxDetailsCollectionName || DEFAULT_MAILBOX_DETAIL_COLLECTION
+      options.fingerprintsCollectionName || DEFAULT_FINGERPRINT_COLLECTION
     )
   }
 
@@ -1560,70 +1693,31 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     )
   }
 
-  async deleteMailboxDocuments(mailboxKey: string): Promise<void> {
+  async upsertMailboxDocument(mailboxKey: string, document: SearchIndexDocument): Promise<void> {
     const key = normalizeText(mailboxKey)
-    await this.documents.deleteMany({ mailboxKey: key })
-    if (this.mailboxDetails) {
-      await this.mailboxDetails.deleteMany({ mailboxKey: key })
-    }
-  }
-
-  async replaceMailboxDetails(mailboxKey: string, details: MessageDetail[]): Promise<void> {
-    if (!this.mailboxDetails) {
+    const [normalizedDocument] = dedupeSearchIndexDocuments([document])
+    if (!normalizedDocument) {
       return
     }
-
-    const key = normalizeText(mailboxKey)
-    await this.mailboxDetails.deleteMany({ mailboxKey: key })
-    const uniqueDetails = dedupeMailboxDetailSnapshots(key, details)
-    if (!uniqueDetails.length) {
-      return
-    }
-    await this.mailboxDetails.insertMany(uniqueDetails)
-  }
-
-  async upsertMailboxDetail(mailboxKey: string, detail: MessageDetail): Promise<void> {
-    if (!this.mailboxDetails) {
-      return
-    }
-
-    const record = buildMailboxDetailSnapshotRecord(mailboxKey, detail)
-    if (!record) {
-      return
-    }
-
-    await this.mailboxDetails.updateOne(
+    await this.documents.updateOne(
       {
-        mailboxKey: record.mailboxKey,
-        messageId: record.messageId
+        mailboxKey: key,
+        messageId: normalizedDocument.messageId
       },
       {
-        $set: record
+        $set: {
+          ...normalizedDocument,
+          mailboxKey: key,
+          sourceType: normalizeSourceType(normalizedDocument.sourceType)
+        }
       },
       { upsert: true }
     )
   }
 
-  async deleteMailboxDetails(mailboxKey: string): Promise<void> {
-    if (!this.mailboxDetails) {
-      return
-    }
-    await this.mailboxDetails.deleteMany({ mailboxKey: normalizeText(mailboxKey) })
-  }
-
-  async findMailboxDetail(mailboxKey: string, messageId: string): Promise<MessageDetail | null> {
-    if (!this.mailboxDetails) {
-      return null
-    }
-
-    const record = await this.mailboxDetails.findOne({
-      mailboxKey: normalizeText(mailboxKey),
-      messageId: normalizeText(messageId)
-    })
-    if (!record || !record.detail) {
-      return null
-    }
-    return cloneMailboxDetail(record.detail)
+  async deleteMailboxDocuments(mailboxKey: string): Promise<void> {
+    const key = normalizeText(mailboxKey)
+    await this.documents.deleteMany({ mailboxKey: key })
   }
 
   async listFileFingerprints(source: SearchIndexRefreshSource): Promise<SearchIndexFileFingerprint[]> {
@@ -1729,9 +1823,6 @@ export class MongoSearchIndexStore implements SearchIndexStore {
 
   async clearAllDocuments(): Promise<void> {
     await this.documents.deleteMany({})
-    if (this.mailboxDetails) {
-      await this.mailboxDetails.deleteMany({})
-    }
   }
 
   async listHiddenRules(): Promise<HiddenRuleRecord[]> {
@@ -1795,40 +1886,6 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     }
 
     await stagingDocuments.deleteMany({})
-  }
-
-  async promoteStagedMailboxDetails(
-    stagingMailboxDetailsCollectionName: string,
-    changedMailboxKeys: string[] = [],
-    removedMailboxKeys: string[] = []
-  ): Promise<void> {
-    if (!this.client || !this.mailboxDetails) {
-      return
-    }
-
-    const stagingName = normalizeText(stagingMailboxDetailsCollectionName)
-    if (!stagingName || stagingName === this.mailboxDetailsCollectionName) {
-      return
-    }
-
-    const db = this.client.db(this.dbName)
-    const stagingMailboxDetails = db.collection<MailboxDetailSnapshotRecord>(stagingName)
-    const activeMailboxKeys = uniqueTextValues(changedMailboxKeys)
-    const removedKeys = uniqueTextValues(removedMailboxKeys)
-
-    for (const mailboxKey of removedKeys) {
-      await this.mailboxDetails.deleteMany({ mailboxKey })
-    }
-
-    for (const mailboxKey of activeMailboxKeys) {
-      const stagedDetails = await stagingMailboxDetails.find({ mailboxKey }).sort({ messageId: 1 }).toArray()
-      await this.mailboxDetails.deleteMany({ mailboxKey })
-      if (stagedDetails.length) {
-        await this.mailboxDetails.insertMany(stagedDetails)
-      }
-    }
-
-    await stagingMailboxDetails.deleteMany({})
   }
 
   async search(options: SearchIndexSearchOptions): Promise<SearchIndexPage> {
@@ -2073,14 +2130,6 @@ export async function refreshSearchIndexSourceFromCatalog(
           },
           reviewRecords
         )
-        try {
-          await searchIndexStore.replaceMailboxDetails(
-            fingerprint.mailboxKey,
-            [...session.messageDetailSnapshots.values()]
-          )
-        } catch (error) {
-          warnOnce(file.scopeLabel, file.fileName, error)
-        }
       } else {
         const reviewRecords = await reviewStore.listReviews(fingerprint.mailboxKey)
         const archiveItems = await extractArchiveBundleItems(fingerprint.mailboxKey, file.scopePath, file.fileName)

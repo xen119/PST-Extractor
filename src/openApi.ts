@@ -745,7 +745,8 @@ function searchResultItemSchema(): Record<string, unknown> {
           scopePath: { type: 'string' },
           scopeLabel: { type: 'string' },
           fileName: { type: 'string' },
-          mailboxName: { type: 'string' }
+          mailboxName: { type: 'string' },
+          mailboxDetail: messageDetailSchema()
         }
       }
     ]
@@ -1310,6 +1311,7 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
             { name: 'sourceType', in: 'query', required: false, schema: { type: 'string' } },
             { name: 'scope', in: 'query', required: false, schema: { type: 'string' } },
             { name: 'scopePath', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'casePath', in: 'query', required: false, schema: { type: 'string' } },
             { name: 'sessionId', in: 'query', required: false, schema: { type: 'string' } },
             { name: 'folderId', in: 'query', required: false, schema: { type: 'string' } },
             { name: 'query', in: 'query', required: false, schema: { type: 'string' } },
@@ -1592,7 +1594,25 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
               description: 'Legacy fallback if the query does not include + or |.'
             },
             { name: 'mailOnly', in: 'query', required: false, schema: { type: 'boolean' } },
-            { name: 'sort', in: 'query', required: false, schema: { type: 'string', enum: ['date-desc', 'order'] } },
+            {
+              name: 'sort',
+              in: 'query',
+              required: false,
+              schema: {
+                type: 'string',
+                enum: [
+                  'date-asc',
+                  'date-desc',
+                  'location-asc',
+                  'location-desc',
+                  'order',
+                  'sender-asc',
+                  'sender-desc',
+                  'subject-asc',
+                  'subject-desc'
+                ]
+              }
+            },
             { name: 'page', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
             { name: 'pageSize', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 200 } },
             { name: 'reviewFlagged', in: 'query', required: false, schema: { type: 'boolean' } },

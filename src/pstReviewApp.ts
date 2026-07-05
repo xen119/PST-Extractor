@@ -1612,72 +1612,82 @@ function buildReviewedSummary(
   }
 }
 
-function buildReviewedDetail(
-  detail: MessageDetail,
-  review: ReviewState | null
-): ReviewedMessageDetail {
-  return {
-    ...detail,
-    review: normalizeReviewState(review)
-  }
-}
-
-async function resolveMailboxMessageDetail(
-  session: SessionRecord,
-  messageId: string,
-  searchIndexStore: SearchIndexStore
-): Promise<MessageDetail> {
-  const summary = session.index.messages.get(messageId) || null
-  const snapshot = await searchIndexStore
-    .findMailboxDetail(session.mailboxKey, messageId)
-    .catch(() => null)
-
-  if (snapshot) {
-    try {
-      return applyMailboxAttachmentDownloadUrls(snapshot, session.id)
-    } catch (error) {
-      if (!summary) {
-        throw error
-      }
+  function buildReviewedDetail(
+    detail: MessageDetail,
+    review: ReviewState | null
+  ): ReviewedMessageDetail {
+    return {
+      ...detail,
+      review: normalizeReviewState(review)
     }
   }
 
+  function buildMailboxSearchPreviewDetail(item: SearchIndexDocument): MessageDetail | undefined {
+    if (item.sourceType !== 'mailbox' || !item.mailboxDetail) {
+      return undefined
+    }
+
+    return applyItemAttachmentDownloadUrls(
+      buildReviewedDetail(item.mailboxDetail, item.review),
+      item.id || item.messageId
+    )
+  }
+
+  async function resolveMailboxMessageDetail(
+    session: SessionRecord,
+    messageId: string
+  ): Promise<MessageDetail> {
+  const summary = session.index.messages.get(messageId) || null
   if (!summary) {
     throw createAppError(404, `Unknown message: ${messageId}`)
   }
 
-  const detail = buildMessageDetailFromSession(session.index, messageId, 1)
-  try {
-    await searchIndexStore.upsertMailboxDetail(session.mailboxKey, detail)
-  } catch {
-    // Ignore snapshot backfill failures and keep serving the live PST detail.
-  }
-  return applyMailboxAttachmentDownloadUrls(detail, session.id)
+  return applyMailboxAttachmentDownloadUrls(
+    buildMessageDetailFromSession(session.index, messageId, 1),
+    session.id
+  )
 }
 
 async function resolveMailboxItemDetail(
   item: SearchIndexDocument,
   reviewStore: ReviewStore,
   reviewerUsername: string,
+  pstRootDir: string,
   searchIndexStore: SearchIndexStore
 ): Promise<MessageDetail> {
-  const snapshot = await searchIndexStore.findMailboxDetail(item.mailboxKey, item.messageId).catch(() => null)
-  if (!snapshot) {
-    throw createAppError(500, 'Mailbox detail snapshot unavailable')
+  const snapshot = item.mailboxDetail || null
+  const review = await reviewStore.getReview(item.mailboxKey, item.messageId, reviewerUsername)
+
+  if (snapshot) {
+    return applyItemAttachmentDownloadUrls(buildReviewedDetail(snapshot, review), item.id || item.messageId)
   }
 
-  const review = await reviewStore.getReview(item.mailboxKey, item.messageId, reviewerUsername)
-  return applyItemAttachmentDownloadUrls(buildReviewedDetail(snapshot, review), item.id || item.messageId)
+  if (!item.scopePath || !item.fileName) {
+    throw createAppError(500, 'Mailbox preview data unavailable; rebuild the search index')
+  }
+
+  const sessionIndex = openPstMailbox(pstRootDir, item.scopePath, item.fileName)
+  const detail = buildMessageDetailFromSession(sessionIndex, item.messageId, 1)
+  try {
+    await searchIndexStore.upsertMailboxDocument(item.mailboxKey, {
+      ...item,
+      mailboxDetail: detail
+    })
+  } catch {
+    // Ignore backfill failures and keep serving the recovered detail.
+  }
+  return applyItemAttachmentDownloadUrls(buildReviewedDetail(detail, review), item.id || item.messageId)
 }
 
 async function resolveSearchItemDetail(
   item: SearchIndexDocument,
   reviewStore: ReviewStore,
   reviewerUsername: string,
+  pstRootDir: string,
   searchIndexStore: SearchIndexStore
 ): Promise<MessageDetail> {
   if (item.sourceType === 'mailbox') {
-    return resolveMailboxItemDetail(item, reviewStore, reviewerUsername, searchIndexStore)
+    return resolveMailboxItemDetail(item, reviewStore, reviewerUsername, pstRootDir, searchIndexStore)
   }
 
   const review = await reviewStore.getReview(item.mailboxKey, item.messageId, reviewerUsername)
@@ -1820,8 +1830,7 @@ async function buildMessageDetailResponse(
   session: SessionRecord,
   messageId: string,
   reviewStore: ReviewStore,
-  reviewerUsername: string,
-  searchIndexStore: SearchIndexStore
+  reviewerUsername: string
 ): Promise<ReviewedMessageDetail> {
   const cacheKey = buildMailboxDetailCacheKey(messageId, reviewerUsername)
   const cached = session.messageDetailCache.get(cacheKey)
@@ -1832,7 +1841,7 @@ async function buildMessageDetailResponse(
   const detailPromise = (async () => {
     const [review, detail] = await Promise.all([
       reviewStore.getReview(session.filePath, messageId, reviewerUsername),
-      resolveMailboxMessageDetail(session, messageId, searchIndexStore)
+      resolveMailboxMessageDetail(session, messageId)
     ])
     return buildReviewedDetail(detail, review)
   })()
@@ -2387,6 +2396,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       scopeLabel: item.scopeLabel,
       fileName: item.fileName,
       mailboxName: item.mailboxName,
+      mailboxDetail: buildMailboxSearchPreviewDetail(item),
       contentType: item.contentType,
       downloadFilename: item.downloadFilename
     }
@@ -5280,12 +5290,32 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       const sourceType = parseSearchSourceType(req.query.sourceType)
       const requestedScope = parseSearchScope(req.query.scope) as SearchScope
       const requestedScopePath = normalizeScopePath(req.query.scopePath)
+      const requestedCasePath = normalizeScopePath(req.query.casePath)
       const sessionId = normalizeText(req.query.sessionId)
       const scope = sourceType === 'mailbox' ? requestedScope : 'search'
       let scopePath = ''
       let scopeLabel = 'All cases/searches'
       let mailboxKey = ''
       let allowedMailboxKeys: string[] = []
+
+      if (requestedCasePath && !isScopePathAllowed(requestedCasePath, allowedCasePaths, allowAllCases)) {
+        recordAuditEvent({
+          req,
+          session: authSession,
+          action: 'search.execute',
+          target: requestedCasePath,
+          outcome: 'denied',
+          metadata: {
+            reason: 'Case access required',
+            casePath: requestedCasePath
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Case access required'
+        })
+        return
+      }
+
       const mailboxSearchFingerprints =
         sourceType === 'mailbox' && scope !== 'pst'
           ? await searchIndexStore.listFileFingerprints('mailboxes')
@@ -5397,6 +5427,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         allowedMailboxKeys,
         reviewerUsername,
         sourceType,
+        casePath: requestedCasePath || undefined,
         query: filters.query,
         mode: filters.mode,
         mailOnly: filters.mailOnly,
@@ -5477,7 +5508,13 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       }
 
       const reviewerUsername = getReviewOwnerUsername(authSession)
-      const detail = await resolveSearchItemDetail(item, reviewStore, reviewerUsername, searchIndexStore)
+      const detail = await resolveSearchItemDetail(
+        item,
+        reviewStore,
+        reviewerUsername,
+        pstRootDir,
+        searchIndexStore
+      )
 
       recordAuditEvent({
         req,
@@ -6159,8 +6196,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         session,
         messageId,
         reviewStore,
-        reviewerUsername,
-        searchIndexStore
+        reviewerUsername
       )
       recordAuditEvent({
         req,
@@ -6193,8 +6229,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         session,
         messageId,
         reviewStore,
-        reviewerUsername,
-        searchIndexStore
+        reviewerUsername
       )
       const fields = normalizeExtractionFields(req.query.fields)
       recordAuditEvent({
@@ -6241,10 +6276,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       if (!isSummaryOnlyExtraction(fields)) {
         await Promise.all(
           page.items.map(async (item) => {
-            detailByMessageId.set(
-              item.id,
-              await resolveMailboxMessageDetail(session, item.id, searchIndexStore)
-            )
+            detailByMessageId.set(item.id, await resolveMailboxMessageDetail(session, item.id))
           })
         )
       }
@@ -6302,8 +6334,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         session,
         messageId,
         reviewStore,
-        reviewerUsername,
-        searchIndexStore
+        reviewerUsername
       )
       const fileName = `${safeDownloadName(detail.subject || 'message', 'message')}.json`
       responseBinary(

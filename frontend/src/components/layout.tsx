@@ -15,6 +15,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  ScanLine,
   ShieldAlert,
   User,
   Tag as TagIcon
@@ -211,6 +212,7 @@ interface SidebarProps {
   onCaseChange: (value: string) => void
   onScopeChange: (value: string) => void
   onSourceTypeChange: (value: 'mailbox' | 'teams' | 'sharepoint') => void
+  onOpenAllItems?: () => void
   canRefreshSearchIndex: boolean
   searchIndexRefreshStatuses: Partial<Record<SearchIndexRefreshSource, SearchIndexRefreshStatus | null>>
   searchIndexRefreshBusyBySource: Partial<Record<SearchIndexRefreshSource, boolean>>
@@ -235,6 +237,7 @@ export function Sidebar({
   onCaseChange,
   onScopeChange,
   onSourceTypeChange,
+  onOpenAllItems,
   canRefreshSearchIndex,
   searchIndexRefreshStatuses,
   searchIndexRefreshBusyBySource,
@@ -281,47 +284,59 @@ export function Sidebar({
           <div className="panel-title">Case / Search</div>
           <div className="text-sm text-[color:var(--muted)]">Browse and open a mailbox</div>
         </div>
-        {canRefreshSearchIndex ? (
-          <div className="flex flex-wrap items-center gap-2">
-            {[
-              {
-                key: 'mailboxes' as const,
-                label: 'Mailboxes',
-                status: mailboxesRefreshStatus,
-                busy: mailboxesRefreshBusy
-              },
-              {
-                key: 'items' as const,
-                label: 'Items',
-                status: itemsRefreshStatus,
-                busy: itemsRefreshBusy
-              }
-            ].map((entry) => (
-              <div key={entry.key} className="flex items-center gap-2">
-                {entry.status?.status === 'running' ? (
-                  <span className="inline-flex items-center gap-2 rounded-full border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-3 py-1 text-xs font-medium text-[color:var(--muted)]">
-                    <RefreshCw className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                    Reindexing {entry.label.toLowerCase()}
-                  </span>
-                ) : entry.status?.status === 'failed' ? (
-                  <span className="inline-flex items-center gap-2 rounded-full border border-[color:rgba(220,38,38,0.2)] bg-[color:rgba(220,38,38,0.08)] px-3 py-1 text-xs font-medium text-[color:var(--danger)]">
-                    <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />
-                    {entry.label} reindex failed
-                  </span>
-                ) : null}
-                <button
-                  type="button"
-                  className="inline-flex items-center gap-2 rounded-full border border-[color:var(--line)] bg-[color:var(--surface-strong)] px-3 py-1.5 text-xs font-medium text-[color:var(--text)] transition hover:bg-[color:var(--surface-soft)] focus:outline-none focus:ring-2 focus:ring-[color:var(--focus-ring)] disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={entry.busy || entry.status?.status === 'running'}
-                  onClick={() => onRefreshSearchIndex(entry.key)}
-                >
-                  <RefreshCw className={cn('h-3.5 w-3.5', entry.status?.status === 'running' && 'animate-spin')} aria-hidden="true" />
-                  Reindex {entry.label.toLowerCase()}
-                </button>
-              </div>
-            ))}
-          </div>
-        ) : null}
+        <div className="flex flex-wrap items-center gap-2">
+          {canRefreshSearchIndex ? (
+            <>
+              {[
+                {
+                  key: 'mailboxes' as const,
+                  label: 'Mailboxes',
+                  status: mailboxesRefreshStatus,
+                  busy: mailboxesRefreshBusy
+                },
+                {
+                  key: 'items' as const,
+                  label: 'Items',
+                  status: itemsRefreshStatus,
+                  busy: itemsRefreshBusy
+                }
+              ].map((entry) => (
+                <div key={entry.key} className="flex items-center gap-2">
+                  {entry.status?.status === 'running' ? (
+                    <span className="inline-flex items-center gap-2 rounded-full border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-3 py-1 text-xs font-medium text-[color:var(--muted)]">
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                      Reindexing {entry.label.toLowerCase()}
+                    </span>
+                  ) : entry.status?.status === 'failed' ? (
+                    <span className="inline-flex items-center gap-2 rounded-full border border-[color:rgba(220,38,38,0.2)] bg-[color:rgba(220,38,38,0.08)] px-3 py-1 text-xs font-medium text-[color:var(--danger)]">
+                      <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />
+                      {entry.label} reindex failed
+                    </span>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-2 rounded-full border border-[color:var(--line)] bg-[color:var(--surface-strong)] px-3 py-1.5 text-xs font-medium text-[color:var(--text)] transition hover:bg-[color:var(--surface-soft)] focus:outline-none focus:ring-2 focus:ring-[color:var(--focus-ring)] disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={entry.busy || entry.status?.status === 'running'}
+                    onClick={() => onRefreshSearchIndex(entry.key)}
+                  >
+                    <RefreshCw className={cn('h-3.5 w-3.5', entry.status?.status === 'running' && 'animate-spin')} aria-hidden="true" />
+                    Reindex {entry.label.toLowerCase()}
+                  </button>
+                </div>
+              ))}
+            </>
+          ) : null}
+          {onOpenAllItems ? (
+            <button
+              type="button"
+              className="inline-flex items-center gap-2 rounded-full border border-[color:var(--line)] bg-[color:var(--surface-strong)] px-3 py-1.5 text-xs font-medium text-[color:var(--text)] transition hover:bg-[color:var(--surface-soft)] focus:outline-none focus:ring-2 focus:ring-[color:var(--focus-ring)]"
+              onClick={onOpenAllItems}
+            >
+              <ScanLine className="h-3.5 w-3.5" aria-hidden="true" />
+              All items
+            </button>
+          ) : null}
+        </div>
       </div>
       {[mailboxesRefreshStatus, itemsRefreshStatus].find((status) => status?.status === 'failed' && status.error) ? (
         <div className="border-t border-[color:var(--line)] px-4 py-3 text-xs leading-5 text-[color:var(--danger)]">

@@ -265,6 +265,7 @@ export const api = {
     reviewTagged?: boolean
     reviewTag?: string
     scopePath?: string
+    casePath?: string
     sessionId?: string
   }) => {
     const query = buildQuery({
@@ -280,6 +281,7 @@ export const api = {
       reviewTagged: params.reviewTagged ? '1' : undefined,
       reviewTag: params.reviewTag,
       scopePath: params.scopePath,
+      casePath: params.casePath,
       sessionId: params.sessionId
     })
     return requestJson<SearchResponse>(query ? `/api/search?${query}` : '/api/search', {
