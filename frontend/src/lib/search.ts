@@ -49,6 +49,13 @@ export function resolveSelectionScope(selectedCasePath: string, selectedScopePat
   const normalizedCasePath = normalizeText(selectedCasePath)
   const normalizedScopePath = normalizeText(selectedScopePath)
 
+  if (!normalizedCasePath) {
+    return {
+      scope: 'all',
+      scopePath: ''
+    }
+  }
+
   if (normalizedScopePath) {
     return {
       scope: 'search',

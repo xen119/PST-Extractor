@@ -80,6 +80,17 @@ function stageFixture(sourcePath: string, targetPath: string): void {
   }
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve
+    reject = promiseReject
+  })
+
+  return { promise, resolve, reject }
+}
+
 describe('search index cache', () => {
   it('supports AND/OR search and exact hide rules from the cached documents', async () => {
     const store = new MemorySearchIndexStore()
@@ -783,6 +794,89 @@ describe('search index cache', () => {
       expect(thirdPlan.removedCount).toBeGreaterThan(0)
       expect(store.mailboxDeleteCount).toBeGreaterThan(0)
       expect(await store.findDocumentById(mailboxItem.id || mailboxItem.messageId)).toBeNull()
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true })
+    }
+  })
+
+  it('persists each refreshed file before the next file finishes', async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pst-extractor-refresh-live-commit-'))
+    try {
+      const scopeDir = path.join(rootDir, 'Case1', 'Search1')
+      fs.mkdirSync(scopeDir, { recursive: true })
+
+      const firstFilePath = path.join(scopeDir, 'first.pst')
+      const secondFilePath = path.join(scopeDir, 'second.pst')
+      stageFixture(enronPath, firstFilePath)
+      stageFixture(enronPath, secondFilePath)
+
+      const reviewStore = {
+        kind: 'memory' as const,
+        isPersistent: false,
+        async listReviews() {
+          return []
+        }
+      } as ReviewStore
+
+      const secondReplaceStarted = createDeferred<void>()
+      const releaseSecondReplace = createDeferred<void>()
+
+      class BlockingSearchIndexStore extends MemorySearchIndexStore {
+        private replaceCount = 0
+
+        override async replaceMailboxDocuments(
+          mailboxKey: string,
+          documents: Parameters<MemorySearchIndexStore['replaceMailboxDocuments']>[1]
+        ): Promise<void> {
+          this.replaceCount += 1
+          if (this.replaceCount === 2) {
+            secondReplaceStarted.resolve()
+            await releaseSecondReplace.promise
+            throw new Error('synthetic second-file failure')
+          }
+          return super.replaceMailboxDocuments(mailboxKey, documents)
+        }
+      }
+
+      const store = new BlockingSearchIndexStore()
+      const refreshPromise = refreshSearchIndexSourceFromCatalog(
+        rootDir,
+        'mailboxes',
+        reviewStore,
+        store
+      )
+
+      await secondReplaceStarted.promise
+
+      const fingerprintsDuringRefresh = await store.listFileFingerprints('mailboxes')
+      expect(fingerprintsDuringRefresh).toHaveLength(1)
+      expect(fingerprintsDuringRefresh[0].fileName).toBe('first.pst')
+
+      const interimSearch = await store.search({
+        scope: 'all',
+        query: '',
+        mode: 'and',
+        mailOnly: true,
+        sort: 'date-desc',
+        page: 1,
+        pageSize: 50,
+        reviewFlaggedOnly: false,
+        reviewTaggedOnly: false,
+        reviewTag: ''
+      })
+      expect(interimSearch.total).toBeGreaterThan(0)
+      expect(interimSearch.items.some((item) => item.fileName === 'first.pst')).toBe(true)
+      expect(interimSearch.items.some((item) => item.fileName === 'second.pst')).toBe(false)
+
+      releaseSecondReplace.resolve()
+      const plan = await refreshPromise
+
+      expect(plan.changedCount).toBe(1)
+      expect(plan.failedCount).toBe(1)
+      expect(plan.mailboxCount).toBe(1)
+      expect(plan.fingerprints).toHaveLength(1)
+      expect(plan.fingerprints[0].fileName).toBe('first.pst')
+      expect(await store.findDocumentById(interimSearch.items[0].id || interimSearch.items[0].messageId)).toBeTruthy()
     } finally {
       fs.rmSync(rootDir, { recursive: true, force: true })
     }

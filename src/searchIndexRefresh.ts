@@ -50,7 +50,6 @@ interface RefreshJobContext {
   jobId: string
   trigger: SearchIndexRefreshTrigger
   startedAt: string
-  stagingDocumentsCollectionName: string
 }
 
 interface WorkerMessage {
@@ -110,18 +109,7 @@ function resolveWorkerScriptPath(): string {
   return candidates[candidates.length - 1]
 }
 
-function createStagingDocumentsCollectionName(source: SearchIndexRefreshSource, jobId: string): string {
-  return `pst_search_documents_staging_${source}_${jobId}`
-}
-
-function isMongoSearchIndexStore(store: SearchIndexStore): store is SearchIndexStore & {
-  kind: 'mongo'
-  promoteStagedDocuments?: (
-    stagingDocumentsCollectionName: string,
-    changedMailboxKeys?: string[],
-    removedMailboxKeys?: string[]
-  ) => Promise<void>
-} {
+function isMongoSearchIndexStore(store: SearchIndexStore): store is SearchIndexStore & { kind: 'mongo' } {
   return store.kind === 'mongo'
 }
 
@@ -150,8 +138,7 @@ function createWorkerTransport(
       PST_SEARCH_INDEX_REFRESH_JOB_ID: context.jobId,
       PST_SEARCH_INDEX_REFRESH_SOURCE: context.source,
       PST_SEARCH_INDEX_REFRESH_TRIGGER: context.trigger,
-      PST_SEARCH_INDEX_PST_ROOT_DIR: options.pstRootDir,
-      PST_SEARCH_INDEX_STAGING_DOCUMENTS_COLLECTION: context.stagingDocumentsCollectionName
+      PST_SEARCH_INDEX_PST_ROOT_DIR: options.pstRootDir
     }
 
     const worker = fork(resolveWorkerScriptPath(), [], {
@@ -233,24 +220,6 @@ export function createSearchIndexRefreshCoordinator(
   ])
   const activeJobs = new Map<SearchIndexRefreshSource, Promise<void>>()
 
-  async function promoteStagedSnapshot(
-    stagingDocumentsCollectionName: string,
-    changedMailboxKeys: string[],
-    removedMailboxKeys: string[]
-  ): Promise<void> {
-    if (!isMongoSearchIndexStore(options.searchIndexStore)) {
-      return
-    }
-
-    if (typeof options.searchIndexStore.promoteStagedDocuments === 'function') {
-      await options.searchIndexStore.promoteStagedDocuments(
-        stagingDocumentsCollectionName,
-        changedMailboxKeys,
-        removedMailboxKeys
-      )
-    }
-  }
-
   async function runInProcessRefresh(context: RefreshJobContext): Promise<SearchIndexRefreshPlan> {
     const { refreshSearchIndexSourceFromCatalog } = await import('./searchIndex')
     return refreshSearchIndexSourceFromCatalog(
@@ -259,8 +228,7 @@ export function createSearchIndexRefreshCoordinator(
       options.reviewStore,
       options.searchIndexStore,
       {
-        pruneRemovedFiles: true,
-        updateFingerprints: true
+        pruneRemovedFiles: true
       }
     )
   }
@@ -272,15 +240,6 @@ export function createSearchIndexRefreshCoordinator(
 
     try {
       const plan = shouldUseWorker ? await createWorkerTransport(job, options) : await runInProcessRefresh(job)
-
-      if (shouldUseWorker) {
-        await promoteStagedSnapshot(
-          job.stagingDocumentsCollectionName,
-          plan.changedMailboxKeys,
-          plan.removedMailboxKeys
-        )
-        await options.searchIndexStore.replaceFileFingerprints(job.source, plan.fingerprints)
-      }
 
       statusBySource.set(job.source, {
         source: job.source,
@@ -331,10 +290,8 @@ export function createSearchIndexRefreshCoordinator(
         source: normalizedSource,
         jobId: randomBytes(8).toString('hex'),
         trigger,
-        startedAt: nowIso(),
-        stagingDocumentsCollectionName: ''
+        startedAt: nowIso()
       }
-      job.stagingDocumentsCollectionName = createStagingDocumentsCollectionName(normalizedSource, job.jobId)
       statusBySource.set(normalizedSource, {
         source: normalizedSource,
         jobId: job.jobId,

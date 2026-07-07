@@ -1319,6 +1319,84 @@ describe('pst review api', () => {
     expect(firstRefreshPayload.status.status).toBe('running')
   })
 
+  it('streams refreshed files into the live index through the HTTP refresh route', async () => {
+    rootDir = makeTempDir('pst-review-index-refresh-live-route-')
+    const pstDir = path.join(rootDir, 'PST')
+    const scopeDir = path.join(pstDir, 'Case1', 'Search1')
+    fs.mkdirSync(scopeDir, { recursive: true })
+    stageFixture(enronPath, path.join(scopeDir, 'alpha.pst'))
+    stageFixture(enronPath, path.join(scopeDir, 'beta.pst'))
+
+    const secondReplaceStarted = createDeferred<void>()
+    const releaseSecondReplace = createDeferred<void>()
+
+    class BlockingSearchIndexStore extends MemorySearchIndexStore {
+      private replaceCount = 0
+
+      override async replaceMailboxDocuments(
+        mailboxKey: string,
+        documents: Parameters<MemorySearchIndexStore['replaceMailboxDocuments']>[1]
+      ): Promise<void> {
+        this.replaceCount += 1
+        if (this.replaceCount === 2) {
+          secondReplaceStarted.resolve()
+          await releaseSecondReplace.promise
+        }
+        return super.replaceMailboxDocuments(mailboxKey, documents)
+      }
+    }
+
+    const blockingSearchIndexStore = new BlockingSearchIndexStore()
+    const started = await startApp(
+      pstDir,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        searchIndexStore: blockingSearchIndexStore,
+        skipInitialRefresh: true
+      }
+    )
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const refreshResponse = await fetch(`${started.baseUrl}/api/search/index/refresh?source=mailboxes`, {
+      method: 'POST'
+    })
+    const refreshPayload = await readJson(refreshResponse)
+    expect(refreshResponse.status).toBe(202)
+    expect(refreshPayload.status.status).toBe('running')
+
+    await secondReplaceStarted.promise
+
+    const interimSearch = await requestJson(
+      `${started.baseUrl}/api/search?scope=all&query=&mailOnly=1&pageSize=5000`
+    )
+    expect(interimSearch.page.total).toBeGreaterThan(0)
+    expect(interimSearch.page.items.some((item: { fileName: string }) => item.fileName === 'alpha.pst')).toBe(true)
+    expect(interimSearch.page.items.some((item: { fileName: string }) => item.fileName === 'beta.pst')).toBe(false)
+
+    const fingerprintsDuringRefresh = await blockingSearchIndexStore.listFileFingerprints('mailboxes')
+    expect(fingerprintsDuringRefresh).toHaveLength(1)
+    expect(fingerprintsDuringRefresh[0].fileName).toBe('alpha.pst')
+
+    releaseSecondReplace.resolve()
+    await waitForRefreshStatus(started.baseUrl, '')
+
+    const finalStatus = await requestJson(
+      `${started.baseUrl}/api/search/index/refresh/status?source=mailboxes`
+    )
+    expect(finalStatus.status.status).toBe('succeeded')
+
+    const finalSearch = await requestJson(
+      `${started.baseUrl}/api/search?scope=all&query=&mailOnly=1&pageSize=5000`
+    )
+    expect(finalSearch.page.items.some((item: { fileName: string }) => item.fileName === 'beta.pst')).toBe(true)
+  })
+
   it('starts listening before the initial search index refresh finishes', async () => {
     rootDir = makeTempDir('pst-review-index-startup-')
     const pstDir = path.join(rootDir, 'PST')
@@ -3486,6 +3564,216 @@ describe('pst review api', () => {
     expect(teamsSearch.page.items[0].sourceType).toBe('teams')
     expect(teamsSearch.page.items[0].messageId).toBe('message:teams-1')
     expect(teamsSearch.page.items[0].previewHtml).toBeUndefined()
+  })
+
+  it('returns all-source counts for all cases, a case, and a search scope', async () => {
+    const pstDir = makeTempDir('pst-review-api-all-source-counts-')
+    fs.mkdirSync(path.join(pstDir, '_removed'), { recursive: true })
+    const mailboxKeyAlpha = 'C:/PST/Case Alpha/Search One/alpha.pst'
+    const mailboxKeyBeta = 'C:/PST/Case Beta/Search Two/beta.pst'
+    const teamsKeyAlpha = 'C:/PST/Case Alpha/Search One/Items.1.001.TEAMS.zip'
+    const sharepointKeyBeta = 'C:/PST/Case Beta/Search Two/Items.1.002.SHAREPOINT.zip'
+    const mailboxDetailAlpha: MessageDetail = {
+      id: 'message:mail-alpha',
+      subject: 'Alpha mail',
+      senderName: 'Alice Example',
+      senderEmailAddress: 'alice@example.com',
+      sortDate: new Date('2024-01-01T00:00:00.000Z').toISOString(),
+      bodyText: 'Alpha body'
+    }
+    const mailboxDetailBeta: MessageDetail = {
+      id: 'message:mail-beta',
+      subject: 'Beta mail',
+      senderName: 'Bob Example',
+      senderEmailAddress: 'bob@example.com',
+      sortDate: new Date('2024-01-02T00:00:00.000Z').toISOString(),
+      bodyText: 'Beta body'
+    }
+    const fingerprintStore = new MemorySearchIndexStore()
+    await fingerprintStore.replaceMailboxDocuments(mailboxKeyAlpha, [
+      makeSearchIndexDocument({
+        mailboxKey: mailboxKeyAlpha,
+        scopePath: 'Case Alpha/Search One',
+        scopeLabel: 'Case Alpha / Search One',
+        fileName: 'alpha.pst',
+        mailboxName: 'Alpha',
+        messageId: 'message:mail-alpha',
+        descriptorId: 'mail-alpha',
+        folderId: 'folder:mail-alpha',
+        folderPath: 'Inbox',
+        subject: 'Alpha mail',
+        originalSubject: 'Alpha mail',
+        senderName: 'Alice Example',
+        senderEmailAddress: 'alice@example.com',
+        recipientText: 'Bob Example <bob@example.com>',
+        displayTo: 'Bob Example <bob@example.com>',
+        resolvedDisplayTo: 'Bob Example <bob@example.com>',
+        bodySearchText: 'alpha body',
+        searchText: 'alpha mail alpha body alice example alice@example.com bob example bob@example.com',
+        searchTokens: ['alpha', 'mail', 'body'],
+        addressValues: ['alice@example.com', 'bob@example.com'],
+        subjectValues: ['alpha mail'],
+        mailboxDetail: mailboxDetailAlpha
+      })
+    ])
+    await fingerprintStore.replaceMailboxDocuments(mailboxKeyBeta, [
+      makeSearchIndexDocument({
+        mailboxKey: mailboxKeyBeta,
+        scopePath: 'Case Beta/Search Two',
+        scopeLabel: 'Case Beta / Search Two',
+        fileName: 'beta.pst',
+        mailboxName: 'Beta',
+        messageId: 'message:mail-beta',
+        descriptorId: 'mail-beta',
+        folderId: 'folder:mail-beta',
+        folderPath: 'Inbox',
+        subject: 'Beta mail',
+        originalSubject: 'Beta mail',
+        senderName: 'Bob Example',
+        senderEmailAddress: 'bob@example.com',
+        recipientText: 'Alice Example <alice@example.com>',
+        displayTo: 'Alice Example <alice@example.com>',
+        resolvedDisplayTo: 'Alice Example <alice@example.com>',
+        bodySearchText: 'beta body',
+        searchText: 'beta mail beta body bob example bob@example.com alice example alice@example.com',
+        searchTokens: ['beta', 'mail', 'body'],
+        addressValues: ['bob@example.com', 'alice@example.com'],
+        subjectValues: ['beta mail'],
+        mailboxDetail: mailboxDetailBeta
+      })
+    ])
+    await fingerprintStore.replaceMailboxDocuments(teamsKeyAlpha, [
+      makeSearchIndexDocument({
+        mailboxKey: teamsKeyAlpha,
+        scopePath: 'Case Alpha/Search One',
+        scopeLabel: 'Case Alpha / Search One',
+        fileName: 'Items.1.001.TEAMS.zip',
+        mailboxName: 'Teams Bundle',
+        messageId: 'message:teams-alpha',
+        descriptorId: 'teams-alpha',
+        folderId: 'folder:teams-alpha',
+        folderPath: 'Teams',
+        subject: 'Alpha team item',
+        originalSubject: 'Alpha team item',
+        senderName: 'Teams Bot',
+        senderEmailAddress: 'bot@example.com',
+        recipientText: '',
+        displayTo: '',
+        resolvedDisplayTo: '',
+        bodySearchText: 'alpha team item',
+        searchText: 'alpha team item teams bot bot@example.com',
+        searchTokens: ['alpha', 'team', 'item'],
+        addressValues: ['bot@example.com'],
+        subjectValues: ['alpha team item'],
+        sourceType: 'teams',
+        kind: 'other'
+      })
+    ])
+    await fingerprintStore.replaceMailboxDocuments(sharepointKeyBeta, [
+      makeSearchIndexDocument({
+        mailboxKey: sharepointKeyBeta,
+        scopePath: 'Case Beta/Search Two',
+        scopeLabel: 'Case Beta / Search Two',
+        fileName: 'Items.1.002.SHAREPOINT.zip',
+        mailboxName: 'SharePoint Bundle',
+        messageId: 'message:sharepoint-beta',
+        descriptorId: 'sharepoint-beta',
+        folderId: 'folder:sharepoint-beta',
+        folderPath: 'SharePoint',
+        subject: 'Beta sharepoint item',
+        originalSubject: 'Beta sharepoint item',
+        senderName: 'SharePoint Bot',
+        senderEmailAddress: 'sharepoint@example.com',
+        recipientText: '',
+        displayTo: '',
+        resolvedDisplayTo: '',
+        bodySearchText: 'beta sharepoint item',
+        searchText: 'beta sharepoint item sharepoint bot sharepoint@example.com',
+        searchTokens: ['beta', 'sharepoint', 'item'],
+        addressValues: ['sharepoint@example.com'],
+        subjectValues: ['beta sharepoint item'],
+        sourceType: 'sharepoint',
+        kind: 'other'
+      })
+    ])
+    await fingerprintStore.replaceFileFingerprints('mailboxes', [
+      makeSearchIndexFingerprint({
+        source: 'mailboxes',
+        mailboxKey: mailboxKeyAlpha,
+        fileName: 'alpha.pst',
+        scopePath: 'Case Alpha/Search One',
+        scopeLabel: 'Case Alpha / Search One',
+        size: 1024,
+        modifiedAt: null
+      }),
+      makeSearchIndexFingerprint({
+        source: 'mailboxes',
+        mailboxKey: mailboxKeyBeta,
+        fileName: 'beta.pst',
+        scopePath: 'Case Beta/Search Two',
+        scopeLabel: 'Case Beta / Search Two',
+        size: 1024,
+        modifiedAt: null
+      })
+    ])
+    await fingerprintStore.replaceFileFingerprints('items', [
+      makeSearchIndexFingerprint({
+        source: 'items',
+        mailboxKey: teamsKeyAlpha,
+        fileName: 'Items.1.001.TEAMS.zip',
+        scopePath: 'Case Alpha/Search One',
+        scopeLabel: 'Case Alpha / Search One',
+        size: 1024,
+        modifiedAt: null
+      }),
+      makeSearchIndexFingerprint({
+        source: 'items',
+        mailboxKey: sharepointKeyBeta,
+        fileName: 'Items.1.002.SHAREPOINT.zip',
+        scopePath: 'Case Beta/Search Two',
+        scopeLabel: 'Case Beta / Search Two',
+        size: 1024,
+        modifiedAt: null
+      })
+    ])
+
+    const started = await startApp(pstDir, undefined, undefined, undefined, undefined, undefined, {
+      searchIndexStore: fingerprintStore,
+      skipInitialRefresh: true
+    })
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const allScopes = await requestJson(`${started.baseUrl}/api/search?scope=all&sourceType=all&pageSize=1`)
+    expect(allScopes.page.total).toBe(4)
+    expect(allScopes.page.sourceCounts).toEqual({
+      mailbox: 2,
+      teams: 1,
+      sharepoint: 1
+    })
+
+    const caseScope = await requestJson(
+      `${started.baseUrl}/api/search?scope=all&sourceType=all&casePath=${encodeURIComponent('Case Alpha')}&pageSize=1`
+    )
+    expect(caseScope.page.total).toBe(2)
+    expect(caseScope.page.sourceCounts).toEqual({
+      mailbox: 1,
+      teams: 1,
+      sharepoint: 0
+    })
+
+    const searchScope = await requestJson(
+      `${started.baseUrl}/api/search?scope=search&sourceType=all&casePath=${encodeURIComponent(
+        'Case Alpha'
+      )}&scopePath=${encodeURIComponent('Case Alpha/Search One')}&pageSize=1`
+    )
+    expect(searchScope.page.total).toBe(2)
+    expect(searchScope.page.sourceCounts).toEqual({
+      mailbox: 1,
+      teams: 1,
+      sharepoint: 0
+    })
   })
 
   it('builds invite links from the request origin when no public base url is configured', async () => {

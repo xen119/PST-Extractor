@@ -176,13 +176,9 @@ export interface SearchIndexStore {
   search(options: SearchIndexSearchOptions): Promise<SearchIndexPage>
   findDocumentById(id: string): Promise<SearchIndexDocument | null>
   listFileFingerprints(source: SearchIndexRefreshSource): Promise<SearchIndexFileFingerprint[]>
+  upsertFileFingerprint(source: SearchIndexRefreshSource, fingerprint: SearchIndexFileFingerprint): Promise<void>
   replaceFileFingerprints(source: SearchIndexRefreshSource, fingerprints: SearchIndexFileFingerprint[]): Promise<void>
   deleteFileFingerprints(source: SearchIndexRefreshSource, mailboxKeys: string[]): Promise<void>
-  promoteStagedDocuments?(
-    stagingDocumentsCollectionName: string,
-    changedMailboxKeys?: string[],
-    removedMailboxKeys?: string[]
-  ): Promise<void>
   close(): Promise<void>
 }
 
@@ -1383,6 +1379,18 @@ export class MemorySearchIndexStore implements SearchIndexStore {
       })
   }
 
+  async upsertFileFingerprint(
+    source: SearchIndexRefreshSource,
+    fingerprint: SearchIndexFileFingerprint
+  ): Promise<void> {
+    const normalizedSource = normalizeRefreshSource(source)
+    const normalized = normalizeFingerprintRecord({
+      ...fingerprint,
+      source: normalizedSource
+    })
+    this.fingerprints.set(buildFingerprintKey(normalizedSource, normalized.mailboxKey), normalized)
+  }
+
   async replaceFileFingerprints(
     source: SearchIndexRefreshSource,
     fingerprints: SearchIndexFileFingerprint[]
@@ -1394,11 +1402,7 @@ export class MemorySearchIndexStore implements SearchIndexStore {
       }
     }
     for (const record of fingerprints) {
-      const normalized = normalizeFingerprintRecord({
-        ...record,
-        source: normalizedSource
-      })
-      this.fingerprints.set(buildFingerprintKey(normalizedSource, normalized.mailboxKey), normalized)
+      await this.upsertFileFingerprint(normalizedSource, record)
     }
   }
 
@@ -1774,6 +1778,27 @@ export class MongoSearchIndexStore implements SearchIndexStore {
       .toArray()
   }
 
+  async upsertFileFingerprint(
+    source: SearchIndexRefreshSource,
+    fingerprint: SearchIndexFileFingerprint
+  ): Promise<void> {
+    const normalizedSource = normalizeRefreshSource(source)
+    const normalized = normalizeFingerprintRecord({
+      ...fingerprint,
+      source: normalizedSource
+    })
+    await this.fingerprints.updateOne(
+      { source: normalizedSource, mailboxKey: normalized.mailboxKey },
+      {
+        $set: {
+          ...normalized,
+          source: normalizedSource
+        }
+      },
+      { upsert: true }
+    )
+  }
+
   async replaceFileFingerprints(
     source: SearchIndexRefreshSource,
     fingerprints: SearchIndexFileFingerprint[]
@@ -1787,16 +1812,7 @@ export class MongoSearchIndexStore implements SearchIndexStore {
       }))
     )
     for (const record of uniqueFingerprints) {
-      await this.fingerprints.updateOne(
-        { source: normalizedSource, mailboxKey: record.mailboxKey },
-        {
-          $set: {
-            ...record,
-            source: normalizedSource
-          }
-        },
-        { upsert: true }
-      )
+      await this.upsertFileFingerprint(normalizedSource, record)
     }
   }
 
@@ -1908,40 +1924,6 @@ export class MongoSearchIndexStore implements SearchIndexStore {
   async deleteHiddenRule(filterId: string): Promise<boolean> {
     const result = await this.rules.deleteOne({ filterId: normalizeText(filterId) })
     return Boolean(result.deletedCount && result.deletedCount > 0)
-  }
-
-  async promoteStagedDocuments(
-    stagingDocumentsCollectionName: string,
-    changedMailboxKeys: string[] = [],
-    removedMailboxKeys: string[] = []
-  ): Promise<void> {
-    if (!this.client) {
-      throw new Error('Mongo client is not available')
-    }
-
-    const stagingName = normalizeText(stagingDocumentsCollectionName)
-    if (!stagingName || stagingName === this.documentsCollectionName) {
-      return
-    }
-
-    const db = this.client.db(this.dbName)
-    const stagingDocuments = db.collection<SearchIndexDocument>(stagingName)
-    const activeMailboxKeys = uniqueTextValues(changedMailboxKeys)
-    const removedKeys = uniqueTextValues(removedMailboxKeys)
-
-    for (const mailboxKey of removedKeys) {
-      await this.documents.deleteMany({ mailboxKey })
-    }
-
-    for (const mailboxKey of activeMailboxKeys) {
-      const stagedDocuments = await stagingDocuments.find({ mailboxKey }).sort({ messageId: 1 }).toArray()
-      await this.documents.deleteMany({ mailboxKey })
-      if (stagedDocuments.length) {
-        await this.documents.insertMany(stagedDocuments)
-      }
-    }
-
-    await stagingDocuments.deleteMany({})
   }
 
   async search(options: SearchIndexSearchOptions): Promise<SearchIndexPage> {
@@ -2116,7 +2098,6 @@ export async function refreshSearchIndexSourceFromCatalog(
   searchIndexStore: SearchIndexStore,
   options: {
     pruneRemovedFiles?: boolean
-    updateFingerprints?: boolean
   } = {}
 ): Promise<SearchIndexRefreshPlan> {
   const { openPstMailbox } = await import('./pstCatalog')
@@ -2193,6 +2174,7 @@ export async function refreshSearchIndexSourceFromCatalog(
       }
 
       await searchIndexStore.replaceMailboxDocuments(fingerprint.mailboxKey, documents)
+      await searchIndexStore.upsertFileFingerprint(normalizedSource, fingerprint)
       changedMailboxKeys.push(fingerprint.mailboxKey)
       nextFingerprints.push(fingerprint)
       mailboxCount += 1
@@ -2213,10 +2195,7 @@ export async function refreshSearchIndexSourceFromCatalog(
     for (const mailboxKey of removedMailboxKeys) {
       await searchIndexStore.deleteMailboxDocuments(mailboxKey)
     }
-  }
-
-  if (options.updateFingerprints !== false) {
-    await searchIndexStore.replaceFileFingerprints(normalizedSource, nextFingerprints)
+    await searchIndexStore.deleteFileFingerprints(normalizedSource, removedMailboxKeys)
   }
 
   return {

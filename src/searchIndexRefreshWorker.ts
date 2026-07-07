@@ -16,22 +16,14 @@ function normalizeText(value: unknown): string {
 async function main(): Promise<void> {
   try {
     const pstRootDir = normalizeText(process.env.PST_SEARCH_INDEX_PST_ROOT_DIR)
-    const stagingDocumentsCollectionName = normalizeText(
-      process.env.PST_SEARCH_INDEX_STAGING_DOCUMENTS_COLLECTION
-    )
     const source = normalizeRefreshSource(process.env.PST_SEARCH_INDEX_REFRESH_SOURCE)
 
     if (!pstRootDir) {
       throw new Error('PST root directory is required')
     }
-    if (!stagingDocumentsCollectionName) {
-      throw new Error('Staging documents collection name is required')
-    }
 
     const reviewStore = await createReviewStoreFromEnv(process.env)
-    const searchIndexStore = await createSearchIndexStoreFromEnv(process.env, {
-      documentsCollectionName: stagingDocumentsCollectionName
-    })
+    const searchIndexStore = await createSearchIndexStoreFromEnv(process.env)
 
     const plan = await refreshSearchIndexSourceFromCatalog(
       pstRootDir,
@@ -39,8 +31,7 @@ async function main(): Promise<void> {
       reviewStore,
       searchIndexStore,
       {
-        pruneRemovedFiles: false,
-        updateFingerprints: false
+        pruneRemovedFiles: true
       }
     )
 

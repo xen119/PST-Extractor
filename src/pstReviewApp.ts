@@ -1106,6 +1106,65 @@ function collectFingerprintMailboxKeys(scopes: FingerprintScopeEntry[]): string[
   return uniqueTextValues(scopes.flatMap((scope) => scope.files.map((file) => file.mailboxKey)))
 }
 
+interface FingerprintMailboxSelection {
+  scopePath: string
+  scopeLabel: string
+  mailboxKeys: string[]
+}
+
+function selectFingerprintMailboxKeys(
+  requestedCasePath: string,
+  requestedScopePath: string,
+  allowedCasePaths: string[],
+  fingerprints: SearchIndexFileFingerprint[],
+  allowAll = false
+): FingerprintMailboxSelection {
+  const normalizedRequestedCasePath = normalizeScopePath(requestedCasePath)
+  const normalizedRequestedScopePath = normalizeScopePath(requestedScopePath)
+  const accessibleScopes = buildFingerprintScopeEntries(fingerprints).filter((scope) =>
+    isScopePathAllowed(scope.scopePath, allowedCasePaths, allowAll)
+  )
+
+  let selectedScopes = accessibleScopes
+  let scopePath = ''
+  let scopeLabel = 'All cases/searches'
+
+  if (normalizedRequestedScopePath) {
+    selectedScopes = accessibleScopes.filter((scope) => scope.scopePath === normalizedRequestedScopePath)
+    scopePath = normalizedRequestedScopePath
+    scopeLabel = selectedScopes[0]?.scopeLabel || getScopeLabel(normalizedRequestedScopePath)
+  } else if (normalizedRequestedCasePath) {
+    selectedScopes = accessibleScopes.filter(
+      (scope) =>
+        scope.scopePath === normalizedRequestedCasePath ||
+        scope.scopePath.startsWith(`${normalizedRequestedCasePath}/`)
+    )
+    scopeLabel = getScopeLabel(normalizedRequestedCasePath)
+  }
+
+  return {
+    scopePath,
+    scopeLabel,
+    mailboxKeys: uniqueTextValues(
+      selectedScopes.flatMap((scope) => scope.files.map((file) => file.mailboxKey))
+    )
+  }
+}
+
+function mergeFingerprintMailboxSelections(
+  ...selections: FingerprintMailboxSelection[]
+): FingerprintMailboxSelection {
+  return {
+    scopePath: selections.find((selection) => selection.scopePath)?.scopePath || '',
+    scopeLabel:
+      selections.find((selection) => selection.scopePath)?.scopeLabel ||
+      selections.find((selection) => selection.scopeLabel && selection.scopeLabel !== 'All cases/searches')
+        ?.scopeLabel ||
+      'All cases/searches',
+    mailboxKeys: uniqueTextValues(selections.flatMap((selection) => selection.mailboxKeys))
+  }
+}
+
 function resolveAccessibleFingerprintCatalogSelection(
   requestedScopePath: string,
   allowedCasePaths: string[],
@@ -5312,7 +5371,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       }
 
       const mailboxSearchFingerprints =
-        sourceType === 'mailbox' && scope !== 'pst'
+        sourceType === 'mailbox' || sourceType === 'all'
           ? await searchIndexStore.listFileFingerprints('mailboxes')
           : []
       const archiveSearchFingerprints =
@@ -5391,28 +5450,36 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
             entry.files.map((file) => resolvePstMailboxPath(pstRootDir, entry.scopePath, file.fileName))
           )
         }
-      } else {
-        const fingerprintSelection = resolveAccessibleFingerprintCatalogSelection(
+      } else if (sourceType === 'all') {
+        const mailboxSelection = selectFingerprintMailboxKeys(
+          requestedCasePath,
+          requestedScopePath,
+          allowedCasePaths,
+          mailboxSearchFingerprints,
+          allowAllCases
+        )
+        const archiveSelection = selectFingerprintMailboxKeys(
+          requestedCasePath,
           requestedScopePath,
           allowedCasePaths,
           archiveSearchFingerprints,
           allowAllCases
         )
-        if (fingerprintSelection) {
-          scopePath = fingerprintSelection.scopePath
-          scopeLabel = fingerprintSelection.scopeLabel
-          allowedMailboxKeys = collectFingerprintMailboxKeys(fingerprintSelection.scopes)
-        } else {
-          const archiveCatalog = resolveAccessibleArchiveCatalogSelection(
-            pstRootDir,
-            requestedScopePath,
-            allowedCasePaths,
-            allowAllCases
-          )
-          scopePath = archiveCatalog.scopePath
-          scopeLabel = archiveCatalog.scopeLabel
-          allowedMailboxKeys = buildArchiveMailboxKeys(pstRootDir, archiveCatalog)
-        }
+        const mergedSelection = mergeFingerprintMailboxSelections(mailboxSelection, archiveSelection)
+        scopePath = mergedSelection.scopePath
+        scopeLabel = mergedSelection.scopeLabel
+        allowedMailboxKeys = mergedSelection.mailboxKeys
+      } else {
+        const archiveSelection = selectFingerprintMailboxKeys(
+          requestedCasePath,
+          requestedScopePath,
+          allowedCasePaths,
+          archiveSearchFingerprints,
+          allowAllCases
+        )
+        scopePath = archiveSelection.scopePath
+        scopeLabel = archiveSelection.scopeLabel
+        allowedMailboxKeys = archiveSelection.mailboxKeys
       }
 
       const page = await searchIndexStore.search({
