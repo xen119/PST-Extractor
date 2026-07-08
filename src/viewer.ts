@@ -86,6 +86,7 @@ export interface MessageSummary {
   order: number
   messageClass: string
   kind: MessageKind
+  size?: number
   subject: string
   senderName: string
   senderEmailAddress: string
@@ -750,7 +751,8 @@ function buildSummaryFromMessage(
     importance: message.importance,
     hasAttachments,
     isRead: message.isRead,
-    isMailLike
+    isMailLike,
+    size: toSafeNumber(safeRead(() => message.messageSize, undefined), 0)
   }
 }
 
@@ -1904,6 +1906,7 @@ function indexFolder(
         hasAttachments: false,
         isRead: false,
         isMailLike: false,
+        size: toSafeNumber(safeRead(() => child.messageSize, undefined), 0),
         parseError
       }
       session.messages.set(messageId, fallbackSummary)

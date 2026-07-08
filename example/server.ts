@@ -6,6 +6,7 @@ import { buildOpenApiDocument } from '../src/openApi'
 import { MongoAuthUserStore } from '../src/authUsers'
 import { createAppSettingsStoreFromEnv, type AppSettingsStore } from '../src/appSettings'
 import { createPstReviewApp, type ApiSecurityConfig, type AppAuthConfig } from '../src/pstReviewApp'
+import { createFlaggedBundleStoreFromEnv } from '../src/flaggedBundleStore'
 import { createReviewStoreFromEnv } from '../src/reviewStore'
 import { createSearchIndexStoreFromEnv } from '../src/searchIndex'
 import { resolvePstRootDirectory } from '../src/pstCatalog'
@@ -94,6 +95,7 @@ const auth: AppAuthConfig = {
 let server: http.Server | null = null
 let reviewStore = null as Awaited<ReturnType<typeof createReviewStoreFromEnv>> | null
 let searchIndexStore = null as Awaited<ReturnType<typeof createSearchIndexStoreFromEnv>> | null
+let flaggedBundleStore = null as Awaited<ReturnType<typeof createFlaggedBundleStoreFromEnv>> | null
 let authUserStore = null as Awaited<ReturnType<typeof MongoAuthUserStore.connect>> | null
 let appSettingsStore: AppSettingsStore | null = null
 let shuttingDown = false
@@ -137,6 +139,14 @@ async function shutdown(exitCode = 0): Promise<void> {
   }
 
   try {
+    if (flaggedBundleStore) {
+      await flaggedBundleStore.close()
+    }
+  } catch (error) {
+    console.error(error)
+  }
+
+  try {
     if (authUserStore) {
       await authUserStore.close()
     }
@@ -160,6 +170,7 @@ async function shutdown(exitCode = 0): Promise<void> {
 async function main(): Promise<void> {
   reviewStore = await createReviewStoreFromEnv(process.env)
   searchIndexStore = await createSearchIndexStoreFromEnv(process.env)
+  flaggedBundleStore = await createFlaggedBundleStoreFromEnv(process.env)
   appSettingsStore = await createAppSettingsStoreFromEnv(process.env)
   const mongoUri = String(process.env.MONGODB_URI || '').trim()
   if (mongoUri) {
@@ -179,6 +190,7 @@ async function main(): Promise<void> {
     pstRootDir,
     reviewStore,
     searchIndexStore,
+    flaggedBundleStore,
     openApiSpec,
     auth,
     auditLogDir,

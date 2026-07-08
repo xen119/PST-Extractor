@@ -1,7 +1,9 @@
 import express from 'express'
 import * as fs from 'fs'
+import * as os from 'os'
 import * as path from 'path'
 import { randomBytes } from 'crypto'
+import { once } from 'events'
 import nodemailer from 'nodemailer'
 import QRCode from 'qrcode'
 import { API_ROUTES } from './apiRoutes'
@@ -58,6 +60,22 @@ import {
   type SearchScope
 } from './searchIndex'
 import {
+  buildFlaggedBundleWorkspaceKey,
+  createFlaggedBundleJobInProgressError,
+  createMemoryFlaggedBundleStore,
+  type FlaggedBundleArtifactDownload,
+  type FlaggedBundleArtifactRecord,
+  type FlaggedBundleExportScope,
+  type FlaggedBundleGroupRecord,
+  type FlaggedBundleGroupType,
+  type FlaggedBundleJobRecord,
+  type FlaggedBundleJobStage,
+  type FlaggedBundleJobStatus,
+  type FlaggedBundleProgress,
+  type FlaggedBundleScope,
+  type FlaggedBundleStore
+} from './flaggedBundleStore'
+import {
   createSearchIndexRefreshCoordinator,
   type SearchIndexRefreshCoordinator,
   type SearchIndexRefreshStatus
@@ -102,12 +120,13 @@ import {
   isOfficePreviewable
 } from './officePreview'
 import type { ReviewRecord } from './reviewTypes'
-import { createZipStreamWriter } from './zipWriter'
+import { createZipStreamWriter, estimateZipEntrySize } from './zipWriter'
 
 export interface CreatePstReviewAppOptions {
   publicDir: string
   reviewStore: ReviewStore
   searchIndexStore: SearchIndexStore
+  flaggedBundleStore?: FlaggedBundleStore
   openApiSpec: Record<string, unknown>
   pstRootDir?: string
   auth?: AppAuthConfig
@@ -367,6 +386,118 @@ interface FlaggedBundleQuery {
   scope?: string
   scopePath?: string
   sessionId?: string
+}
+
+interface FlaggedBundlePrepareBody {
+  scope?: string
+  scopePath?: string
+  sessionId?: string
+  maxSizeBytes?: number
+}
+
+interface FlaggedBundleScopeDetails extends FlaggedBundleExportScope {
+  workspaceKey: string
+}
+
+interface FlaggedBundleExportArtifactResponse {
+  artifactId: string
+  fileName: string
+  downloadUrl: string
+  partNumber: number
+  partCount: number
+  itemCount: number
+  sizeBytes: number
+  exceedsMaxSize: boolean
+}
+
+interface FlaggedBundleExportGroupResponse {
+  groupType: 'mailbox' | 'archive'
+  label: string
+  itemCount: number
+  failedCount: number
+  artifactCount: number
+  artifacts: FlaggedBundleExportArtifactResponse[]
+}
+
+interface FlaggedBundleExportProgressResponse {
+  stage: 'collecting' | 'mailbox' | 'archive' | 'finalizing' | 'succeeded' | 'failed'
+  totalItems: number
+  processedItems: number
+  failedItems: number
+  percent: number
+  currentGroup: 'mailbox' | 'archive' | null
+  currentLabel: string
+}
+
+interface FlaggedBundleExportJobResponse {
+  exportId: string
+  ownerUsername: string
+  workspaceKey: string
+  generatedAt: string
+  startedAt: string
+  completedAt: string | null
+  updatedAt: string
+  status: 'running' | 'succeeded' | 'failed'
+  scope: FlaggedBundleExportScope
+  maxSizeBytes: number
+  progress: FlaggedBundleExportProgressResponse
+  error: string | null
+  groups: FlaggedBundleExportGroupResponse[]
+}
+
+interface FlaggedBundleExportHistoryResponse {
+  scope: FlaggedBundleExportScope
+  workspaceKey: string
+  jobs: FlaggedBundleExportJobResponse[]
+}
+
+interface FlaggedBundleExportDeleteResponse {
+  deleted: boolean
+  exportId: string
+}
+
+interface FlaggedBundleExportArtifactRecord {
+  artifactId: string
+  fileName: string
+  filePath: string
+  partNumber: number
+  partCount: number
+  itemCount: number
+  sizeBytes: number
+  exceedsMaxSize: boolean
+}
+
+interface FlaggedBundleExportGroupRecord {
+  groupType: 'mailbox' | 'archive'
+  label: string
+  itemCount: number
+  failedCount: number
+  artifactCount: number
+  artifacts: Array<Omit<FlaggedBundleExportArtifactRecord, 'filePath'> & { downloadUrl: string }>
+}
+
+interface FlaggedBundleExportManifest {
+  exportId: string
+  generatedAt: string
+  expiresAt: string
+  scope: {
+    scope: 'all' | 'search' | 'pst'
+    scopePath: string
+    scopeLabel: string
+    sessionId: string
+    sessionFileName: string
+  }
+  maxSizeBytes: number
+  groups: FlaggedBundleExportGroupRecord[]
+}
+
+interface FlaggedBundleExportJob {
+  exportId: string
+  generatedAt: string
+  expiresAt: string
+  rootDir: string
+  manifest: FlaggedBundleExportManifest
+  artifactsById: Map<string, FlaggedBundleExportArtifactRecord>
 }
 
 interface BundleMailboxDescriptor {
@@ -1556,6 +1687,55 @@ function addBundleManifestItem(
   }
 }
 
+interface FlaggedBundleZipEntry {
+  entryName: string
+  content: Buffer
+  mtime: Date
+}
+
+function buildFlaggedBundleGroupLabel(groupType: 'mailbox' | 'archive'): string {
+  return groupType === 'mailbox' ? 'Mailbox' : 'Teams / SharePoint'
+}
+
+function buildFlaggedBundleArtifactId(groupType: 'mailbox' | 'archive', partNumber: number): string {
+  return `${groupType}-${partNumber}`
+}
+
+function buildFlaggedBundleArtifactFileName(groupType: 'mailbox' | 'archive', partNumber: number): string {
+  const normalizedGroup = groupType === 'mailbox' ? 'mailbox' : 'teams-sharepoint'
+  return `flagged-${normalizedGroup}-part-${partNumber}.zip`
+}
+
+function toFlaggedBundleBuffer(content: Buffer | string): Buffer {
+  return Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8')
+}
+
+async function writeFlaggedBundleZipFile(
+  filePath: string,
+  entries: FlaggedBundleZipEntry[]
+): Promise<number> {
+  const stream = fs.createWriteStream(filePath)
+  const writer = createZipStreamWriter(stream)
+  try {
+    for (const entry of entries) {
+      await writer.addFile(entry.entryName, entry.content, { mtime: entry.mtime })
+    }
+    await writer.finalize()
+    stream.end()
+    await once(stream, 'finish')
+    const stats = await fs.promises.stat(filePath)
+    return stats.size
+  } catch (error) {
+    stream.destroy()
+    try {
+      await fs.promises.rm(filePath, { force: true })
+    } catch {
+      // ignore cleanup failures
+    }
+    throw error
+  }
+}
+
 function buildReviewContextFromSearchIndexDocument(
   item: SearchIndexDocument,
   reviewerUsername: string
@@ -2115,6 +2295,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   const pstRootDir = options.pstRootDir || getDefaultPstRootDirectory()
   const reviewStore = options.reviewStore
   const searchIndexStore = options.searchIndexStore
+  const flaggedBundleStore = options.flaggedBundleStore || createMemoryFlaggedBundleStore()
   const authConfig = normalizeAuthConfig(options.auth)
   const authUserStore = options.authUserStore || createMemoryAuthUserStore(authConfig.seedUsers)
   const appSettingsStore = options.appSettingsStore || createMemoryAppSettingsStore()
@@ -2123,6 +2304,12 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     options.smtpTransportFactory || createDefaultSmtpTransport
   const authSessions = new Map<string, AuthSessionRecord>()
   const authMfaChallenges = new Map<string, AuthMfaChallengeRecord>()
+
+  function buildFlaggedBundleExportDownloadUrl(exportId: string, artifactId: string): string {
+    return `${API_ROUTES.flaggedBundleArtifact
+      .replace(':exportId', encodeURIComponent(exportId))
+      .replace(':artifactId', encodeURIComponent(artifactId))}`
+  }
 
   function getRequestPathname(req: express.Request): string {
     return (req.originalUrl || req.url || '').split('?')[0] || ''
@@ -2445,6 +2632,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       hasAttachments: item.hasAttachments,
       isRead: item.isRead,
       isMailLike: item.isMailLike,
+      size: item.size,
       review: item.review,
       scopePath: item.scopePath,
       scopeLabel: item.scopeLabel,
@@ -6449,6 +6637,881 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           downloadName: fileName
         }
       })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  class FlaggedBundlePartBuilder {
+    private readonly entries: FlaggedBundleZipEntry[] = []
+    private readonly artifacts: FlaggedBundleExportArtifactRecord[] = []
+    private currentEstimatedSize = 22
+    private currentOverLimit = false
+    private partNumber = 0
+    private successfulCount = 0
+    private failedCount = 0
+
+    constructor(
+      private readonly groupType: 'mailbox' | 'archive',
+      private readonly exportRootDir: string,
+      private readonly maxBytes: number,
+      private readonly onArtifact?: (
+        artifact: FlaggedBundleExportArtifactRecord,
+        filePath: string
+      ) => Promise<void>
+    ) {}
+
+    get itemCount(): number {
+      return this.successfulCount
+    }
+
+    get failureCount(): number {
+      return this.failedCount
+    }
+
+    recordFailure(count = 1): void {
+      this.failedCount += Math.max(0, Math.floor(count))
+    }
+
+    async add(entryName: string, content: string | Buffer, mtime: Date): Promise<void> {
+      const buffer = toFlaggedBundleBuffer(content)
+      const entrySize = estimateZipEntrySize(entryName, buffer.length)
+      if (this.entries.length && this.currentEstimatedSize + entrySize > this.maxBytes) {
+        await this.flush()
+      }
+
+      const exceedsMaxSize = this.entries.length === 0 && this.currentEstimatedSize + entrySize > this.maxBytes
+      this.currentOverLimit = this.currentOverLimit || exceedsMaxSize
+      this.entries.push({ entryName, content: buffer, mtime })
+      this.currentEstimatedSize += entrySize
+      this.successfulCount += 1
+    }
+
+    async flush(): Promise<void> {
+      if (!this.entries.length) {
+        return
+      }
+
+      this.partNumber += 1
+      const artifactId = buildFlaggedBundleArtifactId(this.groupType, this.partNumber)
+      const fileName = buildFlaggedBundleArtifactFileName(this.groupType, this.partNumber)
+      const filePath = path.join(this.exportRootDir, fileName)
+      const sizeBytes = await writeFlaggedBundleZipFile(filePath, this.entries)
+      const artifact = {
+        artifactId,
+        fileName,
+        filePath,
+        partNumber: this.partNumber,
+        partCount: 0,
+        itemCount: this.entries.length,
+        sizeBytes,
+        exceedsMaxSize: this.currentOverLimit
+      }
+      this.artifacts.push(artifact)
+      if (this.onArtifact) {
+        await this.onArtifact(artifact, filePath)
+      }
+      this.entries.length = 0
+      this.currentEstimatedSize = 22
+      this.currentOverLimit = false
+    }
+
+    async finish(): Promise<FlaggedBundleExportArtifactRecord[]> {
+      await this.flush()
+      const totalParts = this.artifacts.length
+      return this.artifacts.map((artifact) => ({
+        ...artifact,
+        partCount: totalParts
+      }))
+    }
+  }
+
+  function buildFlaggedBundleExportJobResponse(
+    job: FlaggedBundleJobRecord
+  ): FlaggedBundleExportJobResponse {
+    return {
+      exportId: job.exportId,
+      ownerUsername: job.ownerUsername,
+      workspaceKey: job.workspaceKey,
+      generatedAt: job.generatedAt,
+      startedAt: job.startedAt,
+      completedAt: job.completedAt,
+      updatedAt: job.updatedAt,
+      status: job.status,
+      scope: { ...job.scope },
+      maxSizeBytes: job.maxSizeBytes,
+      progress: { ...job.progress },
+      error: job.error,
+      groups: job.groups.map((group) => ({
+        groupType: group.groupType,
+        label: group.label,
+        itemCount: group.itemCount,
+        failedCount: group.failedCount,
+        artifactCount: group.artifacts.length,
+        artifacts: group.artifacts.map((artifact) => ({
+          artifactId: artifact.artifactId,
+          fileName: artifact.fileName,
+          downloadUrl: buildFlaggedBundleExportDownloadUrl(job.exportId, artifact.artifactId),
+          partNumber: artifact.partNumber,
+          partCount: artifact.partCount,
+          itemCount: artifact.itemCount,
+          sizeBytes: artifact.sizeBytes,
+          exceedsMaxSize: artifact.exceedsMaxSize
+        }))
+      }))
+    }
+  }
+
+  function buildFlaggedBundleExportHistoryResponse(
+    scope: FlaggedBundleExportScope,
+    workspaceKey: string,
+    jobs: FlaggedBundleJobRecord[]
+  ): FlaggedBundleExportHistoryResponse {
+    return {
+      scope,
+      workspaceKey,
+      jobs: jobs.map(buildFlaggedBundleExportJobResponse)
+    }
+  }
+
+  function createFlaggedBundleJobRecord(input: {
+    ownerUsername: string
+    workspaceKey: string
+    generatedAt: string
+    scope: FlaggedBundleExportScope
+    maxSizeBytes: number
+  }): FlaggedBundleJobRecord {
+    const now = input.generatedAt
+    return {
+      exportId: randomBytes(12).toString('hex'),
+      ownerUsername: normalizeText(input.ownerUsername) || 'anonymous',
+      workspaceKey: normalizeText(input.workspaceKey),
+      workspaceLockKey: buildFlaggedBundleWorkspaceKey(
+        input.scope.scope,
+        input.scope.scopePath,
+        input.scope.sessionId
+      ),
+      generatedAt: now,
+      startedAt: now,
+      completedAt: null,
+      updatedAt: now,
+      status: 'running',
+      scope: { ...input.scope },
+      maxSizeBytes: Math.max(1, Math.floor(input.maxSizeBytes)),
+      progress: {
+        stage: 'collecting',
+        totalItems: 0,
+        processedItems: 0,
+        failedItems: 0,
+        percent: 0,
+        currentGroup: null,
+        currentLabel: 'Gathering flagged items'
+      },
+      error: null,
+      groups: [
+        {
+          groupType: 'mailbox',
+          label: buildFlaggedBundleGroupLabel('mailbox'),
+          itemCount: 0,
+          failedCount: 0,
+          artifacts: []
+        },
+        {
+          groupType: 'archive',
+          label: buildFlaggedBundleGroupLabel('archive'),
+          itemCount: 0,
+          failedCount: 0,
+          artifacts: []
+        }
+      ]
+    }
+  }
+
+  async function resolveFlaggedBundleScopeDetails(
+    authSession: AuthSessionRecord | null,
+    scope: FlaggedBundleScope,
+    requestedScopePath: string,
+    sessionId: string
+  ): Promise<{
+    currentUser: AuthUserListItem | null
+    allowAllCases: boolean
+    allowedCasePaths: string[]
+    reviewerUsername: string
+    scopeDetails: FlaggedBundleExportScope
+    workspaceKey: string
+  }> {
+    const currentUser = authSession ? await authUserStore.getUser(authSession.username) : null
+    const allowAllCases = !authConfig.enabled || isAdminAuthSession(authSession, authConfig)
+    const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
+    const reviewerUsername = getReviewOwnerUsername(authSession)
+
+    const scopeDetails =
+      scope === 'pst'
+        ? (() => {
+            if (!sessionId) {
+              throw createAppError(400, 'Session id is required for selected PST exports')
+            }
+            const session = getSessionOrThrow(sessions, sessionId)
+            if (!isScopePathAllowed(session.scopePath, allowedCasePaths, allowAllCases)) {
+              throw createAppError(403, 'Case access required')
+            }
+            return {
+              scopePath: session.scopePath,
+              scopeLabel: session.scopeLabel || getScopeLabel(session.scopePath),
+              sessionId: session.id,
+              sessionFileName: session.fileName,
+              scope
+            } satisfies FlaggedBundleExportScope
+          })()
+        : scope === 'search'
+          ? (() => {
+              const archiveScope = resolveAccessibleArchiveCatalogSelection(
+                pstRootDir,
+                requestedScopePath,
+                allowedCasePaths,
+                allowAllCases
+              )
+              return {
+                scopePath: normalizeText(archiveScope.scopePath || requestedScopePath),
+                scopeLabel: archiveScope.scopeLabel || getScopeLabel(requestedScopePath),
+                sessionId: '',
+                sessionFileName: '',
+                scope
+              } satisfies FlaggedBundleExportScope
+            })()
+          : {
+              scopePath: '',
+              scopeLabel: 'All cases/searches',
+              sessionId: '',
+              sessionFileName: '',
+              scope
+            }
+
+    return {
+      currentUser,
+      allowAllCases,
+      allowedCasePaths,
+      reviewerUsername,
+      scopeDetails,
+      workspaceKey: buildFlaggedBundleWorkspaceKey(
+        scopeDetails.scope,
+        scopeDetails.scopePath,
+        scopeDetails.sessionId
+      )
+    }
+  }
+
+  async function createFlaggedBundleExportJob(
+    authSession: AuthSessionRecord | null,
+    body: FlaggedBundlePrepareBody,
+    notificationOrigin = ''
+  ): Promise<FlaggedBundleExportJobResponse> {
+    const scope = parseFlaggedBundleScope(body.scope)
+    const requestedScopePath = normalizeScopePath(body.scopePath)
+    const sessionId = normalizeText(body.sessionId)
+    const maxSizeBytes = Math.max(1, Math.floor(Number(body.maxSizeBytes) || 250 * 1024 * 1024))
+    const generatedAt = new Date().toISOString()
+    const {
+      reviewerUsername,
+      allowAllCases,
+      allowedCasePaths,
+      scopeDetails,
+      workspaceKey
+    } = await resolveFlaggedBundleScopeDetails(authSession, scope, requestedScopePath, sessionId)
+    const job = await flaggedBundleStore.createJob(
+      createFlaggedBundleJobRecord({
+        ownerUsername: reviewerUsername,
+        workspaceKey,
+        generatedAt,
+        scope: scopeDetails,
+        maxSizeBytes
+      })
+    )
+    const exportId = job.exportId
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), `pst-flagged-bundle-${exportId}-`))
+    const requestOrigin = normalizeOrigin(notificationOrigin)
+
+    void (async () => {
+      let currentJob: FlaggedBundleJobRecord = job
+      let mailboxBuilder: FlaggedBundlePartBuilder | null = null
+      let archiveBuilder: FlaggedBundlePartBuilder | null = null
+      let processedItems = 0
+
+      async function persistCurrentJob(): Promise<void> {
+        currentJob.updatedAt = new Date().toISOString()
+        const saved = await flaggedBundleStore.saveJob(currentJob)
+        if (saved) {
+          currentJob = saved
+        }
+      }
+
+      async function updateJobProgress(patch: Partial<FlaggedBundleProgress>): Promise<void> {
+        const totalItems = Math.max(0, Math.floor(patch.totalItems ?? currentJob.progress.totalItems))
+        const nextProcessedItems = Math.max(
+          0,
+          Math.floor(patch.processedItems ?? currentJob.progress.processedItems)
+        )
+        const nextFailedItems = Math.max(
+          0,
+          Math.floor(patch.failedItems ?? currentJob.progress.failedItems)
+        )
+        const nextStage = patch.stage ?? currentJob.progress.stage
+        const nextCurrentGroup =
+          patch.currentGroup === undefined ? currentJob.progress.currentGroup : patch.currentGroup
+        const nextCurrentLabel =
+          patch.currentLabel === undefined ? currentJob.progress.currentLabel : normalizeText(patch.currentLabel)
+        currentJob.progress = {
+          ...currentJob.progress,
+          stage: nextStage,
+          totalItems,
+          processedItems: nextProcessedItems,
+          failedItems: nextFailedItems,
+          percent:
+            totalItems > 0
+              ? Math.min(100, Math.floor((nextProcessedItems / totalItems) * 100))
+              : nextStage === 'succeeded'
+                ? 100
+                : 0,
+          currentGroup: nextCurrentGroup,
+          currentLabel: nextCurrentLabel
+        }
+        await persistCurrentJob()
+      }
+
+      async function persistArtifact(
+        groupType: FlaggedBundleGroupType,
+        artifact: FlaggedBundleExportArtifactRecord,
+        filePath: string
+      ): Promise<void> {
+        const buffer = await fs.promises.readFile(filePath)
+        const saved = await flaggedBundleStore.addArtifact(exportId, groupType, { ...artifact, fileId: '' }, buffer)
+        if (!saved) {
+          throw createAppError(500, 'Unable to persist flagged bundle artifact')
+        }
+        currentJob = saved
+        try {
+          await fs.promises.rm(filePath, { force: true })
+        } catch {
+          // Ignore temp file cleanup failures.
+        }
+      }
+
+      async function markGroupComplete(
+        groupType: FlaggedBundleGroupType,
+        finishedArtifacts: FlaggedBundleExportArtifactRecord[],
+        itemCount: number,
+        failedCount: number
+      ): Promise<void> {
+        const group = currentJob.groups.find((entry) => entry.groupType === groupType)
+        if (!group) {
+          return
+        }
+        group.itemCount = itemCount
+        group.failedCount = failedCount
+        const partCountById = new Map(finishedArtifacts.map((artifact) => [artifact.artifactId, artifact.partCount]))
+        for (const artifact of group.artifacts) {
+          const partCount = partCountById.get(artifact.artifactId)
+          if (typeof partCount === 'number') {
+            artifact.partCount = partCount
+          }
+        }
+        await persistCurrentJob()
+      }
+
+      async function sendReadyEmail(): Promise<void> {
+        const currentUser = authSession ? await authUserStore.getUser(authSession.username) : null
+        const recipientEmail = normalizeText(currentUser?.recipientEmail || '')
+        if (!recipientEmail) {
+          return
+        }
+
+        const settings = await appSettingsStore.getSmtpSettings()
+        if (!settings.enabled || !normalizeText(settings.host) || !normalizeText(settings.fromAddress)) {
+          return
+        }
+
+        const transport = smtpTransportFactory(settings)
+        try {
+          const response = buildFlaggedBundleExportJobResponse(currentJob)
+          const downloadPrefix = requestOrigin || normalizeOrigin(authConfig.publicBaseUrl) || ''
+          const downloadLines: string[] = []
+          for (const group of response.groups) {
+            for (const artifact of group.artifacts) {
+              const url = downloadPrefix ? `${downloadPrefix}${artifact.downloadUrl}` : artifact.downloadUrl
+              downloadLines.push(`${group.label} - ${artifact.fileName}: ${url}`)
+            }
+          }
+
+          const scopeLabel = response.scope.scopeLabel || 'Flagged bundle'
+          const scopeDescription =
+            response.scope.scope === 'pst'
+              ? response.scope.sessionFileName || response.scope.scopeLabel
+              : response.scope.scopePath || response.scope.scopeLabel
+
+          const text = [
+            `Your flagged bundle for ${scopeLabel} is ready.`,
+            `Scope: ${scopeDescription}`,
+            '',
+            ...downloadLines
+          ].join('\n')
+
+          const html = [
+            '<!doctype html>',
+            '<html>',
+            '<body style="margin:0;padding:0;background:#f4f7fb;color:#1f2937;font-family:Arial,Helvetica,sans-serif;">',
+            '<div style="max-width:720px;margin:0 auto;padding:32px;">',
+            '<div style="background:#ffffff;border:1px solid #d7e0ee;border-radius:20px;padding:28px;">',
+            `<p style="margin:0 0 12px;font-size:16px;line-height:24px;">Your flagged bundle for <strong>${escapeHtml(
+              scopeLabel
+            )}</strong> is ready.</p>`,
+            `<p style="margin:0 0 18px;font-size:14px;line-height:22px;color:#4b5563;">Scope: ${escapeHtml(
+              scopeDescription
+            )}</p>`,
+            '<ul style="margin:0;padding-left:20px;font-size:14px;line-height:22px;color:#1f2937;">',
+            ...downloadLines.map((line) => {
+              const [label, url] = line.split(': ', 2)
+              return `<li style="margin:0 0 8px;"><strong>${escapeHtml(label)}</strong><br><a href="${escapeHtml(
+                url || ''
+              )}" style="color:#2f6feb;text-decoration:underline;">${escapeHtml(url || '')}</a></li>`
+            }),
+            '</ul>',
+            '</div>',
+            '</div>',
+            '</body>',
+            '</html>'
+          ].join('')
+
+          await transport.sendMail({
+            from: buildSmtpFromAddress(settings),
+            to: recipientEmail,
+            subject: `Flagged bundle ready for ${scopeLabel}`,
+            text,
+            html
+          })
+        } catch {
+          // Best-effort notification only.
+        } finally {
+          try {
+            await transport.close?.()
+          } catch {
+            // Ignore transport shutdown failures.
+          }
+        }
+      }
+
+      try {
+        const scopeSession = scope === 'pst' ? getSessionOrThrow(sessions, sessionId) : null
+        const mailboxes = buildBundleMailboxes(
+          pstRootDir,
+          scope,
+          currentJob.scope.scopePath,
+          scopeSession,
+          allowedCasePaths,
+          allowAllCases
+        )
+        const archiveBundles = buildBundleArchiveDescriptors(
+          pstRootDir,
+          scope,
+          currentJob.scope.scopePath,
+          allowedCasePaths,
+          allowAllCases
+        )
+
+        const mailboxWork: Array<{ mailbox: BundleMailboxDescriptor; reviews: ReviewRecord[] }> = []
+        const archiveWork: Array<{ bundle: ArchiveBundleDescriptor; reviews: ReviewRecord[] }> = []
+
+        for (const mailbox of mailboxes) {
+          const flaggedReviews = await reviewStore.listReviews(mailbox.mailboxKey, {
+            flaggedOnly: true,
+            reviewerUsername
+          })
+          if (flaggedReviews.length) {
+            mailboxWork.push({ mailbox, reviews: flaggedReviews })
+          }
+        }
+
+        for (const bundle of archiveBundles) {
+          const flaggedReviews = await reviewStore.listReviews(bundle.bundlePath, {
+            flaggedOnly: true,
+            reviewerUsername
+          })
+          if (flaggedReviews.length) {
+            archiveWork.push({ bundle, reviews: flaggedReviews })
+          }
+        }
+
+        const totalItems = mailboxWork.reduce((count, entry) => count + entry.reviews.length, 0) +
+          archiveWork.reduce((count, entry) => count + entry.reviews.length, 0)
+
+        mailboxBuilder = new FlaggedBundlePartBuilder(
+          'mailbox',
+          rootDir,
+          maxSizeBytes,
+          async (artifact, filePath) => persistArtifact('mailbox', artifact, filePath)
+        )
+        archiveBuilder = new FlaggedBundlePartBuilder(
+          'archive',
+          rootDir,
+          maxSizeBytes,
+          async (artifact, filePath) => persistArtifact('archive', artifact, filePath)
+        )
+
+        await updateJobProgress({
+          stage: 'collecting',
+          totalItems,
+          processedItems: 0,
+          failedItems: 0,
+          currentGroup: null,
+          currentLabel: totalItems > 0 ? 'Gathering flagged items' : 'No flagged items found'
+        })
+
+        if (totalItems > 0) {
+          await updateJobProgress({
+            stage: 'mailbox',
+            currentGroup: 'mailbox',
+            currentLabel: buildFlaggedBundleGroupLabel('mailbox')
+          })
+
+          for (const entry of mailboxWork) {
+            let mailboxSession = entry.mailbox.session || null
+            if (!mailboxSession) {
+              try {
+                mailboxSession = openPstMailbox(pstRootDir, entry.mailbox.scopePath, entry.mailbox.fileName)
+              } catch {
+                mailboxBuilder.recordFailure(entry.reviews.length)
+                processedItems += entry.reviews.length
+                await updateJobProgress({
+                  processedItems,
+                  failedItems: mailboxBuilder.failureCount + archiveBuilder.failureCount,
+                  currentLabel: entry.mailbox.scopeLabel
+                })
+                continue
+              }
+            }
+
+            if (!mailboxSession) {
+              mailboxBuilder.recordFailure(entry.reviews.length)
+              processedItems += entry.reviews.length
+              await updateJobProgress({
+                processedItems,
+                failedItems: mailboxBuilder.failureCount + archiveBuilder.failureCount,
+                currentLabel: entry.mailbox.scopeLabel
+              })
+              continue
+            }
+
+            for (const review of entry.reviews) {
+              const summary = mailboxSession.messages.get(review.messageId) || null
+              if (!summary) {
+                mailboxBuilder.recordFailure()
+                processedItems += 1
+                await updateJobProgress({
+                  processedItems,
+                  failedItems: mailboxBuilder.failureCount + archiveBuilder.failureCount,
+                  currentLabel: review.subject || review.messageId
+                })
+                continue
+              }
+
+              const payload =
+                review.kind === 'appointment'
+                  ? exportAppointmentAsIcsFromSession(mailboxSession, review.messageId)
+                  : exportMessageAsEmlFromSession(mailboxSession, review.messageId)
+              const mtime = summary.modificationTime
+                ? new Date(summary.modificationTime)
+                : summary.creationTime
+                  ? new Date(summary.creationTime)
+                  : new Date()
+              await mailboxBuilder.add(
+                buildBundleEntryPath(
+                  review.kind,
+                  entry.mailbox.scopePath,
+                  entry.mailbox.fileName,
+                  review.folderPath,
+                  review.subject,
+                  review.messageId
+                ),
+                payload,
+                mtime
+              )
+              processedItems += 1
+              await updateJobProgress({
+                processedItems,
+                failedItems: mailboxBuilder.failureCount + archiveBuilder.failureCount,
+                currentLabel: review.subject || review.messageId
+              })
+            }
+          }
+
+          const mailboxArtifacts = await mailboxBuilder.finish()
+          await markGroupComplete('mailbox', mailboxArtifacts, mailboxBuilder.itemCount, mailboxBuilder.failureCount)
+
+          await updateJobProgress({
+            stage: 'archive',
+            currentGroup: 'archive',
+            currentLabel: buildFlaggedBundleGroupLabel('archive')
+          })
+
+          for (const entry of archiveWork) {
+            for (const review of entry.reviews) {
+              const item = await searchIndexStore.findDocumentById(review.messageId)
+              if (!item || item.archivePath !== entry.bundle.bundlePath || !item.archiveEntryChain?.length) {
+                archiveBuilder.recordFailure()
+                processedItems += 1
+                await updateJobProgress({
+                  processedItems,
+                  failedItems: mailboxBuilder.failureCount + archiveBuilder.failureCount,
+                  currentLabel: review.subject || review.messageId
+                })
+                continue
+              }
+
+              const { buffer } = await readArchiveBundleItemContent(item.archivePath, item.archiveEntryChain)
+              const mtime = item.sortDate
+                ? new Date(item.sortDate)
+                : item.modificationTime
+                  ? new Date(item.modificationTime)
+                  : item.creationTime
+                    ? new Date(item.creationTime)
+                    : new Date()
+              await archiveBuilder.add(
+                buildArchiveBundleEntryPath(
+                  entry.bundle.scopePath,
+                  entry.bundle.fileName,
+                  item.archiveEntryPath || review.folderPath || review.messageId,
+                  item.downloadFilename || item.archiveEntryName || review.subject || review.messageId,
+                  review.messageId
+                ),
+                buffer,
+                mtime
+              )
+              processedItems += 1
+              await updateJobProgress({
+                processedItems,
+                failedItems: mailboxBuilder.failureCount + archiveBuilder.failureCount,
+                currentLabel: review.subject || review.messageId
+              })
+            }
+          }
+
+          const archiveArtifacts = await archiveBuilder.finish()
+          await markGroupComplete('archive', archiveArtifacts, archiveBuilder.itemCount, archiveBuilder.failureCount)
+        }
+
+        await updateJobProgress({
+          stage: 'finalizing',
+          currentGroup: null,
+          currentLabel: 'Finalizing flagged bundle',
+          processedItems,
+          failedItems: mailboxBuilder.failureCount + archiveBuilder.failureCount
+        })
+
+        currentJob.status = 'succeeded'
+        currentJob.completedAt = new Date().toISOString()
+        currentJob.workspaceLockKey = null
+        await updateJobProgress({
+          stage: 'succeeded',
+          currentGroup: null,
+          currentLabel: 'Flagged bundle ready',
+          processedItems,
+          failedItems: mailboxBuilder.failureCount + archiveBuilder.failureCount,
+          percent: 100
+        })
+        await persistCurrentJob()
+        await sendReadyEmail()
+      } catch (error) {
+        currentJob.status = 'failed'
+        currentJob.completedAt = new Date().toISOString()
+        currentJob.workspaceLockKey = null
+        currentJob.error = error instanceof Error ? error.message : String(error)
+        const failedItems =
+          (mailboxBuilder?.failureCount || 0) + (archiveBuilder?.failureCount || 0) ||
+          currentJob.progress.failedItems
+        await updateJobProgress({
+          stage: 'failed',
+          currentGroup: null,
+          currentLabel: 'Flagged bundle generation failed',
+          processedItems,
+          failedItems
+        })
+        await persistCurrentJob()
+      } finally {
+        try {
+          await fs.promises.rm(rootDir, { recursive: true, force: true })
+        } catch {
+          // ignore cleanup failures
+        }
+      }
+    })().catch((error) => {
+      console.warn('Flagged bundle export background task failed:', error)
+    })
+
+    return buildFlaggedBundleExportJobResponse(job)
+  }
+
+  app.post(API_ROUTES.flaggedBundlePrepare, async (req, res) => {
+    try {
+      const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      const notificationOrigin = normalizeOrigin(authConfig.publicBaseUrl) || getRequestBaseOrigin(req) || canonicalRequestOrigin(req)
+      const job = await createFlaggedBundleExportJob(
+        authSession,
+        req.body as FlaggedBundlePrepareBody,
+        notificationOrigin
+      )
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'bundle.export.prepare',
+        target: job.scope.scopeLabel,
+        outcome: 'success',
+        metadata: {
+          scope: job.scope.scope,
+          scopePath: job.scope.scopePath,
+          scopeLabel: job.scope.scopeLabel,
+          maxSizeBytes: job.maxSizeBytes
+        }
+      })
+      responseJson(res, 202, job)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.flaggedBundlePrepare, async (req, res) => {
+    try {
+      const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      const query = req.query as FlaggedBundleQuery
+      const scope = parseFlaggedBundleScope(query.scope)
+      const requestedScopePath = normalizeScopePath(query.scopePath)
+      const sessionId = normalizeText(query.sessionId)
+      const { reviewerUsername, workspaceKey, scopeDetails } = await resolveFlaggedBundleScopeDetails(
+        authSession,
+        scope,
+        requestedScopePath,
+        sessionId
+      )
+      const jobs = await flaggedBundleStore.listJobsForWorkspace(reviewerUsername, workspaceKey)
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'bundle.export.list',
+        target: scopeDetails.scopeLabel,
+        outcome: 'success',
+        metadata: {
+          scope: scopeDetails.scope,
+          scopePath: scopeDetails.scopePath,
+          scopeLabel: scopeDetails.scopeLabel,
+          jobCount: jobs.length
+        }
+      })
+      responseJson(res, 200, buildFlaggedBundleExportHistoryResponse(scopeDetails, workspaceKey, jobs))
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.delete(API_ROUTES.flaggedBundleJob, async (req, res) => {
+    try {
+      const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      const exportId = normalizeText(req.params.exportId)
+      const job = await flaggedBundleStore.getJob(exportId)
+      if (!job || job.ownerUsername !== getReviewOwnerUsername(authSession)) {
+        responseJson(res, 404, { error: 'Flagged bundle export not found' })
+        return
+      }
+      if (job.status === 'running') {
+        responseJson(res, 409, { error: 'Flagged bundle export is still running' })
+        return
+      }
+
+      const deleted = await flaggedBundleStore.deleteJob(exportId)
+      if (!deleted) {
+        responseJson(res, 404, { error: 'Flagged bundle export not found' })
+        return
+      }
+
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'bundle.export.delete',
+        target: job.scope.scopeLabel,
+        outcome: 'success',
+        metadata: {
+          scope: job.scope.scope,
+          scopePath: job.scope.scopePath,
+          scopeLabel: job.scope.scopeLabel,
+          exportId
+        }
+      })
+      responseJson(res, 200, { deleted: true, exportId } satisfies FlaggedBundleExportDeleteResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.flaggedBundleArtifact, async (req, res) => {
+    try {
+      const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      const exportId = normalizeText(req.params.exportId)
+      const artifactId = normalizeText(req.params.artifactId)
+      const job = await flaggedBundleStore.getJob(exportId)
+      if (!job || job.ownerUsername !== getReviewOwnerUsername(authSession)) {
+        responseJson(res, 404, {
+          error: 'Flagged bundle export not found'
+        })
+        return
+      }
+
+      const download = await flaggedBundleStore.openArtifactDownload(exportId, artifactId)
+      if (!download) {
+        responseJson(res, 404, {
+          error: 'Export artifact not found'
+        })
+        return
+      }
+
+      res.status(200)
+        .type('application/zip')
+        .set('Cache-Control', 'private, no-store, max-age=0')
+        .set('Content-Disposition', `attachment; filename="${download.artifact.fileName}"`)
+
+      const stream = download.stream
+      stream.on('error', (error) => {
+        if (!res.headersSent) {
+          createRouteErrorHandler(res, error)
+          return
+        }
+        res.destroy(error instanceof Error ? error : undefined)
+      })
+      stream.pipe(res)
     } catch (error) {
       createRouteErrorHandler(res, error)
     }

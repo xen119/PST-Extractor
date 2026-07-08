@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App, getCasePathFromScopePath } from '@/App'
 import { api } from '@/api'
 import { AppShell, EmailPreview, MessageList, Sidebar, TagManagerDialog } from '@/components/layout'
+import { FlaggedBundleDialog, type FlaggedBundleDialogScope } from '@/components/flagged-bundle-dialog'
 import { AuthScreen, MfaReminderDialog } from '@/components/auth'
 import type {
   ActivityLogResponse,
@@ -19,6 +20,8 @@ import type {
   PasswordResetConfirmResponse,
   PasswordResetLookupResponse,
   PstCatalogResponse,
+  FlaggedBundleJob,
+  FlaggedBundleJobsResponse,
   SearchIndexRefreshStatus,
   UsersResponse
 } from '@/types'
@@ -1515,6 +1518,391 @@ describe('shell and preview', () => {
     expect(within(dialog).getByRole('button', { name: /^SharePoint \/ OneDrive\s+0$/ })).toBeInTheDocument()
   })
 
+  it('lets the all items modal load more rows in a selected batch size', async () => {
+    const user = userEvent.setup()
+    const authenticatedStatus: AuthStatus = {
+      authenticated: true,
+      enabled: true,
+      canManageUsers: false,
+      mfaEnabled: true,
+      mfaEnforced: false,
+      lockedUntil: null,
+      loginFailedCount: 0,
+      passwordResetAvailable: false,
+      user: { username: 'admin', assignedCasePaths: [] },
+      expiresAt: null
+    }
+    const hiddenRulesResponse: HiddenRulesResponse = { items: [] }
+    const idleStatus: SearchIndexRefreshStatus = {
+      jobId: null,
+      status: 'idle',
+      trigger: null,
+      startedAt: null,
+      completedAt: null,
+      updatedAt: new Date().toISOString(),
+      summary: null,
+      error: null
+    }
+    const sourceCounts = { mailbox: 600, teams: 0, sharepoint: 0 }
+    const catalog: PstCatalogResponse = {
+      rootPath: '',
+      rootExists: true,
+      message: '',
+      scopePath: '',
+      scopeLabel: 'PST root',
+      scopes: [
+        {
+          scopePath: 'Case Alpha',
+          scopeLabel: 'Case Alpha',
+          fileCount: 1,
+          files: [
+            {
+              fileName: 'alpha.pst',
+              size: 1,
+              modifiedAt: new Date().toISOString(),
+              scopePath: 'Case Alpha',
+              displayPath: 'Case Alpha/alpha.pst'
+            }
+          ]
+        }
+      ],
+      files: []
+    }
+    const mailboxItems: MessageSummary[] = Array.from({ length: 600 }, (_, index) => ({
+      id: `mailbox-page-${index + 1}`,
+      messageId: `mailbox-page-${index + 1}`,
+      subject: `Mailbox item ${index + 1}`,
+      size: 1024 * 1024,
+      senderName: `Mailbox item ${index + 1} Sender`,
+      senderEmailAddress: `mailbox-page-${index + 1}@example.com`,
+      sortDate: `2024-01-${String((index % 28) + 1).padStart(2, '0')}T00:00:00.000Z`,
+      sourceType: 'mailbox',
+      review: {
+        flagged: false,
+        tags: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      },
+      scopeLabel: 'Mailbox scope',
+      scopePath: 'Case Alpha/Search1',
+      fileName: 'alpha.pst',
+      isMailLike: true,
+      folderPath: `Folder ${index + 1}`,
+      kind: 'mail'
+    }))
+
+    vi.spyOn(api.auth, 'me').mockResolvedValueOnce(authenticatedStatus)
+    vi.spyOn(api.pst, 'catalog').mockResolvedValueOnce(catalog)
+    vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue(hiddenRulesResponse)
+    vi.spyOn(api.pst, 'refreshSearchIndexStatus').mockResolvedValue({ status: idleStatus })
+    const searchSpy = vi.spyOn(api, 'search').mockImplementation(async (params) => {
+      if (params.pageSize === 1 && params.sourceType === 'all' && !params.casePath && !params.scopePath) {
+        return {
+          scope: 'all',
+          scopePath: '',
+          scopeLabel: 'All cases/searches',
+          sourceType: 'all',
+          page: {
+            items: [],
+            total: 600,
+            page: 1,
+            pageSize: 1,
+            totalPages: 600,
+            query: '',
+            mailOnly: false,
+            sort: 'date-desc',
+            sourceCounts
+          }
+        }
+      }
+
+      if (params.sourceType !== 'mailbox') {
+        throw new Error(`Unexpected search request: ${JSON.stringify(params)}`)
+      }
+
+      expect(params.casePath).toBe('Case Alpha')
+      const pageSize = Math.max(1, params.pageSize || 100)
+      const page = Math.max(1, params.page || 1)
+      const start = (page - 1) * pageSize
+      const items = mailboxItems.slice(start, start + pageSize)
+
+      return {
+        scope: 'all',
+        scopePath: '',
+        scopeLabel: 'All cases/searches',
+        sourceType: 'mailbox',
+        page: {
+          items,
+          total: mailboxItems.length,
+          page,
+          pageSize,
+          totalPages: Math.max(1, Math.ceil(mailboxItems.length / pageSize)),
+          query: '',
+          mailOnly: false,
+          sort: params.sort,
+          sourceCounts
+        }
+      }
+    })
+
+    render(
+      <div style={{ width: 1800, height: 1600 }}>
+        <App />
+      </div>
+    )
+
+    const caseSelect = await screen.findByRole('combobox', { name: 'Case' })
+    await user.selectOptions(caseSelect, 'Case Alpha')
+    await user.click(await screen.findByRole('button', { name: 'All items' }))
+    const dialog = await screen.findByRole('dialog', { name: /All items review/i })
+
+    expect(within(dialog).getByRole('combobox', { name: 'Items per load' })).toHaveValue('100')
+    await user.selectOptions(within(dialog).getByRole('combobox', { name: 'Items per load' }), '500')
+
+    await waitFor(() => {
+      expect(searchSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sourceType: 'mailbox',
+          casePath: 'Case Alpha',
+          page: 1,
+          pageSize: 500
+        })
+      )
+    })
+
+    await user.click(within(dialog).getByRole('button', { name: 'Load more items' }))
+
+    await waitFor(() => {
+      expect(searchSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sourceType: 'mailbox',
+          casePath: 'Case Alpha',
+          page: 2,
+          pageSize: 500
+        })
+      )
+    })
+  })
+
+  it('opens the flagged bundle dialog from the message list, shows progress, and rehydrates completed jobs', async () => {
+    const user = userEvent.setup()
+    const scope: FlaggedBundleDialogScope = {
+      scope: 'all',
+      scopePath: '',
+      sessionId: '',
+      sessionFileName: ''
+    }
+    const runningJob: FlaggedBundleJob = {
+      exportId: 'export-1',
+      ownerUsername: 'admin',
+      workspaceKey: 'all::::',
+      generatedAt: '2026-07-07T10:00:00.000Z',
+      startedAt: '2026-07-07T10:00:00.000Z',
+      completedAt: null,
+      updatedAt: '2026-07-07T10:00:05.000Z',
+      status: 'running',
+      scope: {
+        scope: 'all',
+        scopePath: '',
+        scopeLabel: 'All cases/searches',
+        sessionId: '',
+        sessionFileName: ''
+      },
+      maxSizeBytes: 12 * 1024 * 1024,
+      progress: {
+        stage: 'mailbox',
+        totalItems: 4,
+        processedItems: 2,
+        failedItems: 0,
+        percent: 50,
+        currentGroup: 'mailbox',
+        currentLabel: 'Mailbox'
+      },
+      error: null,
+      groups: [
+        {
+          groupType: 'mailbox',
+          label: 'Mailbox',
+          itemCount: 0,
+          failedCount: 0,
+          artifactCount: 0,
+          artifacts: []
+        },
+        {
+          groupType: 'archive',
+          label: 'Teams / SharePoint',
+          itemCount: 0,
+          failedCount: 0,
+          artifactCount: 0,
+          artifacts: []
+        }
+      ]
+    }
+    const completedJob: FlaggedBundleJob = {
+      ...runningJob,
+      completedAt: '2026-07-07T10:00:30.000Z',
+      updatedAt: '2026-07-07T10:00:30.000Z',
+      status: 'succeeded',
+      progress: {
+        stage: 'succeeded',
+        totalItems: 4,
+        processedItems: 4,
+        failedItems: 0,
+        percent: 100,
+        currentGroup: null,
+        currentLabel: 'Flagged bundle ready'
+      },
+      groups: [
+        {
+          groupType: 'mailbox',
+          label: 'Mailbox',
+          itemCount: 2,
+          failedCount: 0,
+          artifactCount: 1,
+          artifacts: [
+            {
+              artifactId: 'mailbox-1',
+              fileName: 'flagged-mailbox-part-1.zip',
+              downloadUrl: '/api/exports/flagged/export-1/files/mailbox-1',
+              partNumber: 1,
+              partCount: 1,
+              itemCount: 2,
+              sizeBytes: 1024,
+              exceedsMaxSize: false
+            }
+          ]
+        },
+        {
+          groupType: 'archive',
+          label: 'Teams / SharePoint',
+          itemCount: 2,
+          failedCount: 0,
+          artifactCount: 1,
+          artifacts: [
+            {
+              artifactId: 'archive-1',
+              fileName: 'flagged-teams-sharepoint-part-1.zip',
+              downloadUrl: '/api/exports/flagged/export-1/files/archive-1',
+              partNumber: 1,
+              partCount: 1,
+              itemCount: 2,
+              sizeBytes: 2048,
+              exceedsMaxSize: false
+            }
+          ]
+        }
+      ]
+    }
+    const historyResponse: FlaggedBundleJobsResponse = {
+      scope: completedJob.scope,
+      workspaceKey: completedJob.workspaceKey,
+      jobs: [completedJob]
+    }
+    let listCallCount = 0
+    const listSpy = vi.spyOn(api.exports, 'listFlaggedBundles').mockImplementation(async () => {
+      listCallCount += 1
+      return listCallCount === 1
+        ? {
+            scope: completedJob.scope,
+            workspaceKey: completedJob.workspaceKey,
+            jobs: []
+          }
+        : historyResponse
+    })
+    const prepareSpy = vi.spyOn(api.exports, 'prepareFlaggedBundle').mockResolvedValue(runningJob)
+    const deleteSpy = vi.spyOn(api.exports, 'deleteFlaggedBundle').mockResolvedValue({
+      deleted: true,
+      exportId: completedJob.exportId
+    })
+    window.localStorage.setItem('pst-mail-explorer.flaggedBundleSizePreset::admin', 'custom')
+    window.localStorage.setItem('pst-mail-explorer.flaggedBundleCustomSizeMb::admin', '12')
+
+    function Harness() {
+      const [open, setOpen] = React.useState(false)
+
+      return (
+        <>
+          <MessageList
+            page={null}
+            loading={false}
+            query=""
+            activeQuery=""
+            sourceType="mailbox"
+            searchScope="all"
+            mailOnly={false}
+            sort="date-desc"
+            reviewFlaggedOnly={false}
+            reviewTaggedOnly={false}
+            onQueryChange={vi.fn()}
+            onSearch={vi.fn()}
+            onSearchScopeChange={vi.fn()}
+            onMailOnlyChange={vi.fn()}
+            onSortChange={vi.fn()}
+            onReviewFlaggedChange={vi.fn()}
+            onReviewTaggedChange={vi.fn()}
+            onSelectMessage={vi.fn()}
+            onPrevPage={vi.fn()}
+            onNextPage={vi.fn()}
+            onOpenBundle={() => {
+              setOpen(true)
+            }}
+            selectedMessageId=""
+            sessionId={null}
+          />
+          <FlaggedBundleDialog
+            open={open}
+            authenticated
+            username="admin"
+            scope={scope}
+            onOpenChange={setOpen}
+          />
+        </>
+      )
+    }
+
+    render(<Harness />)
+
+    await user.click(screen.getByRole('button', { name: 'Download flagged bundle' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Download flagged bundle' })
+    expect(within(dialog).getByLabelText('Preset')).toHaveValue('custom')
+    expect(within(dialog).getByLabelText('Custom size in MB')).toHaveValue(12)
+    await waitFor(() => {
+      expect(within(dialog).getByRole('button', { name: 'Generate downloads' })).not.toBeDisabled()
+    })
+
+    await user.click(within(dialog).getByRole('button', { name: 'Generate downloads' }))
+
+    expect(prepareSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scope: 'all',
+        scopePath: undefined,
+        sessionId: undefined,
+        maxSizeBytes: 12 * 1024 * 1024
+      })
+    )
+    expect(await within(dialog).findByText('Current export')).toBeInTheDocument()
+    expect(within(dialog).getAllByText('Mailbox').length).toBeGreaterThan(0)
+    expect(within(dialog).getByText('50%')).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Generation in progress' })).toBeDisabled()
+
+    await user.click(within(dialog).getByRole('button', { name: 'Close' }))
+    await user.click(screen.getByRole('button', { name: 'Download flagged bundle' }))
+    const reopenedDialog = await screen.findByRole('dialog', { name: 'Download flagged bundle' })
+
+    expect(listSpy).toHaveBeenCalled()
+    expect(within(reopenedDialog).getByText('flagged-mailbox-part-1.zip')).toBeInTheDocument()
+    expect(within(reopenedDialog).getByText('flagged-teams-sharepoint-part-1.zip')).toBeInTheDocument()
+    expect(within(reopenedDialog).getAllByRole('link', { name: 'Download' })).toHaveLength(2)
+    expect(within(reopenedDialog).getByRole('button', { name: 'Delete' })).toBeInTheDocument()
+
+    await user.click(within(reopenedDialog).getByRole('button', { name: 'Delete' }))
+
+    expect(deleteSpy).toHaveBeenCalledWith('export-1')
+    await waitFor(() => {
+      expect(within(reopenedDialog).queryByText('flagged-mailbox-part-1.zip')).not.toBeInTheDocument()
+    })
+  })
+
   it('shows archive office document previews through the preview url', () => {
     render(
       <div style={{ width: 1200, height: 900 }}>
@@ -1893,6 +2281,7 @@ describe('shell and preview', () => {
         id,
         messageId: id,
         subject,
+        size: 1024 * 1024,
         senderName: `${subject} Sender`,
         senderEmailAddress: `${id}@example.com`,
         sortDate: now,
@@ -1911,6 +2300,7 @@ describe('shell and preview', () => {
       return {
         id,
         subject,
+        size: 1024 * 1024,
         senderName: `${subject} Sender`,
         senderEmailAddress: `${id}@example.com`,
         sortDate: now,
@@ -1974,24 +2364,30 @@ describe('shell and preview', () => {
       }
       const sourceCounts = { mailbox: 2, teams: 1, sharepoint: 1 }
       const alphaSummary = buildSummary('all-mailbox-1', 'Alpha proposal', 'mailbox', {
+        size: 1024 * 1024,
         scopeLabel: 'Mailbox scope',
         scopePath: 'Case Alpha/Search1',
         folderPath: 'Folder A',
         sortDate: '2024-01-01T00:00:00.000Z'
       })
       const betaSummary = buildSummary('all-mailbox-2', 'Budget review', 'mailbox', {
+        size: 2 * 1024 * 1024,
+        review: buildReview(true),
         scopeLabel: 'Mailbox scope',
         scopePath: 'Case Alpha/Search1',
         folderPath: 'Folder B',
         sortDate: '2024-01-02T00:00:00.000Z'
       })
       const teamsSummary = buildSummary('all-teams-1', 'Teams item one', 'teams', {
+        size: 3 * 1024 * 1024,
+        review: buildReview(true),
         scopeLabel: 'Teams scope',
         scopePath: 'Case Alpha/Search1',
         archivePath: 'teams.zip',
         archiveEntryPath: 'Messages/teams-item.json'
       })
       const sharepointSummary = buildSummary('all-sharepoint-1', 'SharePoint item one', 'sharepoint', {
+        size: 4 * 1024 * 1024,
         scopeLabel: 'SharePoint scope',
         scopePath: 'Case Alpha/Search1',
         archivePath: 'sharepoint.zip',
@@ -2067,6 +2463,7 @@ describe('shell and preview', () => {
               query: '',
               mailOnly: false,
               sort: params.sort,
+              flaggedSizeBytes: 2 * 1024 * 1024,
               sourceCounts
             }
           }
@@ -2087,6 +2484,7 @@ describe('shell and preview', () => {
               query: '',
               mailOnly: false,
               sort: params.sort,
+              flaggedSizeBytes: 3 * 1024 * 1024,
               sourceCounts
             }
           }
@@ -2107,6 +2505,7 @@ describe('shell and preview', () => {
               query: '',
               mailOnly: false,
               sort: params.sort,
+              flaggedSizeBytes: 0,
               sourceCounts
             }
           }
@@ -2135,6 +2534,9 @@ describe('shell and preview', () => {
 
       expect(await screen.findByText('Budget review')).toBeInTheDocument()
       expect(screen.getByText('Alpha proposal')).toBeInTheDocument()
+      expect(within(dialog).getByText('Flagged size: 2.0 MB')).toBeInTheDocument()
+      expect(within(dialog).getByText('1.0 MB')).toBeInTheDocument()
+      expect(within(dialog).getByText('2.0 MB')).toBeInTheDocument()
 
       await user.click(within(dialog).getByRole('button', { name: /Sort by Subject/i }))
 
@@ -2149,6 +2551,36 @@ describe('shell and preview', () => {
       })
 
       expect(within(dialog).getByText('Alpha proposal')).toBeInTheDocument()
+
+      await user.click(within(dialog).getByRole('button', { name: /^Teams\s+1$/ }))
+
+      await waitFor(() => {
+        expect(searchSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sourceType: 'teams',
+            casePath: 'Case Alpha'
+          })
+        )
+      })
+
+      expect(await screen.findByText('Teams item one')).toBeInTheDocument()
+      expect(within(dialog).getByText('Flagged size: 3.0 MB')).toBeInTheDocument()
+      expect(within(dialog).getByText('3.0 MB')).toBeInTheDocument()
+
+      await user.click(within(dialog).getByRole('button', { name: /^SharePoint \/ OneDrive\s+1$/ }))
+
+      await waitFor(() => {
+        expect(searchSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sourceType: 'sharepoint',
+            casePath: 'Case Alpha'
+          })
+        )
+      })
+
+      expect(await screen.findByText('SharePoint item one')).toBeInTheDocument()
+      expect(within(dialog).getByText('Flagged size: 0 B')).toBeInTheDocument()
+      expect(within(dialog).getByText('4.0 MB')).toBeInTheDocument()
     })
 
     it('resets page 1 on filter changes, loads more only from the button, and ignores scroll-driven paging', async () => {
@@ -2213,6 +2645,7 @@ describe('shell and preview', () => {
               query: '',
               mailOnly: false,
               sort: 'date-desc',
+              flaggedSizeBytes: 100 * 1024 * 1024,
               sourceCounts
             }
           }
@@ -2235,6 +2668,7 @@ describe('shell and preview', () => {
               query: '',
               mailOnly: false,
               sort: 'date-desc',
+              flaggedSizeBytes: 100 * 1024 * 1024,
               sourceCounts
             }
           }
@@ -2255,6 +2689,7 @@ describe('shell and preview', () => {
               query: '',
               mailOnly: true,
               sort: params.sort,
+              flaggedSizeBytes: 1024 * 1024,
               sourceCounts
             }
           }
@@ -2275,6 +2710,7 @@ describe('shell and preview', () => {
               query: '',
               mailOnly: false,
               sort: params.sort,
+              flaggedSizeBytes: 100 * 1024 * 1024,
               sourceCounts
             }
           }
@@ -2295,6 +2731,7 @@ describe('shell and preview', () => {
               query: '',
               mailOnly: false,
               sort: params.sort,
+              flaggedSizeBytes: 100 * 1024 * 1024,
               sourceCounts
             }
           }
@@ -2356,6 +2793,7 @@ describe('shell and preview', () => {
 
       expect(await screen.findByText('Mailbox item 120')).toBeInTheDocument()
       expect(screen.getByText('Mailbox item 1')).toBeInTheDocument()
+      expect(within(dialog).getByText('Flagged size: 100 MB')).toBeInTheDocument()
 
       await user.click(within(dialog).getByRole('checkbox', { name: 'Select item Mailbox item 1' }))
       await waitFor(() => {
@@ -2377,6 +2815,9 @@ describe('shell and preview', () => {
 
       expect(await screen.findByText('Filtered mailbox item')).toBeInTheDocument()
       expect(screen.queryByText('Mailbox item 120')).not.toBeInTheDocument()
+      await waitFor(() => {
+      expect(within(dialog).getByText('Flagged size: 1.0 MB')).toBeInTheDocument()
+      })
       await waitFor(() => {
         expect(within(dialog).queryByText(/item selected/)).not.toBeInTheDocument()
       })

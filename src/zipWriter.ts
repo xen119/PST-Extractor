@@ -55,7 +55,7 @@ function toDosDateTime(value: Date): { date: number; time: number } {
   }
 }
 
-function normalizeEntryName(name: string): string {
+export function normalizeZipEntryName(name: string): string {
   return String(name || '')
     .replace(/\\/g, '/')
     .replace(/^\/+/, '')
@@ -63,6 +63,11 @@ function normalizeEntryName(name: string): string {
     .map((segment) => segment.trim())
     .filter(Boolean)
     .join('/')
+}
+
+export function estimateZipEntrySize(name: string, contentLength: number): number {
+  const normalizedName = normalizeZipEntryName(name)
+  return 76 + Buffer.byteLength(normalizedName, 'utf8') * 2 + Math.max(0, contentLength)
 }
 
 function toBuffer(value: Buffer | string): Buffer {
@@ -152,7 +157,7 @@ export class ZipStreamWriter {
       throw new Error('ZIP archive already finalized')
     }
 
-    const entryName = normalizeEntryName(name)
+    const entryName = normalizeZipEntryName(name)
     if (!entryName) {
       throw new Error('ZIP entry name is required')
     }

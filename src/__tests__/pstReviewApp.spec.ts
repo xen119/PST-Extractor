@@ -7,6 +7,7 @@ import { AddressInfo } from 'net'
 import { generateTotpCode } from '../authSecurity'
 import { createMemoryAuthUserStore, type AuthUserStore } from '../authUsers'
 import { createMemoryAppSettingsStore, type AppSettingsStore } from '../appSettings'
+import { createMemoryFlaggedBundleStore, type FlaggedBundleStore } from '../flaggedBundleStore'
 import { buildOpenApiDocument } from '../openApi'
 import { createPstReviewApp, type ApiSecurityConfig, type AppAuthConfig } from '../pstReviewApp'
 import { MemoryReviewStore } from '../reviewStore'
@@ -28,6 +29,7 @@ jest.setTimeout(30000)
 
 interface StartAppOptions {
   searchIndexStore?: MemorySearchIndexStore
+  flaggedBundleStore?: FlaggedBundleStore
   skipInitialRefresh?: boolean
   backgroundInitialRefresh?: boolean
 }
@@ -206,6 +208,7 @@ function makeSearchIndexDocument(overrides: Partial<SearchIndexDocument> = {}): 
     order: 1,
     messageClass: 'IPM.Note',
     kind: 'mail',
+    size: 1024 * 1024,
     subject: 'Project Alpha',
     originalSubject: 'Re: Project Alpha',
     senderName: 'Alice Example',
@@ -275,11 +278,13 @@ async function startApp(
   const auditLogDir = path.join(path.dirname(pstRootDir), 'logs')
   const reviewStore = new MemoryReviewStore()
   const searchIndexStore = options?.searchIndexStore || new MemorySearchIndexStore()
+  const flaggedBundleStore = options?.flaggedBundleStore || createMemoryFlaggedBundleStore()
   const app = createPstReviewApp({
     publicDir,
     pstRootDir,
     reviewStore,
     searchIndexStore,
+    flaggedBundleStore,
     openApiSpec: buildOpenApiDocument({
       version: 'test',
       reviewStorageMode: reviewStore.kind
@@ -1871,6 +1876,269 @@ describe('pst review api', () => {
     expect(csvLines.some((line) => line.startsWith('"sharepoint",'))).toBe(true)
   })
 
+  it('starts flagged bundle jobs, preserves downloads, and notifies the requester', async () => {
+    rootDir = makeTempDir('pst-review-api-flagged-manifest-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
+    stageFixture(enronPath, path.join(pstDir, 'Case1', 'Search1', 'mailbox.pst'))
+    stageArchiveBundle(path.join(pstDir, 'Case1', 'Search1', 'Items.1.001.BONUS_AND_COMMISSION_DECISION_MAKING.zip'), [
+      ['Exchange/Thread/TeamsMessagesData/chat-1.json', JSON.stringify({ subject: 'Launch bundle alpha', body: 'Launch alpha body' })],
+      ['Exchange/Thread/TeamsMessagesData/chat-2.json', JSON.stringify({ subject: 'Launch bundle beta', body: 'Launch beta body' })]
+    ])
+
+    const authUserStore = createMemoryAuthUserStore([
+      { username: 'admin', password: 'pst-extractor', recipientEmail: 'admin@example.com' }
+    ])
+    const appSettingsStore = createMemoryAppSettingsStore()
+    await appSettingsStore.updateSmtpSettings({
+      enabled: true,
+      host: 'smtp.example.com',
+      port: 25,
+      secure: false,
+      username: 'smtp-user',
+      password: 'smtp-pass',
+      fromName: 'PST Mail Explorer',
+      fromAddress: 'noreply@example.com'
+    })
+    const smtpMessages: Array<Record<string, unknown>> = []
+    const smtpTransportFactory = () => ({
+      async sendMail(message: Record<string, unknown>) {
+        smtpMessages.push(message)
+        return {
+          messageId: 'message-1',
+          accepted: ['admin@example.com'],
+          rejected: []
+        }
+      },
+      async close() {
+        return undefined
+      }
+    })
+    const flaggedBundleStore = createMemoryFlaggedBundleStore()
+    const originalAddArtifact = flaggedBundleStore.addArtifact.bind(flaggedBundleStore)
+    let releaseArtifactGate: (() => void) | null = null
+    let blockedFirstArtifact = false
+    let signalArtifactStarted: (() => void) | null = null
+    const addArtifactStarted = new Promise<void>((resolve) => {
+      signalArtifactStarted = resolve
+    })
+    flaggedBundleStore.addArtifact = async (...args) => {
+      if (!blockedFirstArtifact) {
+        blockedFirstArtifact = true
+        signalArtifactStarted?.()
+        await new Promise<void>((resolve) => {
+          releaseArtifactGate = resolve
+        })
+      }
+      return originalAddArtifact(...args)
+    }
+
+    const started = await startApp(
+      pstDir,
+      undefined,
+      {
+        username: 'admin',
+        password: 'pst-extractor',
+        sessionTtlMinutes: 180
+      },
+      authUserStore,
+      appSettingsStore,
+      smtpTransportFactory,
+      { flaggedBundleStore }
+    )
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    async function login(username: string, password: string): Promise<string> {
+      const response = await fetch(`${started.baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ username, password })
+      })
+      expect(response.status).toBe(200)
+      return getCookiePair(getSetCookieHeader(response))
+    }
+
+    const adminCookie = await login('admin', 'pst-extractor')
+
+    const mailboxSearch = await requestJson(
+      `${started.baseUrl}/api/search?scope=all&sourceType=mailbox&query=&mode=and&page=1&pageSize=20&mailOnly=1&sort=date-desc`,
+      {
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    const mailboxFlagged = mailboxSearch.page.items.slice(0, 2)
+    expect(mailboxFlagged).toHaveLength(2)
+    for (const item of mailboxFlagged) {
+      await requestJson(`${started.baseUrl}/api/items/${encodeURIComponent(item.id)}/review`, {
+        method: 'PATCH',
+        headers: {
+          Cookie: adminCookie,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ flagged: true })
+      })
+    }
+
+    const archiveSearch = await requestJson(
+      `${started.baseUrl}/api/search?scope=search&scopePath=${encodeURIComponent(
+        'Case1/Search1'
+      )}&sourceType=teams&query=launch&mode=and&page=1&pageSize=20&mailOnly=0&sort=date-desc`,
+      {
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    const archiveFlagged = archiveSearch.page.items.slice(0, 2)
+    expect(archiveFlagged).toHaveLength(2)
+    for (const item of archiveFlagged) {
+      await requestJson(`${started.baseUrl}/api/items/${encodeURIComponent(item.id)}/review`, {
+        method: 'PATCH',
+        headers: {
+          Cookie: adminCookie,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ flagged: true })
+      })
+    }
+
+    const searchScopeBundle = await requestJson(
+      `${started.baseUrl}/api/exports/flagged`,
+      {
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    expect(searchScopeBundle.jobs).toHaveLength(0)
+
+    const startResponse = await requestJson(
+      `${started.baseUrl}/api/exports/flagged`,
+      {
+        method: 'POST',
+        headers: {
+          Cookie: adminCookie,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          scope: 'all',
+          maxSizeBytes: 1
+        })
+      }
+    )
+    expect(startResponse.status).toBe('running')
+    expect(startResponse.progress.stage).toBe('collecting')
+
+    await addArtifactStarted
+
+    const runningHistory = await requestJson(
+      `${started.baseUrl}/api/exports/flagged?scope=all`,
+      {
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    expect(runningHistory.jobs).toHaveLength(1)
+    expect(runningHistory.jobs[0].status).toBe('running')
+
+    const duplicateResponse = await fetch(`${started.baseUrl}/api/exports/flagged`, {
+      method: 'POST',
+      headers: {
+        Cookie: adminCookie,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        scope: 'all',
+        maxSizeBytes: 1
+      })
+    })
+    expect(duplicateResponse.status).toBe(409)
+
+    releaseArtifactGate?.()
+
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const history = await requestJson(`${started.baseUrl}/api/exports/flagged?scope=all`, {
+        headers: {
+          Cookie: adminCookie
+        }
+      })
+      if (history.jobs[0].status === 'succeeded') {
+        break
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      if (attempt === 99) {
+        expect(history.jobs[0].status).toBe('succeeded')
+      }
+    }
+
+    const completedHistory = await requestJson(
+      `${started.baseUrl}/api/exports/flagged?scope=all`,
+      {
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    const completedJob = completedHistory.jobs[0]
+    expect(completedJob.status).toBe('succeeded')
+    expect(completedJob.groups.some((group: { artifactCount: number }) => group.artifactCount > 0)).toBe(true)
+
+    const completedArtifact = completedJob.groups
+      .flatMap((group: { artifacts: Array<{ downloadUrl: string }> }) => group.artifacts)
+      .find((artifact: { downloadUrl: string }) => Boolean(artifact.downloadUrl))
+    expect(completedArtifact).toBeTruthy()
+    if (!completedArtifact) {
+      throw new Error('Expected a completed artifact download URL')
+    }
+
+    const artifactResponse = await fetch(`${started.baseUrl}${completedArtifact.downloadUrl}`, {
+      headers: {
+        Cookie: adminCookie
+      }
+    })
+    expect(artifactResponse.status).toBe(200)
+    expect(artifactResponse.headers.get('content-type')).toContain('application/zip')
+
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (smtpMessages.length === 1) {
+        break
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      if (attempt === 99) {
+        expect(smtpMessages).toHaveLength(1)
+      }
+    }
+
+    expect(smtpMessages).toHaveLength(1)
+    expect(String(smtpMessages[0].to)).toBe('admin@example.com')
+    expect(String(smtpMessages[0].subject)).toContain('Flagged bundle ready')
+
+    const deleteResponse = await requestJson(
+      `${started.baseUrl}/api/exports/flagged/${encodeURIComponent(completedJob.exportId)}`,
+      {
+        method: 'DELETE',
+        headers: {
+          Cookie: adminCookie
+        }
+      }
+    )
+    expect(deleteResponse.deleted).toBe(true)
+
+    const deletedDownload = await fetch(`${started.baseUrl}${completedArtifact.downloadUrl}`, {
+      headers: {
+        Cookie: adminCookie
+      }
+    })
+    expect(deletedDownload.status).toBe(404)
+  })
+
   it('does not leak archive search results across case/search scopes', async () => {
     rootDir = makeTempDir('pst-review-api-archive-scope-')
     const pstDir = path.join(rootDir, 'PST')
@@ -1966,9 +2234,36 @@ describe('pst review api', () => {
       }
     )
     expect(allowedSearch.page.total).toBeGreaterThan(0)
+    expect(allowedSearch.page.items[0].size).toBeGreaterThan(0)
+    expect(allowedSearch.page.flaggedSizeBytes).toBe(0)
     expect(allowedSearch.page.items.every((item: { scopePath?: string }) => String(item.scopePath || '').startsWith('Case1'))).toBe(
       true
     )
+
+    const firstAllowedItem = allowedSearch.page.items[0]
+    await requestJson(`${started.baseUrl}/api/items/${encodeURIComponent(firstAllowedItem.id)}/review`, {
+      method: 'PATCH',
+      headers: {
+        Cookie: bobCookie,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        flagged: true
+      })
+    })
+
+    const flaggedSearch = await requestJson(
+      `${started.baseUrl}/api/search?scope=all&casePath=${encodeURIComponent(
+        'Case1'
+      )}&sourceType=mailbox&query=&mode=and&page=1&pageSize=20&mailOnly=1&sort=date-desc`,
+      {
+        headers: {
+          Cookie: bobCookie
+        }
+      }
+    )
+    expect(flaggedSearch.page.flaggedSizeBytes).toBe(firstAllowedItem.size)
+    expect(flaggedSearch.page.items[0].size).toBe(firstAllowedItem.size)
 
     const deniedResponse = await fetch(
       `${started.baseUrl}/api/search?scope=all&casePath=${encodeURIComponent(
@@ -3548,8 +3843,10 @@ describe('pst review api', () => {
     expect(mailboxSearch.page.sourceCounts.mailbox).toBe(1)
     expect(mailboxSearch.page.sourceCounts.teams).toBe(0)
     expect(mailboxSearch.page.items[0].messageId).toBe('message:mail-1')
+    expect(mailboxSearch.page.items[0].size).toBe(1024 * 1024)
     expect(mailboxSearch.page.items[0].scopePath).toBe('Case1/Search1')
     expect(mailboxSearch.page.items[0].previewText).toBeUndefined()
+    expect(mailboxSearch.page.flaggedSizeBytes).toBe(0)
 
     const teamsSearch = await requestJson(
       `${started.baseUrl}/api/search?scope=search&scopePath=${encodeURIComponent(
@@ -3563,7 +3860,9 @@ describe('pst review api', () => {
     expect(teamsSearch.page.sourceCounts.teams).toBe(1)
     expect(teamsSearch.page.items[0].sourceType).toBe('teams')
     expect(teamsSearch.page.items[0].messageId).toBe('message:teams-1')
+    expect(teamsSearch.page.items[0].size).toBe(1024 * 1024)
     expect(teamsSearch.page.items[0].previewHtml).toBeUndefined()
+    expect(teamsSearch.page.flaggedSizeBytes).toBe(0)
   })
 
   it('returns all-source counts for all cases, a case, and a search scope', async () => {

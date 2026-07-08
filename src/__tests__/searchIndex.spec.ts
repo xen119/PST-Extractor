@@ -16,23 +16,24 @@ const enronPath = path.resolve('./src/__tests__/testdata/enron.pst')
 
 function makeDocument(overrides: Partial<SearchIndexDocument> = {}): SearchIndexDocument {
   const now = new Date('2024-01-01T00:00:00.000Z').toISOString()
-  const base: SearchIndexDocument = {
-    mailboxKey: 'C:/PST/Case1/Search1/alpha.pst',
-    scopePath: 'Case1/Search1',
-    scopeLabel: 'Case1 / Search1',
-    fileName: 'alpha.pst',
-    mailboxName: 'Alpha',
-    messageId: 'message:1',
-    descriptorId: '1',
-    folderId: 'folder:1',
-    folderPath: 'Inbox',
-    order: 1,
-    messageClass: 'IPM.Note',
-    kind: 'mail',
-    subject: 'Project Alpha',
-    originalSubject: 'Re: Project Alpha',
-    senderName: 'Alice Example',
-    senderEmailAddress: 'alice@example.com',
+    const base: SearchIndexDocument = {
+      mailboxKey: 'C:/PST/Case1/Search1/alpha.pst',
+      scopePath: 'Case1/Search1',
+      scopeLabel: 'Case1 / Search1',
+      fileName: 'alpha.pst',
+      mailboxName: 'Alpha',
+      messageId: 'message:1',
+      descriptorId: '1',
+      folderId: 'folder:1',
+      folderPath: 'Inbox',
+      order: 1,
+      messageClass: 'IPM.Note',
+      kind: 'mail',
+      size: 1024 * 1024,
+      subject: 'Project Alpha',
+      originalSubject: 'Re: Project Alpha',
+      senderName: 'Alice Example',
+      senderEmailAddress: 'alice@example.com',
     recipientText: 'Bob Example <bob@example.com>',
     displayTo: 'Bob Example <bob@example.com>',
     displayCC: '',
@@ -472,6 +473,181 @@ describe('search index cache', () => {
     })
     expect(restored.total).toBe(1)
     expect(restored.items[0].messageId).toBe('message:1')
+  })
+
+  it('includes item sizes and keeps flagged-size totals stable across paging', async () => {
+    const store = new MemorySearchIndexStore()
+    const flaggedAt = new Date('2024-01-03T00:00:00.000Z').toISOString()
+    const unflaggedAt = new Date('2024-01-02T00:00:00.000Z').toISOString()
+    const olderAt = new Date('2024-01-01T00:00:00.000Z').toISOString()
+
+    await store.replaceMailboxDocuments('C:/PST/Case1/Search1/mailbox.pst', [
+      makeDocument({
+        mailboxKey: 'C:/PST/Case1/Search1/mailbox.pst',
+        fileName: 'mailbox.pst',
+        mailboxName: 'Mailbox',
+        messageId: 'message:mail-1',
+        descriptorId: 'mail-1',
+        folderId: 'folder:mail-1',
+        folderPath: 'Inbox',
+        sourceType: 'mailbox',
+        size: 1024 * 1024,
+        sortDateMs: Date.parse(flaggedAt),
+        sortDate: flaggedAt,
+        reviewStates: [
+          {
+            reviewerUsername: 'admin',
+            review: {
+              flagged: true,
+              tags: [],
+              createdAt: flaggedAt,
+              updatedAt: flaggedAt
+            }
+          }
+        ]
+      })
+    ])
+    await store.replaceMailboxDocuments('C:/PST/Case1/Search1/items.zip', [
+      makeDocument({
+        mailboxKey: 'C:/PST/Case1/Search1/items.zip',
+        fileName: 'items.zip',
+        mailboxName: 'Teams bundle',
+        messageId: 'message:teams-1',
+        descriptorId: 'teams-1',
+        folderId: 'folder:teams-1',
+        folderPath: 'Teams',
+        sourceType: 'teams',
+        kind: 'other',
+        messageClass: 'IPM.Note',
+        isMailLike: false,
+        size: 2 * 1024 * 1024,
+        senderName: 'Teams',
+        senderEmailAddress: '',
+        recipientText: '',
+        displayTo: '',
+        displayCC: '',
+        displayBCC: '',
+        resolvedDisplayTo: '',
+        resolvedDisplayCC: '',
+        resolvedDisplayBCC: '',
+        subject: 'Teams update',
+        originalSubject: 'Teams update',
+        searchText: 'teams update',
+        searchTokens: ['teams', 'update'],
+        addressValues: [],
+        subjectValues: ['teams update'],
+        sortDateMs: Date.parse(unflaggedAt),
+        sortDate: unflaggedAt,
+        reviewStates: [
+          {
+            reviewerUsername: 'admin',
+            review: {
+              flagged: false,
+              tags: [],
+              createdAt: unflaggedAt,
+              updatedAt: unflaggedAt
+            }
+          }
+        ]
+      }),
+      makeDocument({
+        mailboxKey: 'C:/PST/Case1/Search1/items.zip',
+        fileName: 'items.zip',
+        mailboxName: 'SharePoint bundle',
+        messageId: 'message:sharepoint-1',
+        descriptorId: 'sharepoint-1',
+        folderId: 'folder:sharepoint-1',
+        folderPath: 'SharePoint',
+        sourceType: 'sharepoint',
+        kind: 'other',
+        messageClass: 'IPM.Document',
+        isMailLike: false,
+        size: 3 * 1024 * 1024,
+        senderName: 'SharePoint',
+        senderEmailAddress: '',
+        recipientText: '',
+        displayTo: '',
+        displayCC: '',
+        displayBCC: '',
+        resolvedDisplayTo: '',
+        resolvedDisplayCC: '',
+        resolvedDisplayBCC: '',
+        subject: 'SharePoint file',
+        originalSubject: 'SharePoint file',
+        searchText: 'sharepoint file',
+        searchTokens: ['sharepoint', 'file'],
+        addressValues: [],
+        subjectValues: ['sharepoint file'],
+        sortDateMs: Date.parse(olderAt),
+        sortDate: olderAt,
+        reviewStates: [
+          {
+            reviewerUsername: 'admin',
+            review: {
+              flagged: true,
+              tags: [],
+              createdAt: olderAt,
+              updatedAt: olderAt
+            }
+          }
+        ]
+      })
+    ])
+
+    const allResults = await store.search({
+      scope: 'all',
+      casePath: 'Case1',
+      query: '',
+      mode: 'and',
+      mailOnly: false,
+      sort: 'date-desc',
+      page: 1,
+      pageSize: 20,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: '',
+      reviewerUsername: 'admin'
+    })
+
+    expect(allResults.total).toBe(3)
+    expect(allResults.items.find((item) => item.sourceType === 'mailbox')?.size).toBe(1024 * 1024)
+    expect(allResults.items.find((item) => item.sourceType === 'teams')?.size).toBe(2 * 1024 * 1024)
+    expect(allResults.items.find((item) => item.sourceType === 'sharepoint')?.size).toBe(3 * 1024 * 1024)
+    expect(allResults.flaggedSizeBytes).toBe(4 * 1024 * 1024)
+
+    const firstPage = await store.search({
+      scope: 'all',
+      casePath: 'Case1',
+      query: '',
+      mode: 'and',
+      mailOnly: false,
+      sort: 'date-desc',
+      page: 1,
+      pageSize: 1,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: '',
+      reviewerUsername: 'admin'
+    })
+    const secondPage = await store.search({
+      scope: 'all',
+      casePath: 'Case1',
+      query: '',
+      mode: 'and',
+      mailOnly: false,
+      sort: 'date-desc',
+      page: 2,
+      pageSize: 1,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: '',
+      reviewerUsername: 'admin'
+    })
+
+    expect(firstPage.flaggedSizeBytes).toBe(4 * 1024 * 1024)
+    expect(secondPage.flaggedSizeBytes).toBe(4 * 1024 * 1024)
+    expect(firstPage.items).toHaveLength(1)
+    expect(secondPage.items).toHaveLength(1)
   })
 
   it('resolves review filters per reviewer username', async () => {

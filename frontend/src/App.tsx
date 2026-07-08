@@ -34,6 +34,7 @@ import {
   type InviteStep
 } from '@/components/auth'
 import { AllItemsDialog } from '@/components/all-items-dialog'
+import { FlaggedBundleDialog, type FlaggedBundleDialogScope } from '@/components/flagged-bundle-dialog'
 import { AppShell, EmailPreview, EmptyState, MessageList, Sidebar, TagManagerDialog } from '@/components/layout'
 import { Badge, Button, Dialog, DialogContent, DialogDescription, DialogTitle, IconButton, Input, PopoverClose, ScrollArea, Separator } from '@/components/ui'
 import { deriveSearchMode, normalizeSearchResultsPage, resolveSelectionScope } from '@/lib/search'
@@ -408,6 +409,7 @@ export function App() {
   const [clearFlagsLoading, setClearFlagsLoading] = React.useState(false)
   const [clearFlagsError, setClearFlagsError] = React.useState('')
   const [allItemsDialogOpen, setAllItemsDialogOpen] = React.useState(false)
+  const [flaggedBundleDialogOpen, setFlaggedBundleDialogOpen] = React.useState(false)
   const [searchIndexRefreshStatuses, setSearchIndexRefreshStatuses] = React.useState<
     Record<SearchIndexRefreshSource, SearchIndexRefreshStatus | null>
   >({
@@ -498,6 +500,44 @@ export function App() {
     }
     return selectedScopePath || selectedCasePath
   }, [mailboxSearchScopePath, selectedCasePath, selectedScopePath, sourceType])
+  const flaggedBundleScope = React.useMemo<FlaggedBundleDialogScope>(() => {
+    const scopePath = activeSearchScopePath || selectedScopePath || selectedCasePath
+
+    if (workspaceMode === 'search') {
+      const scope: FlaggedBundleDialogScope['scope'] = searchScope === 'pst' && !sessionId ? 'all' : searchScope
+      return {
+        scope,
+        scopePath,
+        sessionId: scope === 'pst' ? sessionId || '' : '',
+        sessionFileName: sessionSummary?.fileName || selectedPstFileName || ''
+      }
+    }
+
+    if (sessionId) {
+      return {
+        scope: 'pst',
+        scopePath,
+        sessionId,
+        sessionFileName: sessionSummary?.fileName || selectedPstFileName || ''
+      }
+    }
+
+    return {
+      scope: 'all',
+      scopePath: '',
+      sessionId: '',
+      sessionFileName: ''
+    }
+  }, [
+    activeSearchScopePath,
+    selectedCasePath,
+    selectedPstFileName,
+    selectedScopePath,
+    searchScope,
+    sessionId,
+    sessionSummary?.fileName,
+    workspaceMode
+  ])
   const searchSessionKey = React.useMemo(() => {
     if (workspaceMode !== 'search') {
       return sessionId || ''
@@ -2986,21 +3026,7 @@ export function App() {
         workspaceMode === 'search' ? void loadSearchPage(nextPage) : void loadFolderPage(currentFolderId, nextPage)
       }}
       onOpenBundle={() => {
-        if (!sessionId) {
-          return
-        }
-        const scope = workspaceMode === 'search' && searchScope !== 'pst' ? searchScope : 'pst'
-        const url = api.session.flaggedBundleUrl({
-          scope,
-          scopePath: activeSearchScopePath,
-          sessionId,
-          query: searchQuery,
-          mailOnly,
-          sort,
-          reviewFlagged: reviewFlaggedOnly,
-          reviewTagged: reviewTaggedOnly
-        })
-        triggerDownload(url, 'flagged-bundle.zip')
+        setFlaggedBundleDialogOpen(true)
       }}
       selectedMessageId={selectedMessageId}
       sessionId={sessionId}
@@ -3403,6 +3429,13 @@ export function App() {
         onRefreshCounts={() => {
           void loadSourceCounts()
         }}
+      />
+      <FlaggedBundleDialog
+        open={flaggedBundleDialogOpen}
+        authenticated={authenticated}
+        username={username}
+        scope={flaggedBundleScope}
+        onOpenChange={setFlaggedBundleDialogOpen}
       />
     </>
   ) : null

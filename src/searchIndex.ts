@@ -41,6 +41,7 @@ export interface SearchIndexDocument {
   order: number
   messageClass: string
   kind: MessageSummary['kind']
+  size: number
   subject: string
   originalSubject: string
   senderName: string
@@ -146,6 +147,7 @@ export interface SearchIndexPage {
   hiddenRules: HiddenRuleRecord[]
   sourceType: SearchSourceType | 'all'
   sourceCounts: Record<SearchSourceType, number>
+  flaggedSizeBytes: number
   reviewFilters: {
     flaggedOnly: boolean
     taggedOnly: boolean
@@ -190,6 +192,7 @@ interface SearchIndexCollectionLike {
     toArray: () => Promise<Array<{
       total?: Array<{ value?: number }>
       sourceCounts?: Array<{ _id?: unknown; count?: number }>
+      flaggedSizeBytes?: Array<{ value?: number }>
     }>>
   }
   insertMany: (documents: SearchIndexDocument[]) => Promise<unknown>
@@ -1030,6 +1033,12 @@ function resolveSearchIndexDocument(
   }
 }
 
+function calculateFlaggedSizeBytes(records: SearchIndexDocument[]): number {
+  return records.reduce((total, record) => {
+    return record.review.flagged ? total + (Number(record.size) || 0) : total
+  }, 0)
+}
+
 function toDocument(
   base: Omit<
     SearchIndexDocument,
@@ -1127,6 +1136,7 @@ export function buildSearchIndexDocumentsFromSession(
           order: message.order,
           messageClass: normalizeText(message.messageClass),
           kind: message.kind,
+          size: Number(message.size) || 0,
           subject: normalizeText(message.subject),
           originalSubject: normalizeText(message.originalSubject),
           senderName: normalizeText(message.senderName),
@@ -1198,6 +1208,7 @@ export function buildSearchIndexDocumentsFromArchiveItems(
         order: 0,
         messageClass: item.sourceType === 'teams' ? 'IPM.Note' : 'IPM.Document',
         kind: 'other',
+        size: Number(item.entrySize) || 0,
         subject: normalizeText(item.entryName),
         originalSubject: normalizeText(item.entryName),
         senderName: item.sourceType === 'teams' ? 'Teams' : 'SharePoint/OneDrive',
@@ -1662,6 +1673,7 @@ function paginateSearchResults(
     hiddenRules,
     sourceType: options.sourceType || 'all',
     sourceCounts: resolvedSourceCounts,
+    flaggedSizeBytes: calculateFlaggedSizeBytes(records),
     reviewFilters: {
       flaggedOnly: options.reviewFlaggedOnly,
       taggedOnly: options.reviewTaggedOnly,
@@ -1938,6 +1950,7 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     )
     const sourceTypeFilter =
       options.sourceType && options.sourceType !== 'all' ? normalizeSourceType(options.sourceType) : null
+    const normalizedReviewerUsername = normalizeReviewerUsername(options.reviewerUsername)
     const aggregateCursor = this.documents.aggregate?.([
       { $match: countFilter },
       {
@@ -1952,6 +1965,25 @@ export class MongoSearchIndexStore implements SearchIndexStore {
                 count: { $sum: 1 }
               }
             }
+          ],
+          flaggedSizeBytes: [
+            ...(sourceTypeFilter ? [{ $match: { sourceType: sourceTypeFilter } }] : []),
+            {
+              $match: {
+                reviewStates: {
+                  $elemMatch: {
+                    reviewerUsername: normalizedReviewerUsername,
+                    'review.flagged': true
+                  }
+                }
+              }
+            },
+            {
+              $group: {
+                _id: null,
+                value: { $sum: '$size' }
+              }
+            }
           ]
         }
       }
@@ -1963,6 +1995,7 @@ export class MongoSearchIndexStore implements SearchIndexStore {
       teams: 0,
       sharepoint: 0
     }
+    let flaggedSizeBytes = 0
 
     if (aggregateCursor) {
       const [facetResult] = await aggregateCursor.toArray()
@@ -1979,6 +2012,7 @@ export class MongoSearchIndexStore implements SearchIndexStore {
           sharepoint: 0
         }
       )
+      flaggedSizeBytes = facetResult?.flaggedSizeBytes?.[0]?.value || 0
     } else {
       total = await this.documents.countDocuments(filter)
       sourceCounts = {
@@ -2023,6 +2057,7 @@ export class MongoSearchIndexStore implements SearchIndexStore {
       hiddenRules,
       sourceType: options.sourceType || 'all',
       sourceCounts,
+      flaggedSizeBytes,
       reviewFilters: {
         flaggedOnly: options.reviewFlaggedOnly,
         taggedOnly: options.reviewTaggedOnly,

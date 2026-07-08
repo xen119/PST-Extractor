@@ -400,7 +400,12 @@ function sortAuthUsers(users: AuthUserListItem[]): AuthUserListItem[] {
   })
 }
 
-function buildLegacyUserRecord(username: string, password: string, createdAt = new Date().toISOString()): StoredAuthUserRecord {
+function buildLegacyUserRecord(
+  username: string,
+  password: string,
+  createdAt = new Date().toISOString(),
+  recipientEmail = ''
+): StoredAuthUserRecord {
   const salt = randomBytes(16).toString('hex')
   return buildStoredAuthUserRecord({
     username,
@@ -408,6 +413,7 @@ function buildLegacyUserRecord(username: string, password: string, createdAt = n
     updatedAt: createdAt,
     salt,
     passwordHash: hashAuthPassword(password, salt),
+    recipientEmail,
     inviteStatus: 'active',
     inviteAcceptedAt: createdAt,
     inviteTokenHash: '',
@@ -615,15 +621,16 @@ class MemoryAuthUserStore implements AuthUserStore {
   private readonly users = new Map<string, StoredAuthUserRecord>()
   private readonly masterSecret = createAuthMasterSecret()
 
-  constructor(seedUsers: Array<{ username: string; password: string }> = []) {
+  constructor(seedUsers: Array<{ username: string; password: string; recipientEmail?: string }> = []) {
     for (const seed of Array.isArray(seedUsers) ? seedUsers : []) {
-      this.seedUser(seed.username, seed.password)
+      this.seedUser(seed.username, seed.password, seed.recipientEmail)
     }
   }
 
-  private seedUser(username: string, password: string): void {
+  private seedUser(username: string, password: string, recipientEmail = ''): void {
     const normalizedUsername = normalizeUsername(username)
     const normalizedPassword = String(password ?? '')
+    const normalizedEmail = normalizeEmail(recipientEmail)
     if (!normalizedUsername || !normalizedPassword.trim()) {
       return
     }
@@ -631,7 +638,7 @@ class MemoryAuthUserStore implements AuthUserStore {
     const key = normalizeUsernameKey(normalizedUsername)
     const existing = this.users.get(key) || null
     if (!existing) {
-      this.users.set(key, buildLegacyUserRecord(normalizedUsername, normalizedPassword))
+      this.users.set(key, buildLegacyUserRecord(normalizedUsername, normalizedPassword, undefined, normalizedEmail))
       return
     }
 
@@ -640,7 +647,19 @@ class MemoryAuthUserStore implements AuthUserStore {
       !existing.passwordHash ||
       !verifyAuthPassword(normalizedPassword, existing.salt, existing.passwordHash)
     ) {
-      this.users.set(key, buildLegacyUserRecord(normalizedUsername, normalizedPassword, existing.createdAt))
+      this.users.set(
+        key,
+        buildLegacyUserRecord(normalizedUsername, normalizedPassword, existing.createdAt, normalizedEmail || existing.recipientEmail)
+      )
+      return
+    }
+
+    if (normalizedEmail && existing.recipientEmail !== normalizedEmail) {
+      this.users.set(key, {
+        ...existing,
+        recipientEmail: normalizedEmail,
+        updatedAt: new Date().toISOString()
+      })
     }
   }
 
@@ -1184,7 +1203,7 @@ class MemoryAuthUserStore implements AuthUserStore {
 }
 
 export function createMemoryAuthUserStore(
-  seedUsers: Array<{ username: string; password: string }> = []
+  seedUsers: Array<{ username: string; password: string; recipientEmail?: string }> = []
 ): AuthUserStore {
   return new MemoryAuthUserStore(seedUsers)
 }
@@ -1200,7 +1219,7 @@ export class MongoAuthUserStore implements AuthUserStore {
   static async connect(
     uri: string,
     dbName = 'pst-extractor',
-    seedUsers: Array<{ username: string; password: string }> = [],
+    seedUsers: Array<{ username: string; password: string; recipientEmail?: string }> = [],
     collectionName = DEFAULT_COLLECTION_NAME,
     metaCollectionName = DEFAULT_META_COLLECTION_NAME
   ): Promise<MongoAuthUserStore> {
@@ -1245,15 +1264,16 @@ export class MongoAuthUserStore implements AuthUserStore {
     return secret
   }
 
-  private async seedUsers(seedUsers: Array<{ username: string; password: string }>): Promise<void> {
+  private async seedUsers(seedUsers: Array<{ username: string; password: string; recipientEmail?: string }>): Promise<void> {
     for (const seed of Array.isArray(seedUsers) ? seedUsers : []) {
-      await this.seedUser(seed.username, seed.password)
+      await this.seedUser(seed.username, seed.password, seed.recipientEmail)
     }
   }
 
-  private async seedUser(username: string, password: string): Promise<void> {
+  private async seedUser(username: string, password: string, recipientEmail = ''): Promise<void> {
     const normalizedUsername = normalizeUsername(username)
     const normalizedPassword = String(password ?? '')
+    const normalizedEmail = normalizeEmail(recipientEmail)
     if (!normalizedUsername || !normalizedPassword.trim()) {
       return
     }
@@ -1261,7 +1281,9 @@ export class MongoAuthUserStore implements AuthUserStore {
     const key = normalizeUsernameKey(normalizedUsername)
     const existing = await this.getRecordByKey(key)
     if (!existing) {
-      await this.collection.insertOne(buildLegacyUserRecord(normalizedUsername, normalizedPassword))
+      await this.collection.insertOne(
+        buildLegacyUserRecord(normalizedUsername, normalizedPassword, undefined, normalizedEmail)
+      )
       return
     }
 
@@ -1273,9 +1295,28 @@ export class MongoAuthUserStore implements AuthUserStore {
       await this.collection.updateOne(
         { usernameKey: key },
         {
-          $set: buildLegacyUserRecord(normalizedUsername, normalizedPassword, existing.createdAt)
+          $set: buildLegacyUserRecord(
+            normalizedUsername,
+            normalizedPassword,
+            existing.createdAt,
+            normalizedEmail || existing.recipientEmail
+          )
         },
         { upsert: true }
+      )
+      return
+    }
+
+    if (normalizedEmail && existing.recipientEmail !== normalizedEmail) {
+      await this.collection.updateOne(
+        { usernameKey: key },
+        {
+          $set: {
+            ...existing,
+            recipientEmail: normalizedEmail,
+            updatedAt: new Date().toISOString()
+          }
+        }
       )
     }
   }

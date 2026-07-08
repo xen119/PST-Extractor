@@ -2,7 +2,7 @@ import * as React from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { ArrowDown, ArrowUp, ArrowUpDown, Cloud, FileText, Flag, Mail, RefreshCw, Search, Tag as TagIcon, X } from 'lucide-react'
 import { api } from '@/api'
-import { cn, formatDate, normalizeText } from '@/lib/utils'
+import { cn, formatBytes, formatDate, normalizeText } from '@/lib/utils'
 import { normalizeSearchResultsPage, resolveSelectionScope } from '@/lib/search'
 import type { MessageSummary, ReviewState, SearchSourceType } from '@/types'
 import {
@@ -20,6 +20,7 @@ import {
 type AllItemsSourceTab = SearchSourceType
 
 const PAGE_SIZE = 100
+const PAGE_SIZE_OPTIONS = [100, 200, 500, 1000, 5000] as const
 const SOURCE_TABS: Array<{
   key: AllItemsSourceTab
   label: string
@@ -47,6 +48,7 @@ interface TabState {
   page: number
   total: number
   totalPages: number
+  flaggedSizeBytes: number
   loading: boolean
   loadingMore: boolean
   error: string
@@ -57,6 +59,7 @@ const INITIAL_TAB_STATE: TabState = {
   page: 0,
   total: 0,
   totalPages: 0,
+  flaggedSizeBytes: 0,
   loading: false,
   loadingMore: false,
   error: ''
@@ -120,7 +123,7 @@ const INITIAL_SORT_STATE: AllItemsSortState = {
 }
 
 const ITEM_GRID_TEMPLATE =
-  'grid grid-cols-[48px_110px_minmax(0,1.6fr)_minmax(0,1.2fr)_minmax(0,1.4fr)_160px_110px]'
+  'grid grid-cols-[48px_110px_minmax(0,1.6fr)_minmax(0,1.2fr)_minmax(0,1.4fr)_120px_160px_110px]'
 
 function createPageTrackingState(): Record<AllItemsSourceTab, Set<number>> {
   return {
@@ -214,6 +217,7 @@ export function AllItemsDialog({
   const [reviewFlaggedOnly, setReviewFlaggedOnly] = React.useState(false)
   const [reviewTaggedOnly, setReviewTaggedOnly] = React.useState(false)
   const [sortState, setSortState] = React.useState<AllItemsSortState>(INITIAL_SORT_STATE)
+  const [pageSize, setPageSize] = React.useState<number>(PAGE_SIZE)
   const [scrollResetToken, setScrollResetToken] = React.useState(0)
   const [selectedItemIdsByTab, setSelectedItemIdsByTab] = React.useState<AllItemsSelectionState>(
     createSelectionState
@@ -397,7 +401,7 @@ export function AllItemsDialog({
         query: appliedQuery,
         mode: 'and',
         page: normalizedPage,
-        pageSize: PAGE_SIZE,
+        pageSize,
         mailOnly,
         sort: sortKey,
         reviewFlagged: reviewFlaggedOnly,
@@ -420,6 +424,7 @@ export function AllItemsDialog({
             page: pageResponse.page,
             total: pageResponse.total,
             totalPages: pageResponse.totalPages,
+            flaggedSizeBytes: pageResponse.flaggedSizeBytes ?? 0,
             loading: false,
             loadingMore: false,
             error: ''
@@ -474,6 +479,13 @@ export function AllItemsDialog({
       return
     }
     await loadPage(activeTab, activeState.page + 1)
+  }
+
+  function handlePageSizeChange(value: number): void {
+    const nextSize = PAGE_SIZE_OPTIONS.includes(value as (typeof PAGE_SIZE_OPTIONS)[number])
+      ? value
+      : PAGE_SIZE
+    setPageSize(nextSize)
   }
 
   async function handleReviewToggle(item: MessageSummary): Promise<void> {
@@ -600,6 +612,7 @@ export function AllItemsDialog({
     reviewTaggedOnly,
     selectedCasePath,
     selectedScopePath,
+    pageSize,
     sortKey
   ])
 
@@ -806,6 +819,7 @@ export function AllItemsDialog({
             <div className="flex flex-wrap items-center gap-2">
               <span className="chip">Search: {appliedQuery || 'All items'}</span>
               <span className="chip">Sorted by {sortLabel}</span>
+              <span className="chip chip-active">Flagged size: {formatBytes(activeState.flaggedSizeBytes ?? 0)}</span>
               {mailOnly ? <span className="chip chip-active">Mail only</span> : null}
               {reviewFlaggedOnly ? <span className="chip chip-active">Flagged</span> : null}
               {reviewTaggedOnly ? <span className="chip chip-active">Tagged</span> : null}
@@ -873,6 +887,7 @@ export function AllItemsDialog({
             {renderSortHeader('subject', 'Subject')}
             {renderSortHeader('sender', 'Sender')}
             {renderSortHeader('location', 'Location')}
+            <div className="text-right">Size</div>
             {renderSortHeader('date', 'Date')}
             <div className="text-right">Flagged</div>
           </div>
@@ -1025,6 +1040,13 @@ export function AllItemsDialog({
                         </div>
 
                         <div
+                          className="text-right text-sm text-[color:var(--text)]"
+                          title={Number.isFinite(Number(item.size)) ? formatBytes(Number(item.size)) : 'Unknown size'}
+                        >
+                          {formatBytes(Number(item.size))}
+                        </div>
+
+                        <div
                           className="text-sm text-[color:var(--text)]"
                           title={item.sortDate || item.creationTime || item.clientSubmitTime || ''}
                         >
@@ -1055,8 +1077,25 @@ export function AllItemsDialog({
               </div>
             )}
 
-            {hasMoreItems ? (
-              <div className="flex justify-center px-4 py-6">
+            <div className="flex flex-wrap items-end justify-center gap-3 px-4 py-6">
+              <label className="space-y-1 text-left text-xs font-medium text-[color:var(--muted)]">
+                <span>Items per load</span>
+                <select
+                  className="input min-w-[9rem]"
+                  value={pageSize}
+                  onChange={(event) => {
+                    handlePageSizeChange(Number(event.target.value))
+                  }}
+                  aria-label="Items per load"
+                >
+                  {PAGE_SIZE_OPTIONS.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {hasMoreItems ? (
                 <Button variant="secondary" onClick={() => void handleLoadMore()} disabled={activeState.loadingMore}>
                   {activeState.loadingMore ? (
                     <>
@@ -1067,8 +1106,8 @@ export function AllItemsDialog({
                     'Load more items'
                   )}
                 </Button>
-              </div>
-            ) : null}
+              ) : null}
+            </div>
           </ScrollArea>
         </div>
       </DialogContent>

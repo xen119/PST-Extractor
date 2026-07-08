@@ -99,6 +99,7 @@ function messageSummarySchema(): Record<string, unknown> {
       order: { type: 'integer' },
       messageClass: { type: 'string' },
       kind: { type: 'string' },
+      size: { type: 'integer' },
       subject: { type: 'string' },
       senderName: { type: 'string' },
       senderEmailAddress: { type: 'string' },
@@ -772,7 +773,8 @@ function searchPageSchema(): Record<string, unknown> {
       'scopeLabel',
       'hiddenRules',
       'sourceType',
-      'sourceCounts'
+      'sourceCounts',
+      'flaggedSizeBytes'
     ],
     properties: {
       items: {
@@ -804,7 +806,156 @@ function searchPageSchema(): Record<string, unknown> {
         type: 'array',
         items: hiddenRuleSchema()
       },
+      flaggedSizeBytes: { type: 'integer' },
       reviewFilters: { type: 'object', additionalProperties: true }
+    }
+  }
+}
+
+function flaggedBundleExportScopeSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['scope', 'scopePath', 'scopeLabel', 'sessionId', 'sessionFileName'],
+    properties: {
+      scope: { type: 'string', enum: ['all', 'search', 'pst'] },
+      scopePath: { type: 'string' },
+      scopeLabel: { type: 'string' },
+      sessionId: { type: 'string' },
+      sessionFileName: { type: 'string' }
+    }
+  }
+}
+
+function flaggedBundleArtifactSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: [
+      'artifactId',
+      'fileName',
+      'downloadUrl',
+      'partNumber',
+      'partCount',
+      'itemCount',
+      'sizeBytes',
+      'exceedsMaxSize'
+    ],
+    properties: {
+      artifactId: { type: 'string' },
+      fileName: { type: 'string' },
+      downloadUrl: { type: 'string' },
+      partNumber: { type: 'integer' },
+      partCount: { type: 'integer' },
+      itemCount: { type: 'integer' },
+      sizeBytes: { type: 'integer' },
+      exceedsMaxSize: { type: 'boolean' }
+    }
+  }
+}
+
+function flaggedBundleGroupSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['groupType', 'label', 'itemCount', 'failedCount', 'artifactCount', 'artifacts'],
+    properties: {
+      groupType: { type: 'string', enum: ['mailbox', 'archive'] },
+      label: { type: 'string' },
+      itemCount: { type: 'integer' },
+      failedCount: { type: 'integer' },
+      artifactCount: { type: 'integer' },
+      artifacts: {
+        type: 'array',
+        items: flaggedBundleArtifactSchema()
+      }
+    }
+  }
+}
+
+function flaggedBundleProgressSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['stage', 'totalItems', 'processedItems', 'failedItems', 'percent', 'currentGroup', 'currentLabel'],
+    properties: {
+      stage: { type: 'string', enum: ['collecting', 'mailbox', 'archive', 'finalizing', 'succeeded', 'failed'] },
+      totalItems: { type: 'integer' },
+      processedItems: { type: 'integer' },
+      failedItems: { type: 'integer' },
+      percent: { type: 'integer' },
+      currentGroup: {
+        anyOf: [{ type: 'string', enum: ['mailbox', 'archive'] }, { type: 'null' }]
+      },
+      currentLabel: { type: 'string' }
+    }
+  }
+}
+
+function flaggedBundleJobSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: [
+      'exportId',
+      'ownerUsername',
+      'workspaceKey',
+      'generatedAt',
+      'startedAt',
+      'completedAt',
+      'updatedAt',
+      'status',
+      'scope',
+      'maxSizeBytes',
+      'progress',
+      'error',
+      'groups'
+    ],
+    properties: {
+      exportId: { type: 'string' },
+      ownerUsername: { type: 'string' },
+      workspaceKey: { type: 'string' },
+      generatedAt: { type: 'string' },
+      startedAt: { type: 'string' },
+      completedAt: { type: ['string', 'null'] },
+      updatedAt: { type: 'string' },
+      status: { type: 'string', enum: ['running', 'succeeded', 'failed'] },
+      scope: flaggedBundleExportScopeSchema(),
+      maxSizeBytes: { type: 'integer' },
+      progress: flaggedBundleProgressSchema(),
+      error: { type: ['string', 'null'] },
+      groups: {
+        type: 'array',
+        items: flaggedBundleGroupSchema()
+      }
+    }
+  }
+}
+
+function flaggedBundleHistoryResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['scope', 'workspaceKey', 'jobs'],
+    properties: {
+      scope: flaggedBundleExportScopeSchema(),
+      workspaceKey: { type: 'string' },
+      jobs: {
+        type: 'array',
+        items: flaggedBundleJobSchema()
+      }
+    }
+  }
+}
+
+function flaggedBundleDeleteResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['deleted', 'exportId'],
+    properties: {
+      deleted: { type: 'boolean' },
+      exportId: { type: 'string' }
     }
   }
 }
@@ -2296,6 +2447,111 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
               }
             },
             ...errorResponse(404, 'Session or search scope not found')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.flaggedBundlePrepare)]: {
+        get: {
+          tags: ['Review'],
+          summary: 'List flagged bundle jobs for the active workspace',
+          parameters: [
+            { name: 'scope', in: 'query', schema: { type: 'string', enum: ['all', 'search', 'pst'] } },
+            { name: 'scopePath', in: 'query', schema: { type: 'string' } },
+            { name: 'sessionId', in: 'query', schema: { type: 'string' } }
+          ],
+          responses: {
+            200: {
+              description: 'Flagged bundle job history',
+              content: {
+                'application/json': {
+                  schema: flaggedBundleHistoryResponseSchema()
+                }
+              }
+            },
+            ...errorResponse(400, 'Invalid bundle request'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Case access required'),
+            ...errorResponse(404, 'Session or search scope not found')
+          }
+        },
+        post: {
+          tags: ['Review'],
+          summary: 'Start segmented ZIP downloads for flagged mailbox and Teams / SharePoint items',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['scope', 'maxSizeBytes'],
+                  properties: {
+                    scope: { type: 'string', enum: ['all', 'search', 'pst'] },
+                    scopePath: { type: 'string' },
+                    sessionId: { type: 'string' },
+                    maxSizeBytes: { type: 'integer', minimum: 1 }
+                  }
+                }
+              }
+            }
+          },
+          responses: {
+            202: {
+              description: 'Started flagged bundle job',
+              content: {
+                'application/json': {
+                  schema: flaggedBundleJobSchema()
+                }
+              }
+            },
+            ...errorResponse(400, 'Invalid bundle request'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Case access required'),
+            ...errorResponse(409, 'Flagged bundle export already in progress')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.flaggedBundleJob)]: {
+        delete: {
+          tags: ['Review'],
+          summary: 'Delete a completed flagged bundle job',
+          parameters: [
+            { name: 'exportId', in: 'path', required: true, schema: { type: 'string' } }
+          ],
+          responses: {
+            200: {
+              description: 'Deleted flagged bundle job',
+              content: {
+                'application/json': {
+                  schema: flaggedBundleDeleteResponseSchema()
+                }
+              }
+            },
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(404, 'Flagged bundle export not found'),
+            ...errorResponse(409, 'Flagged bundle export is still running')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.flaggedBundleArtifact)]: {
+        get: {
+          tags: ['Review'],
+          summary: 'Download a prepared flagged bundle ZIP artifact',
+          parameters: [
+            { name: 'exportId', in: 'path', required: true, schema: { type: 'string' } },
+            { name: 'artifactId', in: 'path', required: true, schema: { type: 'string' } }
+          ],
+          responses: {
+            200: {
+              description: 'ZIP bundle artifact',
+              content: {
+                'application/zip': {
+                  schema: { type: 'string', format: 'binary' }
+                }
+              }
+            },
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(404, 'Export or artifact not found')
           }
         }
       },

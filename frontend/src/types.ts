@@ -5,6 +5,8 @@ export interface AuthUser {
 
 export type SearchSourceType = 'mailbox' | 'teams' | 'sharepoint'
 export type SearchIndexRefreshSource = 'mailboxes' | 'items'
+export type FlaggedBundleScope = 'all' | 'search' | 'pst'
+export type FlaggedBundleGroupType = 'mailbox' | 'archive'
 
 export interface AuthStatus {
   authenticated: boolean
@@ -109,6 +111,7 @@ export interface MessageSummary {
   order?: number
   messageClass?: string
   kind?: string
+  size?: number
   subject?: string
   senderName?: string
   senderEmailAddress?: string
@@ -173,6 +176,7 @@ export interface PageResponse<TItem> {
   sort: string
   sourceType?: SearchSourceType | 'all'
   sourceCounts?: Record<SearchSourceType, number>
+  flaggedSizeBytes?: number
   reviewFilters?: ReviewFilters
 }
 
@@ -187,6 +191,86 @@ export interface SearchResponse {
   scopeLabel: string
   sourceType?: SearchSourceType | 'all'
   page: PageResponse<MessageSummary>
+}
+
+export interface FlaggedBundlePrepareRequest {
+  scope: FlaggedBundleScope
+  scopePath?: string
+  sessionId?: string
+  maxSizeBytes: number
+}
+
+export interface FlaggedBundleArtifact {
+  artifactId: string
+  fileName: string
+  downloadUrl: string
+  partNumber: number
+  partCount: number
+  itemCount: number
+  sizeBytes: number
+  exceedsMaxSize: boolean
+}
+
+export interface FlaggedBundleGroup {
+  groupType: FlaggedBundleGroupType
+  label: string
+  itemCount: number
+  failedCount: number
+  artifactCount: number
+  artifacts: FlaggedBundleArtifact[]
+}
+
+export interface FlaggedBundleProgress {
+  stage: 'collecting' | 'mailbox' | 'archive' | 'finalizing' | 'succeeded' | 'failed'
+  totalItems: number
+  processedItems: number
+  failedItems: number
+  percent: number
+  currentGroup: FlaggedBundleGroupType | null
+  currentLabel: string
+}
+
+export type FlaggedBundleJobStatus = 'running' | 'succeeded' | 'failed'
+
+export interface FlaggedBundleJob {
+  exportId: string
+  ownerUsername: string
+  workspaceKey: string
+  generatedAt: string
+  startedAt: string
+  completedAt: string | null
+  updatedAt: string
+  status: FlaggedBundleJobStatus
+  scope: {
+    scope: FlaggedBundleScope
+    scopePath: string
+    scopeLabel: string
+    sessionId: string
+    sessionFileName: string
+  }
+  maxSizeBytes: number
+  progress: FlaggedBundleProgress
+  error: string | null
+  groups: FlaggedBundleGroup[]
+}
+
+export type FlaggedBundlePrepareResponse = FlaggedBundleJob
+
+export interface FlaggedBundleJobsResponse {
+  scope: {
+    scope: FlaggedBundleScope
+    scopePath: string
+    scopeLabel: string
+    sessionId: string
+    sessionFileName: string
+  }
+  workspaceKey: string
+  jobs: FlaggedBundleJob[]
+}
+
+export interface FlaggedBundleDeleteResponse {
+  deleted: boolean
+  exportId: string
 }
 
 export interface AttachmentDetail {

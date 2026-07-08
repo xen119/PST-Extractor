@@ -1,6 +1,10 @@
 import type {
   ActivityLogResponse,
   AuthStatus,
+  FlaggedBundleDeleteResponse,
+  FlaggedBundleJob,
+  FlaggedBundleJobsResponse,
+  FlaggedBundlePrepareRequest,
   MessageDetail,
   HiddenRulesResponse,
   InviteAcceptResponse,
@@ -203,6 +207,28 @@ export const api = {
         `/api/reviews/clear-flags${buildQuery(params) ? `?${buildQuery(params)}` : ''}`,
         { method: 'POST' }
       )
+  },
+  exports: {
+    listFlaggedBundles: (params: {
+      scope: 'all' | 'search' | 'pst'
+      scopePath?: string
+      sessionId?: string
+    }) =>
+      requestJson<FlaggedBundleJobsResponse>(`/api/exports/flagged?${buildQuery(params)}`, {
+        cache: 'no-store'
+      }),
+    prepareFlaggedBundle: (payload: FlaggedBundlePrepareRequest) =>
+      requestJson<FlaggedBundleJob>('/api/exports/flagged', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }),
+    deleteFlaggedBundle: (exportId: string) =>
+      requestJson<FlaggedBundleDeleteResponse>(`/api/exports/flagged/${encodeURIComponent(exportId)}`, {
+        method: 'DELETE'
+      }),
+    flaggedBundleArtifactUrl: (exportId: string, artifactId: string) =>
+      `/api/exports/flagged/${encodeURIComponent(exportId)}/files/${encodeURIComponent(artifactId)}`
   },
   pst: {
     catalog: (scopePath = '', removed = false) => {
