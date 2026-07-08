@@ -7254,8 +7254,45 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
           for (const entry of archiveWork) {
             for (const review of entry.reviews) {
-              const item = await searchIndexStore.findDocumentById(review.messageId)
-              if (!item || item.archivePath !== entry.bundle.bundlePath || !item.archiveEntryChain?.length) {
+              try {
+                const item = await searchIndexStore.findDocumentById(review.messageId)
+                if (!item || item.archivePath !== entry.bundle.bundlePath || !item.archiveEntryChain?.length) {
+                  archiveBuilder.recordFailure()
+                  processedItems += 1
+                  await updateJobProgress({
+                    processedItems,
+                    failedItems: mailboxBuilder.failureCount + archiveBuilder.failureCount,
+                    currentLabel: review.subject || review.messageId
+                  })
+                  continue
+                }
+
+                const { buffer } = await readArchiveBundleItemContent(item.archivePath, item.archiveEntryChain)
+                const mtime = item.sortDate
+                  ? new Date(item.sortDate)
+                  : item.modificationTime
+                    ? new Date(item.modificationTime)
+                    : item.creationTime
+                      ? new Date(item.creationTime)
+                      : new Date()
+                await archiveBuilder.add(
+                  buildArchiveBundleEntryPath(
+                    entry.bundle.scopePath,
+                    entry.bundle.fileName,
+                    item.archiveEntryPath || review.folderPath || review.messageId,
+                    item.downloadFilename || item.archiveEntryName || review.subject || review.messageId,
+                    review.messageId
+                  ),
+                  buffer,
+                  mtime
+                )
+                processedItems += 1
+                await updateJobProgress({
+                  processedItems,
+                  failedItems: mailboxBuilder.failureCount + archiveBuilder.failureCount,
+                  currentLabel: review.subject || review.messageId
+                })
+              } catch (error) {
                 archiveBuilder.recordFailure()
                 processedItems += 1
                 await updateJobProgress({
@@ -7263,34 +7300,12 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
                   failedItems: mailboxBuilder.failureCount + archiveBuilder.failureCount,
                   currentLabel: review.subject || review.messageId
                 })
+                console.warn(
+                  `Unable to add flagged archive item ${review.messageId} from ${entry.bundle.fileName}:`,
+                  error instanceof Error ? error.message : error
+                )
                 continue
               }
-
-              const { buffer } = await readArchiveBundleItemContent(item.archivePath, item.archiveEntryChain)
-              const mtime = item.sortDate
-                ? new Date(item.sortDate)
-                : item.modificationTime
-                  ? new Date(item.modificationTime)
-                  : item.creationTime
-                    ? new Date(item.creationTime)
-                    : new Date()
-              await archiveBuilder.add(
-                buildArchiveBundleEntryPath(
-                  entry.bundle.scopePath,
-                  entry.bundle.fileName,
-                  item.archiveEntryPath || review.folderPath || review.messageId,
-                  item.downloadFilename || item.archiveEntryName || review.subject || review.messageId,
-                  review.messageId
-                ),
-                buffer,
-                mtime
-              )
-              processedItems += 1
-              await updateJobProgress({
-                processedItems,
-                failedItems: mailboxBuilder.failureCount + archiveBuilder.failureCount,
-                currentLabel: review.subject || review.messageId
-              })
             }
           }
 

@@ -10,7 +10,7 @@ import {
   type SearchIndexDocument
 } from '../searchIndex'
 import type { ReviewStore } from '../reviewStore'
-import { extractArchiveBundleItems, listArchiveBundleFiles } from '../archiveBundles'
+import { extractArchiveBundleItems, listArchiveBundleFiles, readArchiveBundleItemContent } from '../archiveBundles'
 
 const enronPath = path.resolve('./src/__tests__/testdata/enron.pst')
 
@@ -842,6 +842,26 @@ describe('search index cache', () => {
       expect(items[0].contentType).toBe('image/bmp')
       expect(items[0].previewKind).toBe('binary')
       expect(items[0].downloadFilename).toBe('diagram.bmp')
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true })
+    }
+  })
+
+  it('reads archive content even when the stored chain uses a prefixed or differently cased path', async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pst-extractor-archive-chain-fallback-'))
+    try {
+      const scopeDir = path.join(rootDir, 'Case1', 'Search1')
+      fs.mkdirSync(scopeDir, { recursive: true })
+
+      const bundlePath = path.join(scopeDir, 'Items.1.001.CHAIN.zip')
+      const bundleZip = new AdmZip()
+      bundleZip.addFile('SharePoint/Docs/report.txt', Buffer.from('sharepoint report', 'utf8'))
+      bundleZip.writeZip(bundlePath)
+
+      const content = await readArchiveBundleItemContent(bundlePath, ['./sharepoint/Docs/report.txt'])
+      expect(content.fileName).toBe('report.txt')
+      expect(content.buffer.toString('utf8')).toBe('sharepoint report')
+      expect(content.contentType).toBe('text/plain; charset=utf-8')
     } finally {
       fs.rmSync(rootDir, { recursive: true, force: true })
     }

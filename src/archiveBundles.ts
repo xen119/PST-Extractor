@@ -499,7 +499,43 @@ function chooseScopeEntry(
 }
 
 function normalizeEntryPath(entryName: string): string {
-  return entryName.replace(/\\/g, '/').replace(/^\/+/, '')
+  return entryName.replace(/\\/g, '/').replace(/^\.\/+/, '').replace(/^\/+/, '')
+}
+
+function normalizeArchiveEntryPath(value: string): string {
+  return normalizeEntryPath(String(value ?? ''))
+}
+
+function archiveEntryPathMatches(candidatePath: string, requestedPath: string): boolean {
+  const normalizedCandidate = normalizeArchiveEntryPath(candidatePath)
+  const normalizedRequested = normalizeArchiveEntryPath(requestedPath)
+  if (!normalizedCandidate || !normalizedRequested) {
+    return false
+  }
+
+  if (normalizedCandidate === normalizedRequested) {
+    return true
+  }
+
+  if (normalizedCandidate.toLowerCase() === normalizedRequested.toLowerCase()) {
+    return true
+  }
+
+  const collapsedCandidate = normalizeText(normalizedCandidate)
+  const collapsedRequested = normalizeText(normalizedRequested)
+  if (collapsedCandidate === collapsedRequested) {
+    return true
+  }
+  if (collapsedCandidate.toLowerCase() === collapsedRequested.toLowerCase()) {
+    return true
+  }
+
+  return (
+    normalizedCandidate.endsWith(`/${normalizedRequested}`) ||
+    normalizedCandidate.toLowerCase().endsWith(`/${normalizedRequested.toLowerCase()}`) ||
+    collapsedCandidate.endsWith(`/${collapsedRequested}`) ||
+    collapsedCandidate.toLowerCase().endsWith(`/${collapsedRequested.toLowerCase()}`)
+  )
 }
 
 function getEntryName(entryPath: string): string {
@@ -880,7 +916,7 @@ export async function readArchiveBundleItemContent(bundlePath: string, entryChai
   contentType: string
   fileName: string
 }> {
-  const chain = Array.isArray(entryChain) ? entryChain.map((value) => normalizeText(value)).filter(Boolean) : []
+  const chain = Array.isArray(entryChain) ? entryChain.map((value) => normalizeArchiveEntryPath(value)).filter(Boolean) : []
   if (!chain.length) {
     throw new Error('Archive item path is required')
   }
@@ -894,7 +930,9 @@ export async function readArchiveBundleItemContent(bundlePath: string, entryChai
   for (let index = 0; index < chain.length; index += 1) {
     const segment = chain[index]
     const entries = await collectZipEntries(currentZip)
-    const entry = entries.find((candidate) => normalizeEntryPath(candidate.fileName || candidate.entryName || '') === segment)
+    const entry = entries.find((candidate) =>
+      archiveEntryPathMatches(candidate.fileName || candidate.entryName || '', segment)
+    )
     if (!entry) {
       throw new Error(`Archive entry not found: ${segment}`)
     }
