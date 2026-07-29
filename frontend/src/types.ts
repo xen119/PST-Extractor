@@ -17,6 +17,8 @@ export interface AuthStatus {
   lockedUntil: string | null
   loginFailedCount: number
   passwordResetAvailable: boolean
+  passwordChangeRequired?: boolean
+  passwordChangeChallengeExpiresAt?: string | null
   user: AuthUser | null
   expiresAt: string | null
   mfaRequired?: boolean
@@ -391,6 +393,7 @@ export interface UserInvite {
   mfaEnforced: boolean
   mfaEnrolledAt: string
   assignedCasePaths: string[]
+  passwordChangeRequired?: boolean
   inviteUrl?: string
 }
 
@@ -440,6 +443,16 @@ export interface PasswordResetRequestResponse {
 export interface PasswordResetConfirmResponse {
   user: AuthUser
   message: string
+}
+
+export interface UserPasswordResetResponse {
+  user: UserInvite
+  mode: 'link' | 'temporary'
+  resetUrl?: string
+  resetExpiresAt?: string
+  emailSent?: boolean
+  emailError?: string
+  temporaryPassword?: string
 }
 
 export interface SmtpSettings {

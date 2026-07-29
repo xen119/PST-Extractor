@@ -72,6 +72,7 @@ import type {
   SearchIndexRefreshStatus,
   ReviewState,
   UserInvite,
+  UserPasswordResetResponse,
   UsersResponse
 } from '@/types'
 import { useUiStore } from '@/store/ui'
@@ -385,6 +386,13 @@ export function App() {
   const [inviteUsername, setInviteUsername] = React.useState('')
   const [inviteEmail, setInviteEmail] = React.useState('')
   const [selectedAdminUser, setSelectedAdminUser] = React.useState('')
+  const [userPasswordResetDialogOpen, setUserPasswordResetDialogOpen] = React.useState(false)
+  const [userPasswordResetTargetUsername, setUserPasswordResetTargetUsername] = React.useState('')
+  const [userPasswordResetMode, setUserPasswordResetMode] = React.useState<'link' | 'temporary'>('link')
+  const [userPasswordResetLoading, setUserPasswordResetLoading] = React.useState(false)
+  const [userPasswordResetError, setUserPasswordResetError] = React.useState('')
+  const [userPasswordResetMessage, setUserPasswordResetMessage] = React.useState('')
+  const [userPasswordResetResult, setUserPasswordResetResult] = React.useState<UserPasswordResetResponse | null>(null)
   const [caseAccessDialogUser, setCaseAccessDialogUser] = React.useState('')
   const [caseAccessDraftPaths, setCaseAccessDraftPaths] = React.useState<string[]>([])
   const [userActivity, setUserActivity] = React.useState<ActivityLogEntry[]>([])
@@ -460,7 +468,8 @@ export function App() {
   const mfaEnabled = Boolean(authStatus?.mfaEnabled)
   const inviteFlowActive = Boolean(inviteToken)
   const resetFlowActive = Boolean(resetToken)
-  const authFlowActive = inviteFlowActive || resetFlowActive
+  const passwordChangeRequired = Boolean(authStatus?.passwordChangeRequired)
+  const authFlowActive = inviteFlowActive || resetFlowActive || passwordChangeRequired
   const mfaEnforced = Boolean(authStatus?.mfaEnforced)
   const assignedCasePathsKey = (authStatus?.user?.assignedCasePaths || []).join('|')
   const selectedPageItem = React.useMemo(
@@ -983,6 +992,14 @@ export function App() {
                 writeReminderDismissed(status.user.username, false)
               }
             }
+          } else if (status.passwordChangeRequired && status.user?.username) {
+            setAuthStatus(status)
+            setPasswordResetAvailable(Boolean(status.passwordResetAvailable))
+            setAuthReady(true)
+            setAuthView('change')
+            setMfaChallengeUsername('')
+            setAuthError('')
+            setAuthMessage('Temporary password accepted. Change it to continue.')
           } else if (status.mfaRequired && status.user?.username) {
             setPasswordResetAvailable(Boolean(status.passwordResetAvailable))
             setAuthView('mfa')
@@ -997,7 +1014,14 @@ export function App() {
         } catch (error) {
           if (error instanceof ApiError && error.statusCode === 401) {
             const payload = error.payload as AuthStatus | undefined
-            if (payload?.mfaRequired && payload?.user?.username) {
+            if (payload?.passwordChangeRequired && payload?.user?.username) {
+              setAuthStatus(payload)
+              setPasswordResetAvailable(Boolean(payload.passwordResetAvailable))
+              setAuthReady(true)
+              setAuthView('change')
+              setMfaChallengeUsername('')
+              setAuthMessage('Temporary password accepted. Change it to continue.')
+            } else if (payload?.mfaRequired && payload?.user?.username) {
               setPasswordResetAvailable(Boolean(payload.passwordResetAvailable))
               setAuthView('mfa')
               setMfaChallengeUsername(payload.user.username)
@@ -1744,6 +1768,13 @@ export function App() {
     try {
       const response = await api.auth.login(usernameInput, password)
       setPasswordResetAvailable(Boolean(response.passwordResetAvailable))
+      if (response.passwordChangeRequired && response.user?.username) {
+        setAuthStatus(response)
+        setAuthView('change')
+        setMfaChallengeUsername('')
+        setAuthMessage('Temporary password accepted. Change it to continue.')
+        return
+      }
       if (response.mfaRequired && response.user?.username) {
         setAuthView('mfa')
         setMfaChallengeUsername(response.user.username)
@@ -1787,24 +1818,40 @@ export function App() {
   }
 
   async function handlePasswordResetConfirm(password: string, confirmPassword: string): Promise<void> {
-    if (!resetToken) {
-      setAuthError('Password reset link is missing.')
-      return
-    }
-
     setAuthBusy(true)
     setAuthError('')
     setAuthMessage('')
     try {
-      const response = await api.auth.passwordResetConfirm(resetToken, password, confirmPassword)
-      setAuthStatus(null)
-      setPasswordResetAvailable(false)
-      setResetLookup(null)
-      setResetToken(null)
+      if (resetToken) {
+        const response = await api.auth.passwordResetConfirm(resetToken, password, confirmPassword)
+        setAuthStatus(null)
+        setPasswordResetAvailable(false)
+        setResetLookup(null)
+        setResetToken(null)
+        setAuthView('login')
+        setMfaChallengeUsername('')
+        setAuthMessage(`Password updated for ${response.user.username}. Sign in with your new password.`)
+        window.history.replaceState({}, '', '/')
+        return
+      }
+
+      if (!authStatus?.passwordChangeRequired) {
+        throw new Error('Password change challenge is missing.')
+      }
+
+      const response = await api.auth.passwordChangeConfirm(password, confirmPassword)
+      setPasswordResetAvailable(Boolean(response.passwordResetAvailable))
+      setAuthStatus(response)
+      if (response.mfaRequired && response.user?.username) {
+        setAuthView('mfa')
+        setMfaChallengeUsername(response.user.username)
+        setAuthMessage('Password updated. Verify your sign in to continue.')
+        return
+      }
+
       setAuthView('login')
       setMfaChallengeUsername('')
-      setAuthMessage(`Password updated for ${response.user.username}. Sign in with your new password.`)
-      window.history.replaceState({}, '', '/')
+      setAuthMessage(`Password updated for ${response.user?.username || 'your account'}.`)
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : 'Unable to update password')
     } finally {
@@ -1875,8 +1922,10 @@ export function App() {
       setReviewTaggedOnly(false)
       setHiddenRules([])
       setUsers([])
+      setUsersDialogOpen(false)
       setUsersError('')
       setUsersMessage('')
+      closePasswordResetDialog()
       setCaseAccessDialogUser('')
       setCaseAccessDraftPaths([])
       setUserActivity([])
@@ -1885,7 +1934,12 @@ export function App() {
       setSmtpMessage('')
       setActivityEntries([])
       setActivityError('')
+      setSmtpDialogOpen(false)
+      setActivityDialogOpen(false)
+      setClearFlagsDialogOpen(false)
       setAllItemsDialogOpen(false)
+      setFlaggedBundleDialogOpen(false)
+      setTagsDialogOpen(false)
       setAuthView('login')
       setAuthMessage('')
       setAuthError('')
@@ -2125,6 +2179,53 @@ export function App() {
       setUsersError(error instanceof Error ? error.message : 'Unable to reset MFA')
     } finally {
       setUsersLoading(false)
+    }
+  }
+
+  function openPasswordResetDialog(usernameToReset: string): void {
+    setUserPasswordResetTargetUsername(usernameToReset)
+    setUserPasswordResetMode('link')
+    setUserPasswordResetDialogOpen(true)
+    setUserPasswordResetLoading(false)
+    setUserPasswordResetError('')
+    setUserPasswordResetMessage('')
+    setUserPasswordResetResult(null)
+  }
+
+  function closePasswordResetDialog(): void {
+    setUserPasswordResetDialogOpen(false)
+    setUserPasswordResetTargetUsername('')
+    setUserPasswordResetMode('link')
+    setUserPasswordResetLoading(false)
+    setUserPasswordResetError('')
+    setUserPasswordResetMessage('')
+    setUserPasswordResetResult(null)
+  }
+
+  async function submitPasswordResetDialog(): Promise<void> {
+    if (!userPasswordResetTargetUsername.trim()) {
+      setUserPasswordResetError('Username is required.')
+      return
+    }
+
+    setUserPasswordResetLoading(true)
+    setUserPasswordResetError('')
+    setUserPasswordResetMessage('')
+    try {
+      const response = await api.auth.resetPassword(userPasswordResetTargetUsername.trim(), userPasswordResetMode)
+      setUserPasswordResetResult(response)
+      setUserPasswordResetMessage(
+        response.mode === 'temporary'
+          ? `Temporary password generated for ${response.user.username}.`
+          : response.emailSent
+            ? `Reset link generated for ${response.user.username}.`
+            : `Reset link generated for ${response.user.username}, but email delivery was not available.`
+      )
+      await loadUsers()
+    } catch (error) {
+      setUserPasswordResetError(error instanceof Error ? error.message : 'Unable to reset password')
+    } finally {
+      setUserPasswordResetLoading(false)
     }
   }
 
@@ -3280,6 +3381,7 @@ export function App() {
           setUsersDialogOpen(false)
           setCaseAccessDialogUser('')
           setCaseAccessDraftPaths([])
+          closePasswordResetDialog()
         }}
         onRefresh={() => {
           void loadUsers()
@@ -3300,6 +3402,9 @@ export function App() {
         onResetMfa={(value) => {
           void resetMfa(value)
         }}
+        onResetPassword={(value) => {
+          openPasswordResetDialog(value)
+        }}
         onToggleMfaEnforcement={(value, enforced) => {
           void toggleMfaEnforcement(value, enforced)
         }}
@@ -3311,6 +3416,28 @@ export function App() {
           if (selected?.inviteUrl) {
             navigator.clipboard?.writeText(selected.inviteUrl).catch(() => undefined)
           }
+        }}
+      />
+
+      <UserPasswordResetDialog
+        open={userPasswordResetDialogOpen}
+        loading={userPasswordResetLoading}
+        error={userPasswordResetError}
+        message={userPasswordResetMessage}
+        user={users.find((item) => item.username === userPasswordResetTargetUsername) || null}
+        mode={userPasswordResetMode}
+        result={userPasswordResetResult}
+        onClose={() => {
+          closePasswordResetDialog()
+        }}
+        onModeChange={(nextMode) => {
+          setUserPasswordResetMode(nextMode)
+          setUserPasswordResetResult(null)
+          setUserPasswordResetMessage('')
+          setUserPasswordResetError('')
+        }}
+        onGenerate={() => {
+          void submitPasswordResetDialog()
         }}
       />
 
@@ -3458,7 +3585,7 @@ export function App() {
     return (
       <div className="h-screen overflow-hidden bg-[color:var(--bg)] text-[color:var(--text)]">
         <AuthScreen
-          view={resetFlowActive ? 'reset' : inviteFlowActive ? 'invite' : authView}
+          view={resetFlowActive ? 'reset' : inviteFlowActive ? 'invite' : passwordChangeRequired ? 'change' : authView}
           busy={authBusy || inviteLoading || selfMfaLoading}
           message={authMessage}
           error={authError}
@@ -3470,6 +3597,7 @@ export function App() {
           inviteMfaEnforced={inviteMfaEnforced}
           inviteSetup={inviteSetup}
           inviteRecoveryCodes={inviteRecoveryCodes}
+          passwordChangeUser={authStatus?.user?.username || ''}
           onPasswordResetRequest={(usernameOrEmail) => {
             void handlePasswordResetRequest(usernameOrEmail)
           }}
@@ -3501,6 +3629,7 @@ export function App() {
             setResetToken(null)
             setResetLookup(null)
             setPasswordResetAvailable(false)
+            setAuthStatus(null)
             setAuthView('login')
             setAuthError('')
             setAuthMessage('')
@@ -3536,6 +3665,7 @@ function UserManagementDialog({
   onResendInvite,
   onRevokeInvite,
   onResetMfa,
+  onResetPassword,
   onToggleMfaEnforcement,
   onOpenCaseAccess,
   onCopyInvite
@@ -3561,6 +3691,7 @@ function UserManagementDialog({
   onResendInvite: (username: string) => void
   onRevokeInvite: (username: string) => void
   onResetMfa: (username: string) => void
+  onResetPassword: (username: string) => void
   onToggleMfaEnforcement: (username: string, enforced: boolean) => void
   onOpenCaseAccess: (username: string) => void
   onCopyInvite: (username: string) => void
@@ -3665,6 +3796,11 @@ function UserManagementDialog({
                                     Required
                                   </Badge>
                                 ) : null}
+                                {user.passwordChangeRequired ? (
+                                  <Badge className="border-[color:var(--warning-bg)] bg-[color:var(--warning-bg)] text-[color:var(--warning)]">
+                                    Change required
+                                  </Badge>
+                                ) : null}
                                 <Badge>{user.inviteStatus}</Badge>
                               </div>
                               <div className="mt-1 truncate text-xs text-[color:var(--muted)]">{user.recipientEmail}</div>
@@ -3685,6 +3821,16 @@ function UserManagementDialog({
                                 }}
                               >
                                 <FolderCog className="h-4 w-4" />
+                              </IconButton>
+                              <IconButton
+                                label={`Reset password for ${user.username}`}
+                                className="h-9 w-9"
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  onResetPassword(user.username)
+                                }}
+                              >
+                                <KeyRound className="h-4 w-4" />
                               </IconButton>
                               {user.inviteUrl ? (
                                 <IconButton
@@ -3816,6 +3962,204 @@ function UserManagementDialog({
                 </ScrollArea>
               </div>
             </div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function UserPasswordResetDialog({
+  open,
+  loading,
+  error,
+  message,
+  user,
+  mode,
+  result,
+  onClose,
+  onModeChange,
+  onGenerate
+}: {
+  open: boolean
+  loading: boolean
+  error: string
+  message: string
+  user: UserInvite | null
+  mode: 'link' | 'temporary'
+  result: UserPasswordResetResponse | null
+  onClose: () => void
+  onModeChange: (mode: 'link' | 'temporary') => void
+  onGenerate: () => void
+}) {
+  const copyValue = React.useCallback((value: string) => {
+    if (!value) {
+      return
+    }
+    navigator.clipboard?.writeText(value).catch(() => undefined)
+  }, [])
+  const resultValue = result?.mode === 'temporary' ? result.temporaryPassword || '' : result?.resetUrl || ''
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) {
+          onClose()
+        }
+      }}
+    >
+      <DialogContent className="w-[min(96vw,860px)]">
+        <div className="flex items-start justify-between gap-4 border-b border-[color:var(--line)] px-6 py-5">
+          <div>
+            <div className="text-xs font-semibold tracking-[0.18em] text-[color:var(--muted)] uppercase">Settings</div>
+            <DialogTitle className="mt-1 text-2xl">Password reset</DialogTitle>
+            <DialogDescription>Generate a reset link or a temporary password for the selected user.</DialogDescription>
+          </div>
+          <Button variant="ghost" onClick={onClose}>
+            Close
+          </Button>
+        </div>
+
+        <div className="grid gap-4 p-6 md:grid-cols-[1fr_1.1fr]">
+          <div className="space-y-4">
+            <div className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-4">
+              <div className="text-sm font-semibold text-[color:var(--text)]">Target user</div>
+              <div className="mt-2 text-sm text-[color:var(--text)]">{user?.username || 'No user selected'}</div>
+              <div className="mt-1 text-xs text-[color:var(--muted)]">
+                {user?.recipientEmail || 'No recipient email on file'}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-4">
+              <div className="text-sm font-semibold text-[color:var(--text)]">Mode</div>
+              <div className="mt-3 grid gap-2">
+                <label
+                  className={`flex cursor-pointer items-start gap-3 rounded-2xl border px-4 py-3 transition ${
+                    mode === 'link'
+                      ? 'border-[color:var(--accent)] bg-[color:var(--accent-soft)]'
+                      : 'border-[color:var(--line)] bg-[color:var(--surface-strong)] hover:border-[color:var(--accent-soft)]'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    className="mt-1"
+                    checked={mode === 'link'}
+                    onChange={() => onModeChange('link')}
+                  />
+                  <div>
+                    <div className="text-sm font-medium text-[color:var(--text)]">Reset link</div>
+                    <div className="mt-1 text-xs leading-5 text-[color:var(--muted)]">
+                      Reuses the existing reset email path and bypasses the repeated-failure gate.
+                    </div>
+                  </div>
+                </label>
+                <label
+                  className={`flex cursor-pointer items-start gap-3 rounded-2xl border px-4 py-3 transition ${
+                    mode === 'temporary'
+                      ? 'border-[color:var(--accent)] bg-[color:var(--accent-soft)]'
+                      : 'border-[color:var(--line)] bg-[color:var(--surface-strong)] hover:border-[color:var(--accent-soft)]'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    className="mt-1"
+                    checked={mode === 'temporary'}
+                    onChange={() => onModeChange('temporary')}
+                  />
+                  <div>
+                    <div className="text-sm font-medium text-[color:var(--text)]">Temporary password</div>
+                    <div className="mt-1 text-xs leading-5 text-[color:var(--muted)]">
+                      Revokes active sessions and forces the user to change the password before the workspace opens.
+                    </div>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-4 text-sm leading-6 text-[color:var(--muted)]">
+              {mode === 'temporary'
+                ? 'Use this when the user needs immediate access without email delivery. The generated password is meant for secure out-of-band delivery.'
+                : 'Use this when you want the user to finish the reset through the existing email link workflow.'}
+            </div>
+
+            {error ? (
+              <div className="rounded-2xl border border-[color:rgba(220,38,38,0.2)] bg-[color:rgba(220,38,38,0.08)] px-4 py-3 text-sm text-[color:var(--danger)]">
+                {error}
+              </div>
+            ) : null}
+            {message ? (
+              <div className="rounded-2xl border border-[color:var(--accent-soft)] bg-[color:var(--accent-soft)] px-4 py-3 text-sm text-[color:var(--accent-strong)]">
+                {message}
+              </div>
+            ) : null}
+
+            <div className="flex items-center justify-end gap-2">
+              <Button variant="ghost" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button onClick={onGenerate} disabled={loading || !user}>
+                {loading ? 'Generating...' : 'Generate'}
+              </Button>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-[color:var(--text)]">Generated output</div>
+                <div className="text-xs text-[color:var(--muted)]">Copy this value and deliver it out of band if needed.</div>
+              </div>
+              {result?.mode ? <Badge>{result.mode}</Badge> : <Badge>Pending</Badge>}
+            </div>
+
+            {result ? (
+              <div className="mt-4 space-y-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  {result.mode === 'link' ? (
+                    <>
+                      <Badge>{result.emailSent ? 'Email sent' : 'Email not sent'}</Badge>
+                      {result.resetExpiresAt ? <Badge>Expires {formatDate(result.resetExpiresAt)}</Badge> : null}
+                    </>
+                  ) : (
+                    <>
+                      <Badge>Temporary password</Badge>
+                      <Badge>Change required</Badge>
+                    </>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
+                    {result.mode === 'link' ? 'Reset URL' : 'Temporary password'}
+                  </div>
+                  <Input className="font-mono text-sm" readOnly value={resultValue} />
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      copyValue(resultValue)
+                    }}
+                    disabled={!resultValue}
+                  >
+                    Copy {result.mode === 'link' ? 'link' : 'password'}
+                  </Button>
+                  {result.mode === 'link' && result.emailError ? (
+                    <div className="text-xs text-[color:var(--muted)]">{result.emailError}</div>
+                  ) : null}
+                </div>
+
+                {result.mode === 'temporary' ? (
+                  <div className="rounded-2xl border border-[color:var(--warning-bg)] bg-[color:var(--warning-bg)] px-4 py-3 text-sm text-[color:var(--warning)]">
+                    This account must sign in with the temporary password and change it before opening the workspace.
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <div className="mt-4 empty-state">Generate a password reset artifact to view it here.</div>
+            )}
           </div>
         </div>
       </DialogContent>

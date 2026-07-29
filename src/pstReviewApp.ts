@@ -187,6 +187,12 @@ interface AuthMfaChallengeRecord {
   expiresAt: number
 }
 
+interface AuthPasswordChangeChallengeRecord {
+  token: string
+  username: string
+  expiresAt: number
+}
+
 interface AuthStatusResponse {
   authenticated: boolean
   enabled: boolean
@@ -198,6 +204,8 @@ interface AuthStatusResponse {
   lockedUntil: string | null
   loginFailedCount: number
   passwordResetAvailable: boolean
+  passwordChangeRequired: boolean
+  passwordChangeChallengeExpiresAt: string | null
   user: {
     username: string
     assignedCasePaths: string[]
@@ -243,6 +251,16 @@ interface AuthMfaStartResponse {
 interface AuthMfaCompleteResponse {
   user: AuthUserListItem
   recoveryCodes: string[]
+}
+
+interface AuthUserPasswordResetResponse {
+  user: AuthUserListItem
+  mode: 'link' | 'temporary'
+  resetUrl?: string
+  resetExpiresAt?: string
+  emailSent?: boolean
+  emailError?: string
+  temporaryPassword?: string
 }
 
 interface ActivityLogResponse {
@@ -565,6 +583,7 @@ const DEFAULT_SWAGGER_ASSET_PATH = path.dirname(
 )
 const DEFAULT_AUTH_SESSION_COOKIE = 'pst-review-session'
 const DEFAULT_AUTH_MFA_CHALLENGE_COOKIE_SUFFIX = '-mfa-challenge'
+const DEFAULT_AUTH_PASSWORD_CHANGE_CHALLENGE_COOKIE_SUFFIX = '-password-change-challenge'
 const DEFAULT_AUTH_SESSION_TTL_MINUTES = 180
 const DEFAULT_AUTH_INVITE_TTL_MINUTES = 24 * 60
 const DEFAULT_AUTH_MFA_ISSUER = 'PST Mail Explorer'
@@ -830,6 +849,7 @@ function isPublicApiPath(pathname: string): boolean {
     pathname === API_ROUTES.authLogout ||
     pathname === API_ROUTES.authPasswordResetRequest ||
     pathname.startsWith(`${API_ROUTES.authPasswordResetLookup.split('/:token')[0]}`) ||
+    pathname === API_ROUTES.authPasswordChangeConfirm ||
     pathname.startsWith(`${API_ROUTES.authInviteLookup.split('/:token')[0]}`) ||
     pathname.startsWith(`${API_ROUTES.authInviteAccept.split('/:token')[0]}`) ||
     pathname === API_ROUTES.authMfaChallenge
@@ -843,6 +863,7 @@ function isAuthApiPath(pathname: string): boolean {
     pathname === API_ROUTES.authLogout ||
     pathname === API_ROUTES.authPasswordResetRequest ||
     pathname.startsWith(`${API_ROUTES.authPasswordResetLookup.split('/:token')[0]}`) ||
+    pathname === API_ROUTES.authPasswordChangeConfirm ||
     pathname === API_ROUTES.authMfaChallenge
   )
 }
@@ -2304,6 +2325,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     options.smtpTransportFactory || createDefaultSmtpTransport
   const authSessions = new Map<string, AuthSessionRecord>()
   const authMfaChallenges = new Map<string, AuthMfaChallengeRecord>()
+  const authPasswordChangeChallenges = new Map<string, AuthPasswordChangeChallengeRecord>()
 
   function buildFlaggedBundleExportDownloadUrl(exportId: string, artifactId: string): string {
     return `${API_ROUTES.flaggedBundleArtifact
@@ -3010,6 +3032,10 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     return `${authConfig.cookieName}${DEFAULT_AUTH_MFA_CHALLENGE_COOKIE_SUFFIX}`
   }
 
+  function getAuthPasswordChangeChallengeCookieName(): string {
+    return `${authConfig.cookieName}${DEFAULT_AUTH_PASSWORD_CHANGE_CHALLENGE_COOKIE_SUFFIX}`
+  }
+
   function cleanupExpiredAuthSessions(): void {
     if (!authConfig.enabled) {
       return
@@ -3024,6 +3050,11 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     for (const [token, challenge] of authMfaChallenges.entries()) {
       if (challenge.expiresAt <= now) {
         authMfaChallenges.delete(token)
+      }
+    }
+    for (const [token, challenge] of authPasswordChangeChallenges.entries()) {
+      if (challenge.expiresAt <= now) {
+        authPasswordChangeChallenges.delete(token)
       }
     }
   }
@@ -3076,6 +3107,32 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     return challenge
   }
 
+  function getAuthPasswordChangeChallengeFromRequest(
+    req: express.Request
+  ): AuthPasswordChangeChallengeRecord | null {
+    if (!authConfig.enabled) {
+      return null
+    }
+
+    cleanupExpiredAuthSessions()
+    const token = getCookieValue(req, getAuthPasswordChangeChallengeCookieName())
+    if (!token) {
+      return null
+    }
+
+    const challenge = authPasswordChangeChallenges.get(token) || null
+    if (!challenge) {
+      return null
+    }
+
+    if (challenge.expiresAt <= Date.now()) {
+      authPasswordChangeChallenges.delete(token)
+      return null
+    }
+
+    return challenge
+  }
+
   function buildAuthStatus(
     session: AuthSessionRecord | null,
     challenge: AuthMfaChallengeRecord | null = null,
@@ -3084,7 +3141,9 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     mfaEnforced = false,
     lockedUntil: string | null = null,
     loginFailedCount = 0,
-    passwordResetAvailable = false
+    passwordResetAvailable = false,
+    passwordChangeRequired = false,
+    passwordChangeChallengeExpiresAt: string | null = null
   ): AuthStatusResponse {
     const canManageUsers = isAdminAuthSession(session, authConfig)
     const authUser = user
@@ -3105,12 +3164,36 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         lockedUntil: null,
         loginFailedCount: 0,
         passwordResetAvailable: false,
+        passwordChangeRequired: false,
+        passwordChangeChallengeExpiresAt: null,
         user: authUser,
         expiresAt: null
       }
     }
 
     if (!session) {
+      if (passwordChangeRequired) {
+        return {
+          authenticated: false,
+          enabled: true,
+          canManageUsers: false,
+          mfaEnabled: false,
+          mfaEnforced: Boolean(mfaEnforced),
+          mfaRequired: false,
+          mfaChallengeExpiresAt: null,
+          lockedUntil: null,
+          loginFailedCount: 0,
+          passwordResetAvailable: false,
+          passwordChangeRequired: true,
+          passwordChangeChallengeExpiresAt: passwordChangeChallengeExpiresAt || null,
+          user: authUser || {
+            username: user?.username || '',
+            assignedCasePaths: []
+          },
+          expiresAt: null
+        }
+      }
+
       if (challenge) {
         return {
           authenticated: false,
@@ -3123,6 +3206,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           lockedUntil: null,
           loginFailedCount: 0,
           passwordResetAvailable: false,
+          passwordChangeRequired: false,
+          passwordChangeChallengeExpiresAt: null,
           user: authUser || {
             username: challenge.username,
             assignedCasePaths: []
@@ -3141,7 +3226,9 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         mfaChallengeExpiresAt: null,
         lockedUntil: null,
         loginFailedCount: 0,
-        passwordResetAvailable: false,
+        passwordResetAvailable: Boolean(passwordResetAvailable),
+        passwordChangeRequired: false,
+        passwordChangeChallengeExpiresAt: null,
         user: null,
         expiresAt: null
       }
@@ -3158,6 +3245,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       lockedUntil,
       loginFailedCount: Math.max(0, Math.floor(loginFailedCount || 0)),
       passwordResetAvailable: Boolean(passwordResetAvailable),
+      passwordChangeRequired: false,
+      passwordChangeChallengeExpiresAt: null,
       user: authUser || {
         username: session.username,
         assignedCasePaths: []
@@ -3217,6 +3306,16 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     return challenge
   }
 
+  function createAuthPasswordChangeChallenge(username: string): AuthPasswordChangeChallengeRecord {
+    const challenge: AuthPasswordChangeChallengeRecord = {
+      token: randomBytes(24).toString('hex'),
+      username,
+      expiresAt: Date.now() + 10 * 60 * 1000
+    }
+    authPasswordChangeChallenges.set(challenge.token, challenge)
+    return challenge
+  }
+
   function clearAuthSession(req: express.Request): void {
     if (!authConfig.enabled) {
       return
@@ -3236,6 +3335,17 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     const token = getCookieValue(req, getAuthMfaChallengeCookieName())
     if (token) {
       authMfaChallenges.delete(token)
+    }
+  }
+
+  function clearAuthPasswordChangeChallenge(req: express.Request): void {
+    if (!authConfig.enabled) {
+      return
+    }
+
+    const token = getCookieValue(req, getAuthPasswordChangeChallengeCookieName())
+    if (token) {
+      authPasswordChangeChallenges.delete(token)
     }
   }
 
@@ -3277,6 +3387,28 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         continue
       }
       authMfaChallenges.delete(token)
+      revokedCount += 1
+    }
+
+    return revokedCount
+  }
+
+  function revokeAuthPasswordChangeChallengesForUsername(username: string): number {
+    if (!authConfig.enabled) {
+      return 0
+    }
+
+    const normalizedUsername = normalizeAuthUsernameKey(username)
+    if (!normalizedUsername) {
+      return 0
+    }
+
+    let revokedCount = 0
+    for (const [token, challenge] of authPasswordChangeChallenges.entries()) {
+      if (normalizeAuthUsernameKey(challenge.username) !== normalizedUsername) {
+        continue
+      }
+      authPasswordChangeChallenges.delete(token)
       revokedCount += 1
     }
 
@@ -3337,6 +3469,35 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     })
   }
 
+  function setAuthPasswordChangeChallengeCookie(
+    res: express.Response,
+    req: express.Request,
+    challenge: AuthPasswordChangeChallengeRecord
+  ): void {
+    if (!authConfig.enabled) {
+      return
+    }
+
+    res.cookie(getAuthPasswordChangeChallengeCookieName(), challenge.token, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: Boolean(req.secure || String(req.headers['x-forwarded-proto'] || '').split(',')[0] === 'https'),
+      path: '/',
+      maxAge: 10 * 60 * 1000
+    })
+  }
+
+  function clearAuthPasswordChangeChallengeCookie(res: express.Response): void {
+    if (!authConfig.enabled) {
+      return
+    }
+
+    res.clearCookie(getAuthPasswordChangeChallengeCookieName(), {
+      path: '/',
+      sameSite: 'lax'
+    })
+  }
+
   function getRequestBaseOrigin(req: express.Request): string {
     const info = getRequestInfo(req, options.apiSecurity?.webChecks)
     const requestOrigin = normalizeOrigin(info.origin || req.headers.origin || '')
@@ -3377,6 +3538,55 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       normalizeOrigin(authConfig.publicBaseUrl) || getRequestBaseOrigin(req) || canonicalRequestOrigin(req)
     const path = buildPasswordResetPath(token)
     return origin ? `${origin}${path}` : path
+  }
+
+  function generateTemporaryPassword(policy: PasswordPolicyRecord): string {
+    const normalizedPolicy = {
+      minLength: Math.max(12, Math.floor(policy?.minLength || 12)),
+      requireUppercase: Boolean(policy?.requireUppercase),
+      requireLowercase: Boolean(policy?.requireLowercase),
+      requireNumber: Boolean(policy?.requireNumber),
+      requireSpecial: Boolean(policy?.requireSpecial)
+    }
+    const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
+    const lower = 'abcdefghijkmnopqrstuvwxyz'
+    const numbers = '23456789'
+    const special = '!@#$%^&*()-_=+[]{}'
+    const pool = `${upper}${lower}${numbers}${special}`
+    const length = Math.max(16, normalizedPolicy.minLength)
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const chars: string[] = []
+      if (normalizedPolicy.requireUppercase) {
+        chars.push(upper[randomBytes(1)[0] % upper.length])
+      }
+      if (normalizedPolicy.requireLowercase) {
+        chars.push(lower[randomBytes(1)[0] % lower.length])
+      }
+      if (normalizedPolicy.requireNumber) {
+        chars.push(numbers[randomBytes(1)[0] % numbers.length])
+      }
+      if (normalizedPolicy.requireSpecial) {
+        chars.push(special[randomBytes(1)[0] % special.length])
+      }
+
+      while (chars.length < length) {
+        chars.push(pool[randomBytes(1)[0] % pool.length])
+      }
+
+      const shuffleBytes = randomBytes(chars.length)
+      for (let index = chars.length - 1; index > 0; index -= 1) {
+        const swapIndex = shuffleBytes[index] % (index + 1)
+        ;[chars[index], chars[swapIndex]] = [chars[swapIndex], chars[index]]
+      }
+
+      const candidate = chars.join('')
+      if (!validatePasswordAgainstPolicy(candidate, policy).length) {
+        return candidate
+      }
+    }
+
+    throw createAppError(500, 'Unable to generate a temporary password')
   }
 
   function buildInviteEmailText(input: {
@@ -3696,14 +3906,15 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     try {
       res.set('Cache-Control', 'no-store')
       const session = getAuthSessionFromRequest(req)
-      const challenge = session ? null : getAuthMfaChallengeFromRequest(req)
+      const passwordChangeChallenge = session ? null : getAuthPasswordChangeChallengeFromRequest(req)
+      const challenge = session || passwordChangeChallenge ? null : getAuthMfaChallengeFromRequest(req)
       const passwordPolicy = await getPasswordPolicy()
-      if (!authConfig.enabled && !session && !challenge) {
+      if (!authConfig.enabled && !session && !challenge && !passwordChangeChallenge) {
         responseJson(res, 200, buildAuthStatus(null))
         return
       }
 
-      if (!session && !challenge) {
+      if (!session && !challenge && !passwordChangeChallenge) {
         responseJson(res, 401, {
           ...buildAuthStatus(null),
           error: 'Authentication required'
@@ -3713,19 +3924,43 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
       const currentUser = session
         ? await authUserStore.getUser(session.username)
-        : challenge
-          ? await authUserStore.getUser(challenge.username)
-          : null
+        : passwordChangeChallenge
+          ? await authUserStore.getUser(passwordChangeChallenge.username)
+          : challenge
+            ? await authUserStore.getUser(challenge.username)
+            : null
+      if (passwordChangeChallenge && !currentUser) {
+        clearAuthPasswordChangeChallenge(req)
+        clearAuthPasswordChangeChallengeCookie(res)
+        responseJson(res, 401, {
+          ...buildAuthStatus(null),
+          error: 'Authentication required'
+        })
+        return
+      }
       responseJson(
         res,
         200,
-        buildAuthStatus(
-          session,
-          challenge,
-          currentUser,
-          session?.mfaEnabled ?? Boolean(currentUser?.mfaEnabled),
-          Boolean(currentUser?.mfaEnforced || passwordPolicy.enforceMfa)
-        )
+        passwordChangeChallenge
+          ? buildAuthStatus(
+              null,
+              null,
+              currentUser,
+              false,
+              Boolean(currentUser?.mfaEnforced || passwordPolicy.enforceMfa),
+              null,
+              0,
+              false,
+              true,
+              new Date(passwordChangeChallenge.expiresAt).toISOString()
+            )
+          : buildAuthStatus(
+              session,
+              challenge,
+              currentUser,
+              session?.mfaEnabled ?? Boolean(currentUser?.mfaEnabled),
+              Boolean(currentUser?.mfaEnforced || passwordPolicy.enforceMfa)
+            )
       )
     } catch (error) {
       if (res.headersSent) {
@@ -3785,6 +4020,44 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
       const user = result.user
       const mfaEnforced = Boolean(user.mfaEnforced || passwordPolicy.enforceMfa)
+      clearAuthMfaChallenge(req)
+      clearAuthMfaChallengeCookie(res)
+      clearAuthPasswordChangeChallenge(req)
+      clearAuthPasswordChangeChallengeCookie(res)
+
+      if (result.passwordChangeRequired) {
+        const challenge = createAuthPasswordChangeChallenge(user.username)
+        setAuthPasswordChangeChallengeCookie(res, req, challenge)
+        recordAuditEvent({
+          req,
+          actor: buildAuditActor(null, user.username),
+          action: 'auth.login',
+          target: user.username,
+          outcome: 'success',
+          metadata: {
+            passwordChangeRequired: true,
+            passwordChangeChallengeExpiresAt: new Date(challenge.expiresAt).toISOString(),
+            mfaEnforced
+          }
+        })
+        responseJson(
+          res,
+          200,
+          buildAuthStatus(
+            null,
+            null,
+            user,
+            false,
+            mfaEnforced,
+            null,
+            0,
+            false,
+            true,
+            new Date(challenge.expiresAt).toISOString()
+          )
+        )
+        return
+      }
 
       if (user.mfaEnabled) {
         const challenge = createAuthMfaChallenge(user.username)
@@ -3827,7 +4100,6 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       res.set('Cache-Control', 'no-store')
       if (authConfig.enabled) {
         const session = getAuthSessionFromRequest(req)
-        const challenge = getAuthMfaChallengeFromRequest(req)
         if (session) {
           recordAuditEvent({
             req,
@@ -3839,8 +4111,10 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         }
         clearAuthSession(req)
         clearAuthMfaChallenge(req)
+        clearAuthPasswordChangeChallenge(req)
         clearAuthCookie(res)
         clearAuthMfaChallengeCookie(res)
+        clearAuthPasswordChangeChallengeCookie(res)
       }
       responseJson(res, 200, buildAuthStatus(null))
     } catch (error) {
@@ -4486,6 +4760,187 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     }
   })
 
+  app.post(API_ROUTES.authUserPasswordReset, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        throw createAppError(400, 'Authentication is disabled')
+      }
+
+      const session = getAuthSessionFromRequest(req)
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      if (!isAdminAuthSession(session, authConfig)) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.password.reset',
+          target: normalizeAuthUsername(req.params.username) || 'local users',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Admin access required'
+        })
+        return
+      }
+
+      const targetUsername = normalizeAuthUsername(req.params.username)
+      if (!targetUsername) {
+        responseJson(res, 400, {
+          error: 'Username is required'
+        })
+        return
+      }
+
+      const body = (req.body || {}) as { mode?: string }
+      const mode = normalizeText(body.mode).toLowerCase() === 'temporary' ? 'temporary' : 'link'
+      const existingUser = await authUserStore.getUser(targetUsername)
+      if (!existingUser) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.password.reset',
+          target: targetUsername,
+          outcome: 'denied',
+          metadata: {
+            reason: 'User not found',
+            mode
+          }
+        })
+        responseJson(res, 404, {
+          error: 'User not found'
+        })
+        return
+      }
+      if (existingUser.inviteStatus !== 'active') {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.password.reset',
+          target: targetUsername,
+          outcome: 'denied',
+          metadata: {
+            reason: 'User is not active',
+            mode
+          }
+        })
+        responseJson(res, 409, {
+          error: 'User is not active'
+        })
+        return
+      }
+
+      const passwordPolicy = await getPasswordPolicy()
+      if (mode === 'temporary') {
+        const temporaryPassword = generateTemporaryPassword(passwordPolicy)
+        const user = await authUserStore.changePassword(
+          targetUsername,
+          temporaryPassword,
+          passwordPolicy,
+          true
+        )
+        const revokedSessions = revokeAuthSessionsForUsername(user.username)
+        const revokedChallenges = revokeAuthMfaChallengesForUsername(user.username)
+        const revokedPasswordChangeChallenges = revokeAuthPasswordChangeChallengesForUsername(user.username)
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.password.reset',
+          target: user.username,
+          outcome: 'success',
+          metadata: {
+            mode,
+            revokedSessions,
+            revokedChallenges,
+            revokedPasswordChangeChallenges
+          }
+        })
+        responseJson(res, 200, {
+          user,
+          mode,
+          temporaryPassword
+        } satisfies AuthUserPasswordResetResponse)
+        return
+      }
+
+      const result = await authUserStore.requestPasswordReset(
+        targetUsername,
+        passwordPolicy.resetTokenTtlMinutes,
+        passwordPolicy,
+        {
+          bypassGate: true,
+          allowMissingRecipient: true
+        }
+      )
+      if (!result) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'auth.users.password.reset',
+          target: targetUsername,
+          outcome: 'denied',
+          metadata: {
+            reason: 'Password reset unavailable',
+            mode
+          }
+        })
+        responseJson(res, 404, {
+          error: 'Password reset unavailable'
+        })
+        return
+      }
+
+      const resetUrl = buildPasswordResetUrl(req, result.resetToken)
+      let emailSent = false
+      let emailError = ''
+      if (result.user.recipientEmail) {
+        const emailResult = await sendPasswordResetEmail({
+          recipientEmail: result.user.recipientEmail,
+          username: result.user.username,
+          resetUrl,
+          resetExpiresAt: result.resetExpiresAt,
+          req
+        })
+        emailSent = emailResult.emailSent
+        emailError = emailResult.error || ''
+      } else {
+        emailError = 'Recipient email is not configured'
+      }
+
+      recordAuditEvent({
+        req,
+        session,
+        action: 'auth.users.password.reset',
+        target: result.user.username,
+        outcome: 'success',
+        metadata: {
+          mode,
+          emailSent,
+          emailError: emailError || undefined,
+          resetExpiresAt: result.resetExpiresAt
+        }
+      })
+      responseJson(res, 200, {
+        user: result.user,
+        mode,
+        resetUrl,
+        resetExpiresAt: result.resetExpiresAt,
+        emailSent,
+        emailError: emailError || undefined
+      } satisfies AuthUserPasswordResetResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
   app.get(API_ROUTES.authInviteLookup, async (req, res) => {
     try {
       res.set('Cache-Control', 'no-store')
@@ -4690,17 +5145,125 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
       const passwordPolicy = await getPasswordPolicy()
       const user = await authUserStore.resetPassword(token, password, passwordPolicy)
+      const revokedSessions = revokeAuthSessionsForUsername(user.username)
+      const revokedMfaChallenges = revokeAuthMfaChallengesForUsername(user.username)
+      const revokedPasswordChangeChallenges = revokeAuthPasswordChangeChallengesForUsername(user.username)
+      clearAuthMfaChallenge(req)
+      clearAuthMfaChallengeCookie(res)
+      clearAuthPasswordChangeChallenge(req)
+      clearAuthPasswordChangeChallengeCookie(res)
       recordAuditEvent({
         req,
         actor: buildAuditActor(null, user.username),
         action: 'auth.password.reset.complete',
         target: user.username,
-        outcome: 'success'
+        outcome: 'success',
+        metadata: {
+          revokedSessions,
+          revokedMfaChallenges,
+          revokedPasswordChangeChallenges
+        }
       })
       responseJson(res, 200, {
         user,
         message: 'Password updated'
       })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.post(API_ROUTES.authPasswordChangeConfirm, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        throw createAppError(400, 'Authentication is disabled')
+      }
+
+      const challenge = getAuthPasswordChangeChallengeFromRequest(req)
+      if (!challenge) {
+        responseJson(res, 401, {
+          error: 'Password change challenge required'
+        })
+        return
+      }
+
+      const body = (req.body || {}) as { password?: string; confirmPassword?: string }
+      const password = String(body.password ?? '')
+      const confirmPassword = String(body.confirmPassword ?? '')
+      if (confirmPassword && password !== confirmPassword) {
+        responseJson(res, 400, {
+          error: 'Passwords do not match'
+        })
+        return
+      }
+
+      const passwordPolicy = await getPasswordPolicy()
+      const user = await authUserStore.changePassword(challenge.username, password, passwordPolicy, false)
+      const revokedSessions = revokeAuthSessionsForUsername(user.username)
+      const revokedMfaChallenges = revokeAuthMfaChallengesForUsername(user.username)
+      const revokedPasswordChangeChallenges = revokeAuthPasswordChangeChallengesForUsername(user.username)
+      clearAuthPasswordChangeChallenge(req)
+      clearAuthPasswordChangeChallengeCookie(res)
+      clearAuthMfaChallenge(req)
+      clearAuthMfaChallengeCookie(res)
+
+      if (user.mfaEnabled) {
+        const mfaChallenge = createAuthMfaChallenge(user.username)
+        setAuthMfaChallengeCookie(res, req, mfaChallenge)
+        recordAuditEvent({
+          req,
+          actor: buildAuditActor(null, user.username),
+          action: 'auth.password.change.complete',
+          target: user.username,
+          outcome: 'success',
+          metadata: {
+            revokedSessions,
+            revokedMfaChallenges,
+            revokedPasswordChangeChallenges,
+            mfaRequired: true
+          }
+        })
+        responseJson(
+          res,
+          200,
+          buildAuthStatus(
+            null,
+            mfaChallenge,
+            user,
+            false,
+            Boolean(user.mfaEnforced || passwordPolicy.enforceMfa)
+          )
+        )
+        return
+      }
+
+      const session = createAuthSession(user.username, Boolean(user.mfaEnabled))
+      setAuthCookie(res, req, session)
+      recordAuditEvent({
+        req,
+        actor: buildAuditActor(session, user.username),
+        action: 'auth.password.change.complete',
+        target: user.username,
+        outcome: 'success',
+        metadata: {
+          revokedSessions,
+          revokedMfaChallenges,
+          revokedPasswordChangeChallenges,
+          mfaRequired: false
+        }
+      })
+      responseJson(
+        res,
+        200,
+        buildAuthStatus(
+          session,
+          null,
+          user,
+          Boolean(user.mfaEnabled),
+          Boolean(user.mfaEnforced || passwordPolicy.enforceMfa)
+        )
+      )
     } catch (error) {
       createRouteErrorHandler(res, error)
     }

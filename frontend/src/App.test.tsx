@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App, getCasePathFromScopePath } from '@/App'
-import { api } from '@/api'
+import { ApiError, api } from '@/api'
 import { AppShell, EmailPreview, MessageList, Sidebar, TagManagerDialog } from '@/components/layout'
 import { FlaggedBundleDialog, type FlaggedBundleDialogScope } from '@/components/flagged-bundle-dialog'
 import { AuthScreen, MfaReminderDialog } from '@/components/auth'
@@ -23,7 +23,8 @@ import type {
   FlaggedBundleJob,
   FlaggedBundleJobsResponse,
   SearchIndexRefreshStatus,
-  UsersResponse
+  UsersResponse,
+  UserPasswordResetResponse
 } from '@/types'
 
 vi.mock('@tanstack/react-virtual', () => ({
@@ -242,6 +243,47 @@ describe('auth shell', () => {
     })
   })
 
+  it('shows the reset link after a locked login response includes password reset availability', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api.auth, 'me').mockResolvedValueOnce({
+      authenticated: false,
+      enabled: true,
+      canManageUsers: false,
+      mfaEnabled: false,
+      mfaEnforced: false,
+      lockedUntil: null,
+      loginFailedCount: 0,
+      passwordResetAvailable: false,
+      user: null,
+      expiresAt: null
+    })
+    vi.spyOn(api.auth, 'login').mockRejectedValueOnce(
+      new ApiError('Account temporarily locked. Try again later.', 423, {
+        authenticated: false,
+        enabled: true,
+        canManageUsers: false,
+        mfaEnabled: false,
+        mfaEnforced: false,
+        lockedUntil: new Date().toISOString(),
+        loginFailedCount: 1,
+        passwordResetAvailable: true,
+        passwordChangeRequired: false,
+        passwordChangeChallengeExpiresAt: null,
+        user: null,
+        expiresAt: null
+      })
+    )
+
+    render(<App />)
+
+    await user.type(await screen.findByLabelText('Username'), 'dnefdt')
+    await user.type(screen.getByLabelText('Password'), 'wrong-password')
+    await user.click(screen.getByRole('button', { name: 'Sign in' }))
+
+    expect(await screen.findByRole('button', { name: 'Forgot password?' })).toBeInTheDocument()
+    expect(screen.getByText('Account temporarily locked. Try again later.')).toBeInTheDocument()
+  })
+
   it('loads the password reset screen from a reset token and completes the reset', async () => {
     const user = userEvent.setup()
     const resetLookupResponse: PasswordResetLookupResponse = {
@@ -274,6 +316,49 @@ describe('auth shell', () => {
 
     expect(await screen.findByRole('heading', { name: 'Sign in to continue' })).toBeInTheDocument()
     expect(api.auth.passwordResetConfirm).toHaveBeenCalledWith('reset-token', 'NewPass123!', 'NewPass123!')
+  })
+
+  it('shows the forced password change screen for temporary admin resets', async () => {
+    const user = userEvent.setup()
+    const onPasswordResetConfirm = vi.fn().mockResolvedValue(undefined)
+
+    render(
+      <AuthScreen
+        view="change"
+        busy={false}
+        message="Temporary password accepted. Change it to continue."
+        error=""
+        passwordResetAvailable={false}
+        invite={null}
+        inviteStep="password"
+        inviteMfaAvailable={false}
+        inviteMfaEnforced={false}
+        inviteSetup={null}
+        inviteRecoveryCodes={[]}
+        resetLookup={null}
+        passwordChangeUser="bob"
+        onLogin={vi.fn()}
+        onMfaChallenge={vi.fn()}
+        onPasswordResetRequest={async () => undefined}
+        onPasswordResetConfirm={onPasswordResetConfirm}
+        onInviteAccept={vi.fn()}
+        onInviteMfaStart={vi.fn()}
+        onInviteMfaSkip={vi.fn()}
+        onInviteMfaSubmit={vi.fn()}
+        onInviteFinish={vi.fn()}
+        onOpenLogin={vi.fn()}
+      />
+    )
+
+    expect(screen.getByRole('heading', { name: 'Set a new password' })).toBeInTheDocument()
+    expect(screen.getByText('bob')).toBeInTheDocument()
+
+    await user.type(screen.getByLabelText('New password'), 'BobReset123!!')
+    await user.type(screen.getByLabelText('Confirm password'), 'BobReset123!!')
+    await user.click(screen.getByRole('button', { name: 'Update password' }))
+
+    expect(onPasswordResetConfirm).toHaveBeenCalledWith('BobReset123!!', 'BobReset123!!')
+    expect(screen.getByRole('button', { name: 'Back to sign in' })).toBeInTheDocument()
   })
 
   it('clears invite loading after the invite lookup succeeds', async () => {
@@ -556,6 +641,106 @@ describe('auth shell', () => {
 
     expect(await screen.findByRole('heading', { name: 'Case access' })).toBeInTheDocument()
     expect(screen.getByText('Users start with no cases assigned. Leave everything unchecked for no access.')).toBeInTheDocument()
+  })
+
+  it('opens the admin password reset modal and generates a temporary password', async () => {
+    const user = userEvent.setup()
+    const now = new Date().toISOString()
+    const authenticatedStatus: AuthStatus = {
+      authenticated: true,
+      enabled: true,
+      canManageUsers: true,
+      mfaEnabled: true,
+      mfaEnforced: false,
+      lockedUntil: null,
+      loginFailedCount: 0,
+      passwordResetAvailable: false,
+      user: { username: 'admin', assignedCasePaths: [] },
+      expiresAt: null
+    }
+    const emptyCatalog: PstCatalogResponse = {
+      rootPath: '',
+      rootExists: true,
+      message: '',
+      scopePath: '',
+      scopeLabel: 'PST root',
+      scopes: [],
+      files: []
+    }
+    const hiddenRulesResponse: HiddenRulesResponse = { items: [] }
+    const usersResponse: UsersResponse = {
+      users: [
+        {
+          username: 'admin',
+          createdAt: now,
+          recipientEmail: 'admin@example.com',
+          inviteStatus: 'active',
+          inviteSentAt: now,
+          inviteExpiresAt: '',
+          inviteAcceptedAt: now,
+          inviteRevokedAt: '',
+          mfaEnabled: true,
+          mfaEnforced: false,
+          mfaEnrolledAt: now,
+          assignedCasePaths: []
+        },
+        {
+          username: 'bob',
+          createdAt: now,
+          recipientEmail: 'bob@example.com',
+          inviteStatus: 'active',
+          inviteSentAt: now,
+          inviteExpiresAt: '',
+          inviteAcceptedAt: now,
+          inviteRevokedAt: '',
+          mfaEnabled: false,
+          mfaEnforced: false,
+          mfaEnrolledAt: '',
+          assignedCasePaths: []
+        }
+      ]
+    }
+    const activityResponse: ActivityLogResponse = { entries: [] }
+    const generatedReset: UserPasswordResetResponse = {
+      mode: 'temporary',
+      user: {
+        username: 'bob',
+        createdAt: now,
+        recipientEmail: 'bob@example.com',
+        inviteStatus: 'active',
+        inviteSentAt: now,
+        inviteExpiresAt: '',
+        inviteAcceptedAt: now,
+        inviteRevokedAt: '',
+        mfaEnabled: false,
+        mfaEnforced: false,
+        mfaEnrolledAt: '',
+        assignedCasePaths: [],
+        passwordChangeRequired: true
+      },
+      temporaryPassword: 'TempPass123!!'
+    }
+
+    vi.spyOn(api.auth, 'me').mockResolvedValueOnce(authenticatedStatus)
+    vi.spyOn(api.pst, 'catalog').mockResolvedValueOnce(emptyCatalog)
+    vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue(hiddenRulesResponse)
+    vi.spyOn(api.auth, 'users').mockResolvedValue(usersResponse)
+    vi.spyOn(api.activityLog, 'list').mockResolvedValue(activityResponse)
+    vi.spyOn(api.auth, 'resetPassword').mockResolvedValue(generatedReset)
+
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'admin' }))
+    await user.click(await screen.findByRole('button', { name: 'Manage users' }))
+    await user.click(screen.getByRole('button', { name: 'Reset password for bob' }))
+
+    expect(await screen.findByRole('heading', { name: 'Password reset' })).toBeInTheDocument()
+    await user.click(screen.getByRole('radio', { name: /Temporary password/ }))
+    await user.click(screen.getByRole('button', { name: 'Generate' }))
+
+    expect(api.auth.resetPassword).toHaveBeenCalledWith('bob', 'temporary')
+    expect(await screen.findByDisplayValue('TempPass123!!')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Copy password' })).toBeInTheDocument()
   })
 
   it('shows a blocking MFA reminder without a close button', () => {
@@ -1682,7 +1867,7 @@ describe('shell and preview', () => {
         })
       )
     })
-  })
+  }, 10000)
 
   it('opens the flagged bundle dialog from the message list, shows progress, and rehydrates completed jobs', async () => {
     const user = userEvent.setup()

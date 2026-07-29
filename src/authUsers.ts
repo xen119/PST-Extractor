@@ -40,6 +40,7 @@ export interface AuthUserListItem {
   mfaEnforced: boolean
   mfaEnrolledAt: string
   assignedCasePaths: string[]
+  passwordChangeRequired: boolean
 }
 
 export interface AuthInviteResult {
@@ -53,6 +54,7 @@ export interface AuthLoginResult {
   lockedUntil: string | null
   passwordResetAvailable: boolean
   loginFailedCount: number
+  passwordChangeRequired: boolean
 }
 
 export interface AuthPasswordResetResult {
@@ -93,13 +95,23 @@ export interface AuthUserStore {
   requestPasswordReset(
     usernameOrEmail: string,
     resetTtlMinutes: number,
-    policy?: PasswordPolicyRecord
+    policy?: PasswordPolicyRecord,
+    options?: {
+      bypassGate?: boolean
+      allowMissingRecipient?: boolean
+    }
   ): Promise<AuthPasswordResetResult | null>
   getPasswordResetByToken(token: string): Promise<AuthUserListItem | null>
   resetPassword(
     token: string,
     password: string,
     policy?: PasswordPolicyRecord
+  ): Promise<AuthUserListItem>
+  changePassword(
+    username: string,
+    password: string,
+    policy?: PasswordPolicyRecord,
+    passwordChangeRequired?: boolean
   ): Promise<AuthUserListItem>
   startMfaEnrollment(username: string, issuer?: string): Promise<AuthMfaSetupResult>
   completeMfaEnrollment(username: string, code: string): Promise<AuthMfaCompletionResult>
@@ -274,6 +286,7 @@ function buildStoredAuthUserRecord(input: {
   passwordResetTokenHash?: string
   passwordResetIssuedAt?: string
   passwordResetExpiresAt?: string
+  passwordChangeRequired?: boolean
 }): StoredAuthUserRecord {
   const username = normalizeUsername(input.username)
   const createdAt = normalizeText(input.createdAt) || new Date().toISOString()
@@ -308,7 +321,8 @@ function buildStoredAuthUserRecord(input: {
     lockedUntil: normalizeText(input.lockedUntil),
     passwordResetTokenHash: normalizeText(input.passwordResetTokenHash),
     passwordResetIssuedAt: normalizeText(input.passwordResetIssuedAt),
-    passwordResetExpiresAt: normalizeText(input.passwordResetExpiresAt)
+    passwordResetExpiresAt: normalizeText(input.passwordResetExpiresAt),
+    passwordChangeRequired: Boolean(input.passwordChangeRequired)
   }
 }
 
@@ -354,7 +368,8 @@ function normalizeStoredAuthUserRecord(value: unknown): StoredAuthUserRecord | n
     lockedUntil: normalizeText(source.lockedUntil),
     passwordResetTokenHash: normalizeText(source.passwordResetTokenHash),
     passwordResetIssuedAt: normalizeText(source.passwordResetIssuedAt),
-    passwordResetExpiresAt: normalizeText(source.passwordResetExpiresAt)
+    passwordResetExpiresAt: normalizeText(source.passwordResetExpiresAt),
+    passwordChangeRequired: Boolean(source.passwordChangeRequired)
   }
 }
 
@@ -385,7 +400,8 @@ function toAuthUserListItem(record: StoredAuthUserRecord): AuthUserListItem {
     mfaEnabled: Boolean(record.mfaEnabled),
     mfaEnforced: Boolean(record.mfaEnforced),
     mfaEnrolledAt: record.mfaEnrolledAt,
-    assignedCasePaths: [...record.assignedCasePaths]
+    assignedCasePaths: [...record.assignedCasePaths],
+    passwordChangeRequired: Boolean(record.passwordChangeRequired)
   }
 }
 
@@ -425,7 +441,8 @@ function buildLegacyUserRecord(
     lockedUntil: '',
     passwordResetTokenHash: '',
     passwordResetIssuedAt: '',
-    passwordResetExpiresAt: ''
+    passwordResetExpiresAt: '',
+    passwordChangeRequired: false
   })
 }
 
@@ -467,7 +484,8 @@ function buildInviteRecord(
     lockedUntil: existing?.lockedUntil || '',
     passwordResetTokenHash: '',
     passwordResetIssuedAt: '',
-    passwordResetExpiresAt: ''
+    passwordResetExpiresAt: '',
+    passwordChangeRequired: false
   })
 
   return {
@@ -522,7 +540,8 @@ function buildCompletedMfaRecord(
     lockedUntil: '',
     passwordResetTokenHash: '',
     passwordResetIssuedAt: '',
-    passwordResetExpiresAt: ''
+    passwordResetExpiresAt: '',
+    passwordChangeRequired: record.passwordChangeRequired
   })
 }
 
@@ -538,7 +557,8 @@ function buildMfaSetupRecord(record: StoredAuthUserRecord, secret: string, maste
     lockedUntil: record.lockedUntil,
     passwordResetTokenHash: record.passwordResetTokenHash,
     passwordResetIssuedAt: record.passwordResetIssuedAt,
-    passwordResetExpiresAt: record.passwordResetExpiresAt
+    passwordResetExpiresAt: record.passwordResetExpiresAt,
+    passwordChangeRequired: record.passwordChangeRequired
   })
 }
 
@@ -572,7 +592,8 @@ function buildLoginSuccessRecord(record: StoredAuthUserRecord): StoredAuthUserRe
     lockedUntil: '',
     passwordResetTokenHash: '',
     passwordResetIssuedAt: '',
-    passwordResetExpiresAt: ''
+    passwordResetExpiresAt: '',
+    passwordChangeRequired: record.passwordChangeRequired
   })
 }
 
@@ -586,7 +607,8 @@ function buildLoginFailureRecord(record: StoredAuthUserRecord, policy?: Password
     loginFailedCount: nextFailedCount,
     lockedUntil: shouldLock
       ? new Date(Date.now() + Math.max(1, policy?.lockoutDurationSeconds || 30) * 1000).toISOString()
-      : record.lockedUntil
+      : record.lockedUntil,
+    passwordChangeRequired: record.passwordChangeRequired
   })
 }
 
@@ -601,7 +623,8 @@ function buildPasswordResetRecord(
     updatedAt: new Date().toISOString(),
     passwordResetTokenHash: hashPasswordResetToken(resetToken, masterSecret),
     passwordResetIssuedAt: new Date().toISOString(),
-    passwordResetExpiresAt: resetExpiresAt
+    passwordResetExpiresAt: resetExpiresAt,
+    passwordChangeRequired: record.passwordChangeRequired
   })
 }
 
@@ -613,7 +636,28 @@ function buildPasswordResetClearedRecord(record: StoredAuthUserRecord): StoredAu
     lockedUntil: '',
     passwordResetTokenHash: '',
     passwordResetIssuedAt: '',
-    passwordResetExpiresAt: ''
+    passwordResetExpiresAt: '',
+    passwordChangeRequired: record.passwordChangeRequired
+  })
+}
+
+function buildPasswordChangedRecord(
+  record: StoredAuthUserRecord,
+  password: string,
+  passwordChangeRequired: boolean
+): StoredAuthUserRecord {
+  const salt = randomBytes(16).toString('hex')
+  return buildStoredAuthUserRecord({
+    ...record,
+    updatedAt: new Date().toISOString(),
+    salt,
+    passwordHash: hashAuthPassword(password, salt),
+    loginFailedCount: 0,
+    lockedUntil: '',
+    passwordResetTokenHash: '',
+    passwordResetIssuedAt: '',
+    passwordResetExpiresAt: '',
+    passwordChangeRequired
   })
 }
 
@@ -766,7 +810,8 @@ class MemoryAuthUserStore implements AuthUserStore {
         user: null,
         lockedUntil: null,
         passwordResetAvailable: false,
-        loginFailedCount: 0
+        loginFailedCount: 0,
+        passwordChangeRequired: false
       }
     }
 
@@ -775,7 +820,8 @@ class MemoryAuthUserStore implements AuthUserStore {
         user: null,
         lockedUntil: null,
         passwordResetAvailable: false,
-        loginFailedCount: 0
+        loginFailedCount: 0,
+        passwordChangeRequired: false
       }
     }
 
@@ -785,7 +831,8 @@ class MemoryAuthUserStore implements AuthUserStore {
         lockedUntil: record.lockedUntil || null,
         passwordResetAvailable:
           getLoginFailedCount(record) >= Math.max(1, policy?.forgotPasswordAfterFailures || 2),
-        loginFailedCount: getLoginFailedCount(record)
+        loginFailedCount: getLoginFailedCount(record),
+        passwordChangeRequired: Boolean(record.passwordChangeRequired)
       }
     }
 
@@ -797,7 +844,8 @@ class MemoryAuthUserStore implements AuthUserStore {
         user: null,
         lockedUntil: isLoginLocked(updated) ? updated.lockedUntil || null : null,
         passwordResetAvailable: failedCount >= Math.max(1, policy?.forgotPasswordAfterFailures || 2),
-        loginFailedCount: failedCount
+        loginFailedCount: failedCount,
+        passwordChangeRequired: Boolean(updated.passwordChangeRequired)
       }
     }
 
@@ -807,7 +855,8 @@ class MemoryAuthUserStore implements AuthUserStore {
       user: toAuthUserListItem(updated),
       lockedUntil: null,
       passwordResetAvailable: false,
-      loginFailedCount: 0
+      loginFailedCount: 0,
+      passwordChangeRequired: Boolean(updated.passwordChangeRequired)
     }
   }
 
@@ -940,15 +989,23 @@ class MemoryAuthUserStore implements AuthUserStore {
   async requestPasswordReset(
     usernameOrEmail: string,
     resetTtlMinutes: number,
-    policy?: PasswordPolicyRecord
+    policy?: PasswordPolicyRecord,
+    options?: {
+      bypassGate?: boolean
+      allowMissingRecipient?: boolean
+    }
   ): Promise<AuthPasswordResetResult | null> {
     const record = this.getRecordByLoginIdentifier(usernameOrEmail)
-    if (!record || getInviteStatus(record) !== 'active' || !record.recipientEmail) {
+    if (
+      !record ||
+      getInviteStatus(record) !== 'active' ||
+      (!record.recipientEmail && !options?.allowMissingRecipient)
+    ) {
       return null
     }
 
     const resetThreshold = Math.max(1, policy?.forgotPasswordAfterFailures || 2)
-    if (getLoginFailedCount(record) < resetThreshold) {
+    if (!options?.bypassGate && getLoginFailedCount(record) < resetThreshold) {
       return null
     }
 
@@ -1019,18 +1076,46 @@ class MemoryAuthUserStore implements AuthUserStore {
       throw createAuthStoreError(400, policyIssues.join(' '))
     }
 
-    const salt = randomBytes(16).toString('hex')
-    const updated = buildStoredAuthUserRecord({
-      ...record,
-      updatedAt: new Date().toISOString(),
-      salt,
-      passwordHash: hashAuthPassword(normalizedPassword, salt),
-      loginFailedCount: 0,
-      lockedUntil: '',
-      passwordResetTokenHash: '',
-      passwordResetIssuedAt: '',
-      passwordResetExpiresAt: ''
-    })
+    const updated = buildPasswordChangedRecord(record, normalizedPassword, false)
+    this.setRecord(updated)
+    return toAuthUserListItem(updated)
+  }
+
+  async changePassword(
+    username: string,
+    password: string,
+    policy?: PasswordPolicyRecord,
+    passwordChangeRequired = false
+  ): Promise<AuthUserListItem> {
+    const record = this.getRecord(username)
+    if (!record || getInviteStatus(record) !== 'active') {
+      throw createAuthStoreError(404, 'User not found')
+    }
+
+    const normalizedPassword = String(password ?? '')
+    if (!normalizedPassword.trim()) {
+      throw createAuthStoreError(400, 'Password is required')
+    }
+    const policyIssues = validatePasswordAgainstPolicy(
+      normalizedPassword,
+      policy || buildPasswordPolicyView({
+        minLength: 12,
+        requireUppercase: true,
+        requireLowercase: true,
+        requireNumber: true,
+        requireSpecial: true,
+        forgotPasswordAfterFailures: 2,
+        lockoutThreshold: 5,
+        lockoutDurationSeconds: 30,
+        resetTokenTtlMinutes: 60,
+        enforceMfa: false
+      })
+    )
+    if (policyIssues.length) {
+      throw createAuthStoreError(400, policyIssues.join(' '))
+    }
+
+    const updated = buildPasswordChangedRecord(record, normalizedPassword, passwordChangeRequired)
     this.setRecord(updated)
     return toAuthUserListItem(updated)
   }
@@ -1431,7 +1516,8 @@ export class MongoAuthUserStore implements AuthUserStore {
         user: null,
         lockedUntil: null,
         passwordResetAvailable: false,
-        loginFailedCount: 0
+        loginFailedCount: 0,
+        passwordChangeRequired: false
       }
     }
 
@@ -1440,7 +1526,8 @@ export class MongoAuthUserStore implements AuthUserStore {
         user: null,
         lockedUntil: null,
         passwordResetAvailable: false,
-        loginFailedCount: 0
+        loginFailedCount: 0,
+        passwordChangeRequired: false
       }
     }
 
@@ -1450,7 +1537,8 @@ export class MongoAuthUserStore implements AuthUserStore {
         user: null,
         lockedUntil: record.lockedUntil || null,
         passwordResetAvailable: failedCount >= Math.max(1, policy?.forgotPasswordAfterFailures || 2),
-        loginFailedCount: failedCount
+        loginFailedCount: failedCount,
+        passwordChangeRequired: Boolean(record.passwordChangeRequired)
       }
     }
 
@@ -1462,7 +1550,8 @@ export class MongoAuthUserStore implements AuthUserStore {
         user: null,
         lockedUntil: isLoginLocked(updated) ? updated.lockedUntil || null : null,
         passwordResetAvailable: failedCount >= Math.max(1, policy?.forgotPasswordAfterFailures || 2),
-        loginFailedCount: failedCount
+        loginFailedCount: failedCount,
+        passwordChangeRequired: Boolean(updated.passwordChangeRequired)
       }
     }
 
@@ -1472,7 +1561,8 @@ export class MongoAuthUserStore implements AuthUserStore {
       user: toAuthUserListItem(updated),
       lockedUntil: null,
       passwordResetAvailable: false,
-      loginFailedCount: 0
+      loginFailedCount: 0,
+      passwordChangeRequired: Boolean(updated.passwordChangeRequired)
     }
   }
 
@@ -1608,15 +1698,23 @@ export class MongoAuthUserStore implements AuthUserStore {
   async requestPasswordReset(
     usernameOrEmail: string,
     resetTtlMinutes: number,
-    _policy?: PasswordPolicyRecord
+    policy?: PasswordPolicyRecord,
+    options?: {
+      bypassGate?: boolean
+      allowMissingRecipient?: boolean
+    }
   ): Promise<AuthPasswordResetResult | null> {
     const record = await this.getRecordByLoginIdentifier(usernameOrEmail)
-    if (!record || getInviteStatus(record) !== 'active' || !record.recipientEmail) {
+    if (
+      !record ||
+      getInviteStatus(record) !== 'active' ||
+      (!record.recipientEmail && !options?.allowMissingRecipient)
+    ) {
       return null
     }
 
-    const resetThreshold = Math.max(1, _policy?.forgotPasswordAfterFailures || 2)
-    if (getLoginFailedCount(record) < resetThreshold) {
+    const resetThreshold = Math.max(1, policy?.forgotPasswordAfterFailures || 2)
+    if (!options?.bypassGate && getLoginFailedCount(record) < resetThreshold) {
       return null
     }
 
@@ -1688,18 +1786,47 @@ export class MongoAuthUserStore implements AuthUserStore {
       throw createAuthStoreError(400, policyIssues.join(' '))
     }
 
-    const salt = randomBytes(16).toString('hex')
-    const updated = buildStoredAuthUserRecord({
-      ...record,
-      updatedAt: new Date().toISOString(),
-      salt,
-      passwordHash: hashAuthPassword(normalizedPassword, salt),
-      loginFailedCount: 0,
-      lockedUntil: '',
-      passwordResetTokenHash: '',
-      passwordResetIssuedAt: '',
-      passwordResetExpiresAt: ''
-    })
+    const updated = buildPasswordChangedRecord(record, normalizedPassword, false)
+    await this.setRecord(updated)
+    return toAuthUserListItem(updated)
+  }
+
+  async changePassword(
+    username: string,
+    password: string,
+    policy?: PasswordPolicyRecord,
+    passwordChangeRequired = false
+  ): Promise<AuthUserListItem> {
+    const record = await this.getRecord(username)
+    if (!record || getInviteStatus(record) !== 'active') {
+      throw createAuthStoreError(404, 'User not found')
+    }
+
+    const normalizedPassword = String(password ?? '')
+    if (!normalizedPassword.trim()) {
+      throw createAuthStoreError(400, 'Password is required')
+    }
+
+    const policyIssues = validatePasswordAgainstPolicy(
+      normalizedPassword,
+      policy || buildPasswordPolicyView({
+        minLength: 12,
+        requireUppercase: true,
+        requireLowercase: true,
+        requireNumber: true,
+        requireSpecial: true,
+        forgotPasswordAfterFailures: 2,
+        lockoutThreshold: 5,
+        lockoutDurationSeconds: 30,
+        resetTokenTtlMinutes: 60,
+        enforceMfa: false
+      })
+    )
+    if (policyIssues.length) {
+      throw createAuthStoreError(400, policyIssues.join(' '))
+    }
+
+    const updated = buildPasswordChangedRecord(record, normalizedPassword, passwordChangeRequired)
     await this.setRecord(updated)
     return toAuthUserListItem(updated)
   }

@@ -141,6 +141,11 @@ function getCookiePair(setCookieHeader: string): string {
   return setCookieHeader.split(';')[0] || ''
 }
 
+function getCookieValue(setCookieHeader: string, cookieName: string): string {
+  const match = setCookieHeader.match(new RegExp(`${cookieName}=([^;]+)`))
+  return match ? `${cookieName}=${match[1]}` : ''
+}
+
 function readAuditLogEntries(filePath: string): any[] {
   if (!fs.existsSync(filePath)) {
     return []
@@ -749,10 +754,14 @@ describe('pst review api', () => {
     expect(openApi.paths['/api/auth/password-reset/request']).toBeDefined()
     expect(openApi.paths['/api/auth/password-reset/{token}']).toBeDefined()
     expect(openApi.paths['/api/auth/password-reset/{token}/confirm']).toBeDefined()
+    expect(openApi.paths['/api/auth/password-change/confirm']).toBeDefined()
+    expect(openApi.paths['/api/auth/users/{username}/password-reset']).toBeDefined()
     expect(openApi.paths['/api/auth/users/{username}/mfa/enforce']).toBeDefined()
     expect(openApi.paths['/api/auth/users/{username}/access']).toBeDefined()
     const authStatusSchema = (openApi.components as { schemas?: Record<string, { properties?: Record<string, unknown> }> } | undefined)?.schemas?.AuthStatus
     expect(authStatusSchema?.properties?.passwordResetAvailable).toBeDefined()
+    expect(authStatusSchema?.properties?.passwordChangeRequired).toBeDefined()
+    expect(authStatusSchema?.properties?.passwordChangeChallengeExpiresAt).toBeDefined()
     expect(authStatusSchema?.properties?.loginFailedCount).toBeDefined()
     expect(authStatusSchema?.properties?.lockedUntil).toBeDefined()
 
@@ -2969,6 +2978,280 @@ describe('pst review api', () => {
     const postLogoutMePayload = await readJson(postLogoutMeResponse)
     expect(postLogoutMeResponse.status).toBe(401)
     expect(postLogoutMePayload.error).toBe('Authentication required')
+  })
+
+  it('includes password reset availability in repeated failed login responses', async () => {
+    rootDir = makeTempDir('pst-review-api-auth-lockout-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(pstDir)
+    stageFixture(enronPath, path.join(pstDir, 'sample.pst'))
+
+    const authUserStore = createMemoryAuthUserStore([
+      { username: 'admin', password: 'pst-extractor' }
+    ])
+    const appSettingsStore = createMemoryAppSettingsStore(
+      {},
+      {
+        forgotPasswordAfterFailures: 1,
+        lockoutThreshold: 1,
+        lockoutDurationSeconds: 60,
+        resetTokenTtlMinutes: 60
+      }
+    )
+
+    const started = await startApp(
+      pstDir,
+      undefined,
+      {
+        username: 'admin',
+        password: 'pst-extractor',
+        sessionTtlMinutes: 180
+      },
+      undefined,
+      authUserStore,
+      appSettingsStore,
+      undefined,
+      {
+        skipInitialRefresh: true
+      }
+    )
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const loginAttempt = async () => {
+      const response = await fetch(`${started.baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          username: 'admin',
+          password: 'wrong-password'
+        })
+      })
+      return {
+        response,
+        payload: await readJson(response)
+      }
+    }
+
+    const firstFailure = await loginAttempt()
+    expect([401, 423]).toContain(firstFailure.response.status)
+
+    const failedLogin = await loginAttempt()
+
+    expect([401, 423]).toContain(failedLogin.response.status)
+    expect(failedLogin.payload.error).toBeDefined()
+    expect(failedLogin.payload.passwordResetAvailable).toBe(true)
+  })
+
+  it('supports admin password reset links and temporary password change flow', async () => {
+    rootDir = makeTempDir('pst-review-api-auth-password-reset-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(pstDir)
+    stageFixture(enronPath, path.join(pstDir, 'sample.pst'))
+
+    const authUserStore = createMemoryAuthUserStore([
+      { username: 'admin', password: 'pst-extractor' }
+    ])
+    const invite = await authUserStore.createInvite('alice', 'alice@example.com', 60)
+    await authUserStore.acceptInvite(invite.inviteToken, 'AliceInitial123!!')
+    await authUserStore.addUser('bob', 'BobInitial123!!')
+
+    const started = await startApp(pstDir, undefined, {
+      username: 'admin',
+      password: 'pst-extractor',
+      sessionTtlMinutes: 180,
+      publicBaseUrl: 'https://portal.example.test'
+    }, authUserStore)
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const adminLoginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'admin',
+        password: 'pst-extractor'
+      })
+    })
+    const adminLoginPayload = await readJson(adminLoginResponse)
+    const adminCookie = getCookieValue(getSetCookieHeader(adminLoginResponse), 'pst-review-session')
+    expect(adminLoginResponse.status).toBe(200)
+    expect(adminLoginPayload.authenticated).toBe(true)
+    expect(adminLoginPayload.canManageUsers).toBe(true)
+    expect(adminCookie).toContain('pst-review-session=')
+
+    const adminMeResponse = await fetch(`${started.baseUrl}/api/auth/me`, {
+      headers: {
+        cookie: adminCookie
+      }
+    })
+    const adminMePayload = await readJson(adminMeResponse)
+    expect(adminMeResponse.status).toBe(200)
+    expect(adminMePayload.authenticated).toBe(true)
+    expect(adminMePayload.canManageUsers).toBe(true)
+
+    const aliceLoginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'alice',
+        password: 'AliceInitial123!!'
+      })
+    })
+    const aliceLoginPayload = await readJson(aliceLoginResponse)
+    const aliceSessionCookie = getCookieValue(getSetCookieHeader(aliceLoginResponse), 'pst-review-session')
+    expect(aliceLoginResponse.status).toBe(200)
+    expect(aliceLoginPayload.authenticated).toBe(true)
+
+    const linkResetResponse = await fetch(`${started.baseUrl}/api/auth/users/alice/password-reset`, {
+      method: 'POST',
+      headers: {
+        cookie: adminCookie,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        mode: 'link'
+      })
+    })
+    const linkResetPayload = await readJson(linkResetResponse)
+    expect(linkResetResponse.status).toBe(200)
+    expect(linkResetPayload.mode).toBe('link')
+    expect(linkResetPayload.user.username).toBe('alice')
+    expect(linkResetPayload.resetUrl).toContain('/reset/')
+    expect(new URL(linkResetPayload.resetUrl).origin).toBe('https://portal.example.test')
+    expect(linkResetPayload.emailSent).toBe(false)
+    expect(linkResetPayload.emailError).toBeTruthy()
+
+    const resetToken = String(new URL(linkResetPayload.resetUrl).pathname.split('/').pop() || '')
+    const resetConfirmResponse = await fetch(
+      `${started.baseUrl}/api/auth/password-reset/${encodeURIComponent(resetToken)}/confirm`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          password: 'AliceReset123!!',
+          confirmPassword: 'AliceReset123!!'
+        })
+      }
+    )
+    const resetConfirmPayload = await readJson(resetConfirmResponse)
+    expect(resetConfirmResponse.status).toBe(200)
+    expect(resetConfirmPayload.user.username).toBe('alice')
+    expect(resetConfirmPayload.message).toBe('Password updated')
+
+    const revokedAliceMeResponse = await fetch(`${started.baseUrl}/api/auth/me`, {
+      headers: {
+        cookie: aliceSessionCookie
+      }
+    })
+    const revokedAliceMePayload = await readJson(revokedAliceMeResponse)
+    expect(revokedAliceMeResponse.status).toBe(401)
+    expect(revokedAliceMePayload.error).toBe('Authentication required')
+
+    const aliceReLoginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'alice',
+        password: 'AliceReset123!!'
+      })
+    })
+    const aliceReLoginPayload = await readJson(aliceReLoginResponse)
+    expect(aliceReLoginResponse.status).toBe(200)
+    expect(aliceReLoginPayload.authenticated).toBe(true)
+
+    const tempResetResponse = await fetch(`${started.baseUrl}/api/auth/users/bob/password-reset`, {
+      method: 'POST',
+      headers: {
+        cookie: adminCookie,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        mode: 'temporary'
+      })
+    })
+    const tempResetPayload = await readJson(tempResetResponse)
+    expect(tempResetResponse.status).toBe(200)
+    expect(tempResetPayload.mode).toBe('temporary')
+    expect(tempResetPayload.user.username).toBe('bob')
+    expect(tempResetPayload.temporaryPassword).toBeTruthy()
+
+    const bobTemporaryLoginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'bob',
+        password: tempResetPayload.temporaryPassword
+      })
+    })
+    const bobTemporaryLoginPayload = await readJson(bobTemporaryLoginResponse)
+    const bobTemporaryCookie = getCookieValue(
+      getSetCookieHeader(bobTemporaryLoginResponse),
+      'pst-review-session-password-change-challenge'
+    )
+    expect(bobTemporaryLoginResponse.status).toBe(200)
+    expect(bobTemporaryLoginPayload.passwordChangeRequired).toBe(true)
+    expect(bobTemporaryLoginPayload.authenticated).toBe(false)
+
+    const bobChangeMeResponse = await fetch(`${started.baseUrl}/api/auth/me`, {
+      headers: {
+        cookie: bobTemporaryCookie
+      }
+    })
+    const bobChangeMePayload = await readJson(bobChangeMeResponse)
+    expect(bobChangeMeResponse.status).toBe(200)
+    expect(bobChangeMePayload.passwordChangeRequired).toBe(true)
+    expect(bobChangeMePayload.authenticated).toBe(false)
+
+    const bobChangeResponse = await fetch(`${started.baseUrl}/api/auth/password-change/confirm`, {
+      method: 'POST',
+      headers: {
+        cookie: bobTemporaryCookie,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        password: 'BobReset123!!',
+        confirmPassword: 'BobReset123!!'
+      })
+    })
+    const bobChangePayload = await readJson(bobChangeResponse)
+    const bobSessionCookie = getCookieValue(getSetCookieHeader(bobChangeResponse), 'pst-review-session')
+    expect(bobChangeResponse.status).toBe(200)
+    expect(bobChangePayload.authenticated).toBe(true)
+    expect(bobChangePayload.user.username).toBe('bob')
+
+    const oldBobChallengeResponse = await fetch(`${started.baseUrl}/api/auth/me`, {
+      headers: {
+        cookie: bobTemporaryCookie
+      }
+    })
+    const oldBobChallengePayload = await readJson(oldBobChallengeResponse)
+    expect(oldBobChallengeResponse.status).toBe(401)
+    expect(oldBobChallengePayload.error).toBe('Authentication required')
+
+    const bobSessionMeResponse = await fetch(`${started.baseUrl}/api/auth/me`, {
+      headers: {
+        cookie: bobSessionCookie
+      }
+    })
+    const bobSessionMePayload = await readJson(bobSessionMeResponse)
+    expect(bobSessionMeResponse.status).toBe(200)
+    expect(bobSessionMePayload.authenticated).toBe(true)
+    expect(bobSessionMePayload.passwordChangeRequired).toBe(false)
   })
 
   it('adds additional viewer users and persists them across restarts', async () => {

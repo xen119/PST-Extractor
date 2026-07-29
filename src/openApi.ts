@@ -298,7 +298,8 @@ function authManagedUserSchema(): Record<string, unknown> {
       'mfaEnabled',
       'mfaEnforced',
       'mfaEnrolledAt',
-      'assignedCasePaths'
+      'assignedCasePaths',
+      'passwordChangeRequired'
     ],
     properties: {
       username: { type: 'string' },
@@ -315,7 +316,8 @@ function authManagedUserSchema(): Record<string, unknown> {
       assignedCasePaths: {
         type: 'array',
         items: { type: 'string' }
-      }
+      },
+      passwordChangeRequired: { type: 'boolean' }
     }
   }
 }
@@ -483,6 +485,37 @@ function passwordResetConfirmResponseSchema(): Record<string, unknown> {
     properties: {
       user: authUserSchema(),
       message: { type: 'string' }
+    }
+  }
+}
+
+function authUserPasswordResetRequestSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['mode'],
+    properties: {
+      mode: {
+        type: 'string',
+        enum: ['link', 'temporary']
+      }
+    }
+  }
+}
+
+function authUserPasswordResetResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['user', 'mode'],
+    properties: {
+      user: authManagedUserSchema(),
+      mode: { type: 'string', enum: ['link', 'temporary'] },
+      resetUrl: { type: 'string' },
+      resetExpiresAt: { type: 'string' },
+      emailSent: { type: 'boolean' },
+      emailError: { type: 'string' },
+      temporaryPassword: { type: 'string' }
     }
   }
 }
@@ -693,6 +726,8 @@ function authStatusSchema(): Record<string, unknown> {
       'lockedUntil',
       'loginFailedCount',
       'passwordResetAvailable',
+      'passwordChangeRequired',
+      'passwordChangeChallengeExpiresAt',
       'user',
       'expiresAt'
     ],
@@ -707,6 +742,8 @@ function authStatusSchema(): Record<string, unknown> {
       lockedUntil: { type: ['string', 'null'] },
       loginFailedCount: { type: 'integer' },
       passwordResetAvailable: { type: 'boolean' },
+      passwordChangeRequired: { type: 'boolean' },
+      passwordChangeChallengeExpiresAt: { type: ['string', 'null'] },
       user: {
         nullable: true,
         ...authUserSchema()
@@ -1118,6 +1155,25 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
           }
         }
       },
+      [openApiPath(API_ROUTES.authPasswordChangeConfirm)]: {
+        post: {
+          tags: ['Auth'],
+          summary: 'Set a new password after logging in with a temporary password',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: passwordResetConfirmRequestSchema()
+              }
+            }
+          },
+          responses: {
+            200: jsonResponse(authStatusSchema()),
+            ...errorResponse(400, 'Authentication is disabled, passwords do not match, or password is required'),
+            ...errorResponse(401, 'Password change challenge required')
+          }
+        }
+      },
       [openApiPath(API_ROUTES.authUsers)]: {
         get: {
           tags: ['Auth'],
@@ -1314,6 +1370,28 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
             ...errorResponse(401, 'Authentication required'),
             ...errorResponse(403, 'Admin access required'),
             ...errorResponse(404, 'User not found')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authUserPasswordReset)]: {
+        post: {
+          tags: ['Auth'],
+          summary: 'Generate a password reset link or temporary password for a local viewer user',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: authUserPasswordResetRequestSchema()
+              }
+            }
+          },
+          responses: {
+            200: jsonResponse(authUserPasswordResetResponseSchema()),
+            ...errorResponse(400, 'Authentication is disabled, username is required, or mode is required'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Admin access required'),
+            ...errorResponse(404, 'User not found'),
+            ...errorResponse(409, 'User is not active or password reset unavailable')
           }
         }
       },
@@ -2631,6 +2709,9 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
         PasswordResetLookupResponse: passwordResetLookupResponseSchema(),
         PasswordResetConfirmRequest: passwordResetConfirmRequestSchema(),
         PasswordResetConfirmResponse: passwordResetConfirmResponseSchema(),
+        PasswordChangeConfirmRequest: passwordResetConfirmRequestSchema(),
+        AuthUserPasswordResetRequest: authUserPasswordResetRequestSchema(),
+        AuthUserPasswordResetResponse: authUserPasswordResetResponseSchema(),
         SmtpSettings: smtpSettingsSchema(),
         SmtpSettingsResponse: smtpSettingsResponseSchema(),
         SmtpSettingsUpdateRequest: smtpSettingsUpdateRequestSchema(),

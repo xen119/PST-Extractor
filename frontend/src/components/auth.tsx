@@ -7,7 +7,7 @@ import type {
 } from '@/types'
 import { Button, Dialog, DialogContent, DialogDescription, DialogTitle, Input } from '@/components/ui'
 
-export type AuthView = 'login' | 'mfa' | 'invite' | 'reset'
+export type AuthView = 'login' | 'mfa' | 'invite' | 'reset' | 'change'
 export type InviteStep = 'password' | 'prompt' | 'setup' | 'complete'
 
 export interface AuthScreenProps {
@@ -23,6 +23,7 @@ export interface AuthScreenProps {
   inviteSetup: MfaEnrollmentStartResponse | null
   inviteRecoveryCodes: string[]
   resetLookup: PasswordResetLookupResponse | null
+  passwordChangeUser?: string | null
   onLogin: (username: string, password: string) => void
   onMfaChallenge: (code: string) => void
   onPasswordResetRequest: (usernameOrEmail: string) => Promise<void>
@@ -48,6 +49,7 @@ export function AuthScreen({
   inviteSetup,
   inviteRecoveryCodes,
   resetLookup,
+  passwordChangeUser,
   onLogin,
   onMfaChallenge,
   onPasswordResetRequest,
@@ -79,6 +81,10 @@ export function AuthScreen({
       setPasswordResetUsernameOrEmail('')
     }
     if (view === 'reset') {
+      setResetPassword('')
+      setResetConfirmPassword('')
+    }
+    if (view === 'change') {
       setResetPassword('')
       setResetConfirmPassword('')
     }
@@ -258,8 +264,9 @@ export function AuthScreen({
     )
   }
 
-  if (view === 'reset') {
+  if (view === 'reset' || view === 'change') {
     const resetAccount = resetLookup?.reset || null
+    const isPasswordChange = view === 'change'
     return (
       <section className="fixed inset-0 z-20 grid place-items-center overflow-auto px-4 py-8">
         <div className="mx-auto w-full max-w-[560px] panel-surface-strong overflow-hidden">
@@ -270,13 +277,13 @@ export function AuthScreen({
               </div>
               <div className="min-w-0">
                 <div className="text-sm font-semibold tracking-[0.18em] text-[color:var(--muted)] uppercase">
-                  Password reset
+                  {isPasswordChange ? 'Password change required' : 'Password reset'}
                 </div>
-                <h1 className="mt-1 text-3xl font-semibold tracking-tight text-[color:var(--text)]">
-                  Set a new password
-                </h1>
+                <h1 className="mt-1 text-3xl font-semibold tracking-tight text-[color:var(--text)]">Set a new password</h1>
                 <p className="mt-2 max-w-xl text-sm leading-6 text-[color:var(--muted)]">
-                  Use the link from your email to replace the current password and regain access.
+                  {isPasswordChange
+                    ? 'Your administrator provided a temporary password. Change it before continuing.'
+                    : 'Use the link from your email to replace the current password and regain access.'}
                 </p>
               </div>
             </div>
@@ -293,7 +300,53 @@ export function AuthScreen({
               </div>
             ) : null}
 
-            {resetAccount ? (
+            {isPasswordChange ? (
+              <>
+                <p className="mt-6 text-xs leading-6 text-[color:var(--muted)]">
+                  Account: <span className="font-medium text-[color:var(--text)]">{passwordChangeUser || 'Temporary access'}</span>
+                </p>
+                <div className="mt-6 space-y-5">
+                  <form
+                    className="space-y-4"
+                    onSubmit={(event) => {
+                      event.preventDefault()
+                      if (!resetPassword || resetPassword !== resetConfirmPassword) {
+                        return
+                      }
+                      void onPasswordResetConfirm(resetPassword, resetConfirmPassword)
+                    }}
+                  >
+                    <label className="block text-sm font-medium text-[color:var(--text)]">
+                      New password
+                      <Input
+                        className="mt-2"
+                        type="password"
+                        value={resetPassword}
+                        onChange={(event) => setResetPassword(event.target.value)}
+                        autoComplete="new-password"
+                        autoFocus
+                      />
+                    </label>
+                    <label className="block text-sm font-medium text-[color:var(--text)]">
+                      Confirm password
+                      <Input
+                        className="mt-2"
+                        type="password"
+                        value={resetConfirmPassword}
+                        onChange={(event) => setResetConfirmPassword(event.target.value)}
+                        autoComplete="new-password"
+                      />
+                    </label>
+                    <Button type="submit" className="w-full justify-center" disabled={busy}>
+                      {busy ? 'Updating...' : 'Update password'}
+                    </Button>
+                    <Button type="button" variant="ghost" className="w-full justify-center" onClick={onOpenLogin}>
+                      Back to sign in
+                    </Button>
+                </form>
+              </div>
+            </>
+            ) : resetAccount ? (
               <>
                 <p className="mt-6 text-xs leading-6 text-[color:var(--muted)]">
                   Account: <span className="font-medium text-[color:var(--text)]">{resetAccount.username}</span>

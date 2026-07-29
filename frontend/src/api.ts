@@ -28,6 +28,7 @@ import type {
   UserInviteResponse,
   UsersResponse,
   UserInvite,
+  UserPasswordResetResponse,
   ReviewQueueRecord
 } from './types'
 
@@ -106,6 +107,12 @@ export const api = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password, confirmPassword })
       }),
+    passwordChangeConfirm: (password: string, confirmPassword: string) =>
+      requestJson<AuthStatus>('/api/auth/password-change/confirm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password, confirmPassword })
+      }),
     inviteLookup: (token: string) =>
       requestJson<InviteLookupResponse>(`/api/auth/invites/${encodeURIComponent(token)}`, {
         cache: 'no-store'
@@ -152,6 +159,12 @@ export const api = {
     resetMfa: (username: string) =>
       requestJson<{ user: UserInvite }>(`/api/auth/users/${encodeURIComponent(username)}/mfa/reset`, {
         method: 'POST'
+      }),
+    resetPassword: (username: string, mode: 'link' | 'temporary') =>
+      requestJson<UserPasswordResetResponse>(`/api/auth/users/${encodeURIComponent(username)}/password-reset`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode })
       }),
     setMfaEnforced: (username: string, enforced: boolean) =>
       requestJson<{ user: UserInvite }>(`/api/auth/users/${encodeURIComponent(username)}/mfa/enforce`, {
