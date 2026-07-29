@@ -520,6 +520,45 @@ function authUserPasswordResetResponseSchema(): Record<string, unknown> {
   }
 }
 
+function entraSettingsViewSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['enabled', 'tenantId', 'clientId', 'hasClientSecret'],
+    properties: {
+      enabled: { type: 'boolean' },
+      tenantId: { type: 'string' },
+      clientId: { type: 'string' },
+      hasClientSecret: { type: 'boolean' }
+    }
+  }
+}
+
+function entraSettingsResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['settings', 'redirectUri'],
+    properties: {
+      settings: entraSettingsViewSchema(),
+      redirectUri: { type: 'string' }
+    }
+  }
+}
+
+function entraSettingsUpdateRequestSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      enabled: { type: 'boolean' },
+      tenantId: { type: 'string' },
+      clientId: { type: 'string' },
+      clientSecret: { type: 'string' }
+    }
+  }
+}
+
 function authMfaChallengeRequestSchema(): Record<string, unknown> {
   return {
     type: 'object',
@@ -782,6 +821,7 @@ function authStatusSchema(): Record<string, unknown> {
       'authenticated',
       'enabled',
       'canManageUsers',
+      'entraEnabled',
       'mfaEnabled',
       'mfaEnforced',
       'lockedUntil',
@@ -796,6 +836,7 @@ function authStatusSchema(): Record<string, unknown> {
       authenticated: { type: 'boolean' },
       enabled: { type: 'boolean' },
       canManageUsers: { type: 'boolean' },
+      entraEnabled: { type: 'boolean' },
       mfaEnabled: { type: 'boolean' },
       mfaEnforced: { type: 'boolean' },
       mfaRequired: { type: 'boolean' },
@@ -1149,6 +1190,42 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
           summary: 'Clear the current auth session cookie',
           responses: {
             200: jsonResponse(authStatusSchema())
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authEntraStart)]: {
+        get: {
+          tags: ['Auth'],
+          summary: 'Start Microsoft Entra sign-in and redirect to the identity provider',
+          parameters: [
+            {
+              name: 'returnTo',
+              in: 'query',
+              required: false,
+              schema: { type: 'string' }
+            }
+          ],
+          responses: {
+            302: {
+              description: 'Redirect to Microsoft Entra sign-in'
+            }
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authEntraCallback)]: {
+        get: {
+          tags: ['Auth'],
+          summary: 'Handle the Microsoft Entra sign-in callback',
+          parameters: [
+            { name: 'code', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'state', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'error', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'error_description', in: 'query', required: false, schema: { type: 'string' } }
+          ],
+          responses: {
+            302: {
+              description: 'Redirect back to the login screen or the requested return URL'
+            }
           }
         }
       },
@@ -1534,6 +1611,36 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
           },
           responses: {
             200: jsonResponse(passwordPolicyResponseSchema()),
+            ...errorResponse(400, 'Authentication is disabled'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Admin access required')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.authEntraSettings)]: {
+        get: {
+          tags: ['Settings'],
+          summary: 'Read the current Microsoft Entra SSO settings',
+          responses: {
+            200: jsonResponse(entraSettingsResponseSchema()),
+            ...errorResponse(400, 'Authentication is disabled'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Admin access required')
+          }
+        },
+        put: {
+          tags: ['Settings'],
+          summary: 'Update the Microsoft Entra SSO settings',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: entraSettingsUpdateRequestSchema()
+              }
+            }
+          },
+          responses: {
+            200: jsonResponse(entraSettingsResponseSchema()),
             ...errorResponse(400, 'Authentication is disabled'),
             ...errorResponse(401, 'Authentication required'),
             ...errorResponse(403, 'Admin access required')

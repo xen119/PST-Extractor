@@ -2,7 +2,7 @@ import express from 'express'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { randomBytes } from 'crypto'
+import { createHash, createPublicKey, createVerify, randomBytes } from 'crypto'
 import { once } from 'events'
 import nodemailer from 'nodemailer'
 import QRCode from 'qrcode'
@@ -15,11 +15,16 @@ import {
 } from './auditLog'
 import {
   buildSmtpSettingsView,
+  buildEntraSettingsView,
   type AppSettingsStore,
+  type EntraSettingsInput,
+  type EntraSettingsRecord,
+  type EntraSettingsView,
   type SmtpSettingsInput,
   type SmtpSettingsRecord,
   createMemoryAppSettingsStore,
   mergeSmtpSettings,
+  normalizeEntraSettingsInput,
   normalizeSmtpSettingsInput
 } from './appSettings'
 import {
@@ -199,6 +204,7 @@ interface AuthStatusResponse {
   authenticated: boolean
   enabled: boolean
   canManageUsers: boolean
+  entraEnabled: boolean
   mfaEnabled: boolean
   mfaEnforced: boolean
   mfaRequired: boolean
@@ -263,6 +269,11 @@ interface AuthUserPasswordResetResponse {
   emailSent?: boolean
   emailError?: string
   temporaryPassword?: string
+}
+
+interface EntraSettingsResponse {
+  settings: EntraSettingsView
+  redirectUri: string
 }
 
 interface ActivityLogResponse {
@@ -851,6 +862,8 @@ function isPublicApiPath(pathname: string): boolean {
     pathname === API_ROUTES.docs ||
     pathname.startsWith(`${API_ROUTES.docs}/`) ||
     pathname === API_ROUTES.authLogin ||
+    pathname === API_ROUTES.authEntraStart ||
+    pathname === API_ROUTES.authEntraCallback ||
     pathname === API_ROUTES.authMe ||
     pathname === API_ROUTES.authLogout ||
     pathname === API_ROUTES.authPasswordResetRequest ||
@@ -865,6 +878,8 @@ function isPublicApiPath(pathname: string): boolean {
 function isAuthApiPath(pathname: string): boolean {
   return (
     pathname === API_ROUTES.authLogin ||
+    pathname === API_ROUTES.authEntraStart ||
+    pathname === API_ROUTES.authEntraCallback ||
     pathname === API_ROUTES.authMe ||
     pathname === API_ROUTES.authLogout ||
     pathname === API_ROUTES.authPasswordResetRequest ||
@@ -876,6 +891,119 @@ function isAuthApiPath(pathname: string): boolean {
 
 function isProtectedApiPath(pathname: string): boolean {
   return pathname.startsWith('/api/') && !isPublicApiPath(pathname) && !isAuthApiPath(pathname)
+}
+
+interface EntraLoginStateRecord {
+  state: string
+  nonce: string
+  codeVerifier: string
+  returnTo: string
+  expiresAt: number
+}
+
+interface EntraTokenResponse {
+  token_type?: string
+  scope?: string
+  expires_in?: number
+  ext_expires_in?: number
+  access_token?: string
+  refresh_token?: string
+  id_token?: string
+  error?: string
+  error_description?: string
+}
+
+interface EntraIdTokenClaims {
+  aud?: string | string[]
+  iss?: string
+  exp?: number
+  nbf?: number
+  iat?: number
+  nonce?: string
+  email?: string
+  preferred_username?: string
+  upn?: string
+  oid?: string
+  tid?: string
+  name?: string
+}
+
+function base64UrlEncode(buffer: Buffer): string {
+  return buffer
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '')
+}
+
+function base64UrlDecode(value: string): Buffer {
+  const normalized = String(value || '')
+    .replace(/-/g, '+')
+    .replace(/_/g, '/')
+  const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4)
+  return Buffer.from(padded, 'base64')
+}
+
+function safeJsonParse<T>(value: string): T | null {
+  try {
+    return JSON.parse(value) as T
+  } catch {
+    return null
+  }
+}
+
+function decodeJwt(token: string): { header: Record<string, unknown>; payload: EntraIdTokenClaims; signingInput: string; signature: Buffer } {
+  const parts = String(token || '').split('.')
+  if (parts.length !== 3) {
+    throw createAppError(400, 'Invalid identity token')
+  }
+
+  const header = safeJsonParse<Record<string, unknown>>(base64UrlDecode(parts[0]).toString('utf8'))
+  const payload = safeJsonParse<EntraIdTokenClaims>(base64UrlDecode(parts[1]).toString('utf8'))
+  if (!header || !payload) {
+    throw createAppError(400, 'Invalid identity token')
+  }
+
+  return {
+    header,
+    payload,
+    signingInput: `${parts[0]}.${parts[1]}`,
+    signature: base64UrlDecode(parts[2])
+  }
+}
+
+function normalizeClaimValue(value: unknown): string {
+  return normalizeText(value).toLowerCase()
+}
+
+function sanitizeReturnTo(value: unknown, fallback = '/'): string {
+  const text = normalizeText(value)
+  if (!text) {
+    return fallback
+  }
+
+  if (text.startsWith('//')) {
+    return fallback
+  }
+
+  if (text.startsWith('/')) {
+    return text
+  }
+
+  try {
+    const parsed = new URL(text)
+    if (parsed.origin && parsed.pathname) {
+      return `${parsed.pathname}${parsed.search}${parsed.hash}` || fallback
+    }
+  } catch {
+    return fallback
+  }
+
+  return fallback
+}
+
+function buildPkceCodeChallenge(codeVerifier: string): string {
+  return base64UrlEncode(createHash('sha256').update(codeVerifier, 'utf8').digest())
 }
 
 function buildCorsHeaders(origin: string): Record<string, string> {
@@ -2332,6 +2460,91 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   const authSessions = new Map<string, AuthSessionRecord>()
   const authMfaChallenges = new Map<string, AuthMfaChallengeRecord>()
   const authPasswordChangeChallenges = new Map<string, AuthPasswordChangeChallengeRecord>()
+  const entraLoginStates = new Map<string, EntraLoginStateRecord>()
+
+  function cleanupExpiredEntraLoginStates(): void {
+    const now = Date.now()
+    for (const [state, record] of entraLoginStates.entries()) {
+      if (record.expiresAt <= now) {
+        entraLoginStates.delete(state)
+      }
+    }
+  }
+
+  function createEntraLoginState(returnTo: string): EntraLoginStateRecord {
+    const state = randomBytes(24).toString('hex')
+    const nonce = randomBytes(24).toString('hex')
+    const codeVerifier = randomBytes(32).toString('hex')
+    const record: EntraLoginStateRecord = {
+      state,
+      nonce,
+      codeVerifier,
+      returnTo: sanitizeReturnTo(returnTo),
+      expiresAt: Date.now() + 10 * 60 * 1000
+    }
+    entraLoginStates.set(state, record)
+    return record
+  }
+
+  function consumeEntraLoginState(state: string): EntraLoginStateRecord | null {
+    cleanupExpiredEntraLoginStates()
+    const normalizedState = normalizeText(state)
+    if (!normalizedState) {
+      return null
+    }
+
+    const record = entraLoginStates.get(normalizedState) || null
+    if (!record) {
+      return null
+    }
+
+    entraLoginStates.delete(normalizedState)
+    if (record.expiresAt <= Date.now()) {
+      return null
+    }
+
+    return record
+  }
+
+  function getEntraAuthorityBase(settings: EntraSettingsRecord): string {
+    const tenantId = encodeURIComponent(normalizeText(settings.tenantId) || 'common')
+    return `https://login.microsoftonline.com/${tenantId}`
+  }
+
+  function buildEntraAuthorizeUrl(
+    settings: EntraSettingsRecord,
+    redirectUri: string,
+    state: string,
+    nonce: string,
+    codeVerifier: string
+  ): string {
+    const authorizeUrl = new URL(`${getEntraAuthorityBase(settings)}/oauth2/v2.0/authorize`)
+    authorizeUrl.searchParams.set('client_id', normalizeText(settings.clientId))
+    authorizeUrl.searchParams.set('response_type', 'code')
+    authorizeUrl.searchParams.set('redirect_uri', redirectUri)
+    authorizeUrl.searchParams.set('response_mode', 'query')
+    authorizeUrl.searchParams.set('scope', 'openid profile email')
+    authorizeUrl.searchParams.set('state', state)
+    authorizeUrl.searchParams.set('nonce', nonce)
+    authorizeUrl.searchParams.set('code_challenge', buildPkceCodeChallenge(codeVerifier))
+    authorizeUrl.searchParams.set('code_challenge_method', 'S256')
+    authorizeUrl.searchParams.set('prompt', 'select_account')
+    return authorizeUrl.toString()
+  }
+
+  function buildEntraTokenUrl(settings: EntraSettingsRecord): string {
+    return `${getEntraAuthorityBase(settings)}/oauth2/v2.0/token`
+  }
+
+  function buildEntraJwksUrl(settings: EntraSettingsRecord): string {
+    return `${getEntraAuthorityBase(settings)}/discovery/v2.0/keys`
+  }
+
+  function buildEntraRedirectUri(req: express.Request): string {
+    const origin =
+      normalizeOrigin(authConfig.publicBaseUrl) || getRequestBaseOrigin(req) || canonicalRequestOrigin(req)
+    return `${origin}${API_ROUTES.authEntraCallback}`
+  }
 
   function buildFlaggedBundleExportDownloadUrl(exportId: string, artifactId: string): string {
     return `${API_ROUTES.flaggedBundleArtifact
@@ -3149,7 +3362,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     loginFailedCount = 0,
     passwordResetAvailable = false,
     passwordChangeRequired = false,
-    passwordChangeChallengeExpiresAt: string | null = null
+    passwordChangeChallengeExpiresAt: string | null = null,
+    entraEnabled = false
   ): AuthStatusResponse {
     const canManageUsers = isAdminAuthSession(session, authConfig)
     const authUser = user
@@ -3163,6 +3377,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         authenticated: true,
         enabled: false,
         canManageUsers: false,
+        entraEnabled: Boolean(entraEnabled),
         mfaEnabled: false,
         mfaEnforced: false,
         mfaRequired: false,
@@ -3183,6 +3398,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           authenticated: false,
           enabled: true,
           canManageUsers: false,
+          entraEnabled: Boolean(entraEnabled),
           mfaEnabled: false,
           mfaEnforced: Boolean(mfaEnforced),
           mfaRequired: false,
@@ -3205,6 +3421,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           authenticated: false,
           enabled: true,
           canManageUsers: false,
+          entraEnabled: Boolean(entraEnabled),
           mfaEnabled: false,
           mfaEnforced: Boolean(mfaEnforced),
           mfaRequired: true,
@@ -3226,6 +3443,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         authenticated: false,
         enabled: true,
         canManageUsers,
+        entraEnabled: Boolean(entraEnabled),
         mfaEnabled: false,
         mfaEnforced: false,
         mfaRequired: false,
@@ -3244,6 +3462,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       authenticated: true,
       enabled: true,
       canManageUsers,
+      entraEnabled: Boolean(entraEnabled),
       mfaEnabled: Boolean(mfaEnabled),
       mfaEnforced: Boolean(mfaEnforced),
       mfaRequired: false,
@@ -3267,6 +3486,147 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     } catch {
       return buildPasswordPolicyDefaultsFromEnv()
     }
+  }
+
+  async function getEntraSettings(): Promise<EntraSettingsRecord> {
+    try {
+      return await appSettingsStore.getEntraSettings()
+    } catch {
+      return {
+        enabled: false,
+        tenantId: '',
+        clientId: '',
+        clientSecret: ''
+      }
+    }
+  }
+
+  async function isEntraEnabled(): Promise<boolean> {
+    const settings = await getEntraSettings()
+    return Boolean(settings.enabled && normalizeText(settings.tenantId) && normalizeText(settings.clientId) && normalizeText(settings.clientSecret))
+  }
+
+  async function verifyEntraIdToken(
+    idToken: string,
+    settings: EntraSettingsRecord,
+    expectedNonce: string
+  ): Promise<EntraIdTokenClaims> {
+    const { header, payload, signingInput, signature } = decodeJwt(idToken)
+    const algorithm = normalizeText(header.alg)
+    if (algorithm !== 'RS256') {
+      throw createAppError(400, 'Unsupported identity token algorithm')
+    }
+
+    const kid = normalizeText(header.kid)
+    if (!kid) {
+      throw createAppError(400, 'Identity token key id is missing')
+    }
+
+    const jwksResponse = await fetch(buildEntraJwksUrl(settings), {
+      headers: { Accept: 'application/json' }
+    })
+    if (!jwksResponse.ok) {
+      throw createAppError(502, 'Unable to load Microsoft identity keys')
+    }
+
+    const jwksPayload = (await jwksResponse.json()) as { keys?: Array<Record<string, unknown>> }
+    const jwk = (jwksPayload.keys || []).find((entry) => normalizeText(entry.kid) === kid) || null
+    if (!jwk) {
+      throw createAppError(400, 'Identity token key not found')
+    }
+
+    const publicKey = createPublicKey({ key: jwk as never, format: 'jwk' })
+    const verifier = createVerify('RSA-SHA256')
+    verifier.update(signingInput, 'utf8')
+    verifier.end()
+    if (!verifier.verify(publicKey, signature)) {
+      throw createAppError(400, 'Invalid identity token signature')
+    }
+
+    const audience = Array.isArray(payload.aud)
+      ? payload.aud.map((entry) => normalizeText(entry)).filter(Boolean)
+      : [normalizeText(payload.aud)]
+    if (!audience.includes(normalizeText(settings.clientId))) {
+      throw createAppError(400, 'Identity token audience mismatch')
+    }
+
+    const now = Date.now()
+    const expiresAt = Number(payload.exp || 0) * 1000
+    if (!Number.isFinite(expiresAt) || expiresAt <= now) {
+      throw createAppError(400, 'Identity token has expired')
+    }
+
+    const notBefore = Number(payload.nbf || 0) * 1000
+    if (Number.isFinite(notBefore) && notBefore > now + 60_000) {
+      throw createAppError(400, 'Identity token is not yet valid')
+    }
+
+    const tenantId = normalizeText(settings.tenantId).toLowerCase()
+    const tokenTenantId = normalizeText(payload.tid).toLowerCase()
+    if (tenantId && !['common', 'organizations'].includes(tenantId)) {
+      if (tokenTenantId && tokenTenantId !== tenantId) {
+        throw createAppError(403, 'Identity token tenant mismatch')
+      }
+      const expectedIssuer = `https://login.microsoftonline.com/${tenantId}/v2.0`
+      if (normalizeText(payload.iss).toLowerCase() !== expectedIssuer.toLowerCase()) {
+        throw createAppError(403, 'Identity token issuer mismatch')
+      }
+    }
+
+    if (normalizeText(payload.nonce) !== normalizeText(expectedNonce)) {
+      throw createAppError(400, 'Identity token nonce mismatch')
+    }
+
+    return payload
+  }
+
+  async function resolveEntraMappedUser(claims: EntraIdTokenClaims): Promise<AuthUserListItem> {
+    const identifiers = [...new Set(
+      [claims.email, claims.preferred_username, claims.upn]
+        .map((value) => normalizeClaimValue(value))
+        .filter(Boolean)
+    )]
+
+    if (!identifiers.length) {
+      throw createAppError(400, 'Microsoft identity did not include an email or UPN')
+    }
+
+    const matches = new Map<string, AuthUserListItem>()
+    for (const identifier of identifiers) {
+      const results = await authUserStore.findUsersByLoginIdentifier(identifier)
+      for (const user of results) {
+        if (user.inviteStatus !== 'active') {
+          continue
+        }
+        matches.set(normalizeAuthUsernameKey(user.username), user)
+      }
+    }
+
+    if (!matches.size) {
+      throw createAppError(403, 'No local user matches the Microsoft identity')
+    }
+
+    if (matches.size > 1) {
+      throw createAppError(409, 'Microsoft identity matched multiple local users')
+    }
+
+    return matches.values().next().value as AuthUserListItem
+  }
+
+  async function buildEntraLoginRedirectUrl(req: express.Request, returnTo: string): Promise<string> {
+    const settings = await getEntraSettings()
+    if (
+      !settings.enabled ||
+      !normalizeText(settings.tenantId) ||
+      !normalizeText(settings.clientId) ||
+      !normalizeText(settings.clientSecret)
+    ) {
+      throw createAppError(400, 'Microsoft Entra sign-in is not configured')
+    }
+
+    const redirectUri = buildEntraRedirectUri(req)
+    const state = createEntraLoginState(returnTo)
+    return buildEntraAuthorizeUrl(settings, redirectUri, state.state, state.nonce, state.codeVerifier)
   }
 
   function createAuthSession(username: string, mfaEnabled = false): AuthSessionRecord {
@@ -3915,14 +4275,15 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       const passwordChangeChallenge = session ? null : getAuthPasswordChangeChallengeFromRequest(req)
       const challenge = session || passwordChangeChallenge ? null : getAuthMfaChallengeFromRequest(req)
       const passwordPolicy = await getPasswordPolicy()
+      const entraEnabled = await isEntraEnabled()
       if (!authConfig.enabled && !session && !challenge && !passwordChangeChallenge) {
-        responseJson(res, 200, buildAuthStatus(null))
+        responseJson(res, 200, buildAuthStatus(null, null, null, false, false, null, 0, false, false, null, entraEnabled))
         return
       }
 
       if (!session && !challenge && !passwordChangeChallenge) {
         responseJson(res, 401, {
-          ...buildAuthStatus(null),
+          ...buildAuthStatus(null, null, null, false, false, null, 0, false, false, null, entraEnabled),
           error: 'Authentication required'
         })
         return
@@ -3939,7 +4300,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         clearAuthPasswordChangeChallenge(req)
         clearAuthPasswordChangeChallengeCookie(res)
         responseJson(res, 401, {
-          ...buildAuthStatus(null),
+          ...buildAuthStatus(null, null, null, false, false, null, 0, false, false, null, entraEnabled),
           error: 'Authentication required'
         })
         return
@@ -3958,14 +4319,21 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
               0,
               false,
               true,
-              new Date(passwordChangeChallenge.expiresAt).toISOString()
+              new Date(passwordChangeChallenge.expiresAt).toISOString(),
+              entraEnabled
             )
           : buildAuthStatus(
               session,
               challenge,
               currentUser,
               session?.mfaEnabled ?? Boolean(currentUser?.mfaEnabled),
-              Boolean(currentUser?.mfaEnforced || passwordPolicy.enforceMfa)
+              Boolean(currentUser?.mfaEnforced || passwordPolicy.enforceMfa),
+              null,
+              0,
+              false,
+              false,
+              null,
+              entraEnabled
             )
       )
     } catch (error) {
@@ -3980,8 +4348,9 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   app.post(API_ROUTES.authLogin, async (req, res) => {
     try {
       res.set('Cache-Control', 'no-store')
+      const entraEnabled = await isEntraEnabled()
       if (!authConfig.enabled) {
-        responseJson(res, 200, buildAuthStatus(null))
+        responseJson(res, 200, buildAuthStatus(null, null, null, false, false, null, 0, false, false, null, entraEnabled))
         return
       }
 
@@ -4017,7 +4386,10 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
             false,
             result.lockedUntil,
             result.loginFailedCount,
-            result.passwordResetAvailable
+            result.passwordResetAvailable,
+            false,
+            null,
+            entraEnabled
           ),
           error: result.lockedUntil ? 'Account temporarily locked. Try again later.' : 'Invalid username or password'
         })
@@ -4059,7 +4431,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
             0,
             false,
             true,
-            new Date(challenge.expiresAt).toISOString()
+            new Date(challenge.expiresAt).toISOString(),
+            entraEnabled
           )
         )
         return
@@ -4079,7 +4452,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
             mfaEnforced
           }
         })
-        responseJson(res, 200, buildAuthStatus(null, challenge, user, false, mfaEnforced))
+        responseJson(res, 200, buildAuthStatus(null, challenge, user, false, mfaEnforced, null, 0, false, false, null, entraEnabled))
         return
       }
 
@@ -4095,15 +4468,20 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           mfaEnforced
         }
       })
-      responseJson(res, 200, buildAuthStatus(session, null, user, Boolean(user.mfaEnabled), mfaEnforced))
+      responseJson(
+        res,
+        200,
+        buildAuthStatus(session, null, user, Boolean(user.mfaEnabled), mfaEnforced, null, 0, false, false, null, entraEnabled)
+      )
     } catch (error) {
       createRouteErrorHandler(res, error)
     }
   })
 
-  app.post(API_ROUTES.authLogout, (req, res) => {
+  app.post(API_ROUTES.authLogout, async (req, res) => {
     try {
       res.set('Cache-Control', 'no-store')
+      const entraEnabled = await isEntraEnabled()
       if (authConfig.enabled) {
         const session = getAuthSessionFromRequest(req)
         if (session) {
@@ -4122,9 +4500,125 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         clearAuthMfaChallengeCookie(res)
         clearAuthPasswordChangeChallengeCookie(res)
       }
-      responseJson(res, 200, buildAuthStatus(null))
+      responseJson(res, 200, buildAuthStatus(null, null, null, false, false, null, 0, false, false, null, entraEnabled))
     } catch (error) {
       createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.authEntraStart, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      const returnTo = sanitizeReturnTo(
+        (req.query.returnTo as string | undefined) ||
+          (req.query.redirectTo as string | undefined) ||
+          (req.headers.referer as string | undefined) ||
+          '/'
+      )
+      const redirectUrl = await buildEntraLoginRedirectUrl(req, returnTo)
+      res.redirect(302, redirectUrl)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to start Microsoft sign in'
+      const fallbackUrl = `/${message ? `?entraError=${encodeURIComponent(message)}` : ''}`
+      if (!res.headersSent) {
+        res.redirect(302, fallbackUrl)
+      }
+    }
+  })
+
+  app.get(API_ROUTES.authEntraCallback, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      const error = normalizeText(req.query.error)
+      if (error) {
+        const description = normalizeText(req.query.error_description || req.query.errorDescription || error)
+        res.redirect(302, `/?entraError=${encodeURIComponent(description || error)}`)
+        return
+      }
+
+      const code = normalizeText(req.query.code)
+      const state = normalizeText(req.query.state)
+      if (!code || !state) {
+        res.redirect(302, '/?entraError=Microsoft%20sign-in%20did%20not%20return%20a%20code')
+        return
+      }
+
+      const loginState = consumeEntraLoginState(state)
+      if (!loginState) {
+        res.redirect(302, '/?entraError=Microsoft%20sign-in%20expired')
+        return
+      }
+
+      const settings = await getEntraSettings()
+      if (
+        !settings.enabled ||
+        !normalizeText(settings.tenantId) ||
+        !normalizeText(settings.clientId) ||
+        !normalizeText(settings.clientSecret)
+      ) {
+        res.redirect(302, '/?entraError=Microsoft%20sign-in%20is%20not%20configured')
+        return
+      }
+
+      const redirectUri = buildEntraRedirectUri(req)
+      const tokenParams = new URLSearchParams({
+        client_id: normalizeText(settings.clientId),
+        client_secret: normalizeText(settings.clientSecret),
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: redirectUri,
+        code_verifier: loginState.codeVerifier
+      })
+      const tokenResponse = await fetch(buildEntraTokenUrl(settings), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json'
+        },
+        body: tokenParams.toString()
+      })
+      const tokenPayload = (await tokenResponse.json()) as EntraTokenResponse
+      if (!tokenResponse.ok) {
+        throw createAppError(
+          502,
+          normalizeText(tokenPayload.error_description || tokenPayload.error || 'Unable to complete Microsoft sign in')
+        )
+      }
+
+      const idToken = normalizeText(tokenPayload.id_token)
+      if (!idToken) {
+        throw createAppError(502, 'Microsoft sign in did not return an identity token')
+      }
+
+      const claims = await verifyEntraIdToken(idToken, settings, loginState.nonce)
+      const mappedUser = await resolveEntraMappedUser(claims)
+      clearAuthMfaChallenge(req)
+      clearAuthMfaChallengeCookie(res)
+      clearAuthPasswordChangeChallenge(req)
+      clearAuthPasswordChangeChallengeCookie(res)
+
+      const session = createAuthSession(mappedUser.username, Boolean(mappedUser.mfaEnabled))
+      setAuthCookie(res, req, session)
+      recordAuditEvent({
+        req,
+        actor: buildAuditActor(session, mappedUser.username),
+        action: 'auth.entra.login',
+        target: mappedUser.username,
+        outcome: 'success',
+        metadata: {
+          tenantId: normalizeText(claims.tid),
+          email: normalizeText(claims.email),
+          preferredUsername: normalizeText(claims.preferred_username),
+          upn: normalizeText(claims.upn)
+        }
+      })
+
+      res.redirect(302, loginState.returnTo || '/')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to complete Microsoft sign in'
+      if (!res.headersSent) {
+        res.redirect(302, `/?entraError=${encodeURIComponent(message)}`)
+      }
     }
   })
 
@@ -5526,6 +6020,123 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           session,
           action: 'settings.smtp.update',
           target: 'smtp settings',
+          outcome: 'failure',
+          metadata: {
+            reason: error instanceof Error ? error.message : String(error)
+          }
+        })
+      }
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.authEntraSettings, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        responseJson(res, 400, {
+          error: 'Authentication is disabled'
+        })
+        return
+      }
+
+      const session = getAuthSessionFromRequest(req)
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      if (!isAdminAuthSession(session, authConfig)) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'settings.entra.read',
+          target: 'entra settings',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Admin access required'
+        })
+        return
+      }
+
+      const settings = await appSettingsStore.getEntraSettings()
+      responseJson(res, 200, {
+        settings: buildEntraSettingsView(settings),
+        redirectUri: buildEntraRedirectUri(req)
+      } satisfies EntraSettingsResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.put(API_ROUTES.authEntraSettings, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        responseJson(res, 400, {
+          error: 'Authentication is disabled'
+        })
+        return
+      }
+
+      const session = getAuthSessionFromRequest(req)
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      if (!isAdminAuthSession(session, authConfig)) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'settings.entra.update',
+          target: 'entra settings',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Admin access required'
+        })
+        return
+      }
+
+      const body = normalizeEntraSettingsInput((req.body || {}) as EntraSettingsInput)
+      const updated = await appSettingsStore.updateEntraSettings(body)
+      recordAuditEvent({
+        req,
+        session,
+        action: 'settings.entra.update',
+        target: normalizeText(body.tenantId || updated.tenantId || 'entra settings'),
+        outcome: 'success',
+        metadata: {
+          enabled: updated.enabled,
+          tenantId: updated.tenantId,
+          clientId: updated.clientId,
+          hasClientSecret: Boolean(updated.clientSecret)
+        }
+      })
+      responseJson(res, 200, {
+        settings: buildEntraSettingsView(updated),
+        redirectUri: buildEntraRedirectUri(req)
+      } satisfies EntraSettingsResponse)
+    } catch (error) {
+      const session = getAuthSessionFromRequest(req)
+      if (session) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'settings.entra.update',
+          target: 'entra settings',
           outcome: 'failure',
           metadata: {
             reason: error instanceof Error ? error.message : String(error)

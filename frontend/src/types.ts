@@ -12,6 +12,7 @@ export interface AuthStatus {
   authenticated: boolean
   enabled: boolean
   canManageUsers: boolean
+  entraEnabled: boolean
   mfaEnabled: boolean
   mfaEnforced: boolean
   lockedUntil: string | null
@@ -473,6 +474,18 @@ export interface SmtpSettings {
 
 export interface SmtpSettingsResponse {
   settings: SmtpSettings
+}
+
+export interface EntraSettings {
+  enabled: boolean
+  tenantId: string
+  clientId: string
+  hasClientSecret: boolean
+}
+
+export interface EntraSettingsResponse {
+  settings: EntraSettings
+  redirectUri: string
 }
 
 export interface SmtpTestResponse {

@@ -37,11 +37,31 @@ export interface SmtpSettingsInput {
   replyTo?: string
 }
 
+export interface EntraSettingsRecord {
+  enabled: boolean
+  tenantId: string
+  clientId: string
+  clientSecret: string
+}
+
+export interface EntraSettingsView extends Omit<EntraSettingsRecord, 'clientSecret'> {
+  hasClientSecret: boolean
+}
+
+export interface EntraSettingsInput {
+  enabled?: boolean
+  tenantId?: string
+  clientId?: string
+  clientSecret?: string
+}
+
 export interface AppSettingsStore {
   getSmtpSettings(): Promise<SmtpSettingsRecord>
   updateSmtpSettings(input: SmtpSettingsInput): Promise<SmtpSettingsRecord>
   getPasswordPolicy(): Promise<PasswordPolicyRecord>
   updatePasswordPolicy(input: PasswordPolicyInput): Promise<PasswordPolicyRecord>
+  getEntraSettings(): Promise<EntraSettingsRecord>
+  updateEntraSettings(input: EntraSettingsInput): Promise<EntraSettingsRecord>
   close(): Promise<void>
 }
 
@@ -57,9 +77,17 @@ interface StoredPasswordPolicyRecord extends PasswordPolicyRecord {
   updatedAt: string
 }
 
+interface StoredEntraSettingsRecord extends EntraSettingsRecord {
+  settingsKey: 'entra'
+  createdAt: string
+  updatedAt: string
+}
+
 interface SmtpDefaults extends Partial<SmtpSettingsRecord> {}
 
 interface PasswordPolicyDefaults extends Partial<PasswordPolicyRecord> {}
+
+interface EntraDefaults extends Partial<EntraSettingsRecord> {}
 
 const DEFAULT_COLLECTION_NAME = 'pst_app_settings'
 const DEFAULT_SMTP_PORT = 587
@@ -120,6 +148,24 @@ function buildDefaultSmtpSettings(defaults: SmtpDefaults = {}): SmtpSettingsReco
     fromName: normalizeText(defaults.fromName),
     fromAddress: normalizeText(defaults.fromAddress),
     replyTo: normalizeText(defaults.replyTo)
+  })
+}
+
+function cloneEntraSettings(settings: EntraSettingsRecord): EntraSettingsRecord {
+  return {
+    enabled: Boolean(settings.enabled),
+    tenantId: normalizeText(settings.tenantId),
+    clientId: normalizeText(settings.clientId),
+    clientSecret: normalizeText(settings.clientSecret)
+  }
+}
+
+function buildDefaultEntraSettings(defaults: EntraDefaults = {}): EntraSettingsRecord {
+  return cloneEntraSettings({
+    enabled: parseBoolean(defaults.enabled, false),
+    tenantId: normalizeText(defaults.tenantId),
+    clientId: normalizeText(defaults.clientId),
+    clientSecret: normalizeText(defaults.clientSecret)
   })
 }
 
@@ -204,6 +250,27 @@ function normalizeStoredPasswordPolicyRecord(value: unknown): StoredPasswordPoli
   }
 }
 
+function normalizeStoredEntraSettingsRecord(value: unknown): StoredEntraSettingsRecord | null {
+  if (!value || typeof value !== 'object') {
+    return null
+  }
+
+  const record = value as Partial<StoredEntraSettingsRecord>
+  if (normalizeText(record.settingsKey) !== 'entra') {
+    return null
+  }
+
+  const createdAt = normalizeText(record.createdAt)
+  const updatedAt = normalizeText(record.updatedAt)
+  const settings = buildDefaultEntraSettings(record)
+  return {
+    settingsKey: 'entra',
+    createdAt: createdAt || new Date().toISOString(),
+    updatedAt: updatedAt || createdAt || new Date().toISOString(),
+    ...settings
+  }
+}
+
 function toStoredPasswordPolicyRecord(
   policy: PasswordPolicyRecord,
   createdAt = new Date().toISOString(),
@@ -214,6 +281,19 @@ function toStoredPasswordPolicyRecord(
     createdAt,
     updatedAt,
     ...buildPasswordPolicyView(policy)
+  }
+}
+
+function toStoredEntraRecord(
+  settings: EntraSettingsRecord,
+  createdAt = new Date().toISOString(),
+  updatedAt = createdAt
+): StoredEntraSettingsRecord {
+  return {
+    settingsKey: 'entra',
+    createdAt,
+    updatedAt,
+    ...cloneEntraSettings(settings)
   }
 }
 
@@ -229,19 +309,27 @@ function createSettingsStoreError(
 class MemoryAppSettingsStore implements AppSettingsStore {
   private smtp: StoredSmtpSettingsRecord | null
   private passwordPolicy: StoredPasswordPolicyRecord | null
+  private entra: StoredEntraSettingsRecord | null
 
-  constructor(defaults: SmtpDefaults = {}, passwordPolicyDefaults: PasswordPolicyDefaults = {}) {
+  constructor(
+    defaults: SmtpDefaults = {},
+    passwordPolicyDefaults: PasswordPolicyDefaults = {},
+    entraDefaults: EntraDefaults = {}
+  ) {
     this.smtp = null
     this.passwordPolicy = null
+    this.entra = null
     this.defaults = buildDefaultSmtpSettings(defaults)
     this.passwordPolicyDefaults = mergePasswordPolicy(
       buildPasswordPolicyDefaultsFromEnv(),
       normalizePasswordPolicyInput(passwordPolicyDefaults)
     )
+    this.entraDefaults = buildDefaultEntraSettings(entraDefaults)
   }
 
   private readonly defaults: SmtpSettingsRecord
   private readonly passwordPolicyDefaults: PasswordPolicyRecord
+  private readonly entraDefaults: EntraSettingsRecord
 
   async getSmtpSettings(): Promise<SmtpSettingsRecord> {
     return cloneSmtpSettings(this.smtp || this.defaults)
@@ -267,25 +355,50 @@ class MemoryAppSettingsStore implements AppSettingsStore {
     return { ...next }
   }
 
+  async getEntraSettings(): Promise<EntraSettingsRecord> {
+    return cloneEntraSettings(this.entra || this.entraDefaults)
+  }
+
+  async updateEntraSettings(input: EntraSettingsInput): Promise<EntraSettingsRecord> {
+    const base = cloneEntraSettings(this.entra || this.entraDefaults)
+    const next = cloneEntraSettings({
+      enabled: input.enabled === undefined ? base.enabled : Boolean(input.enabled),
+      tenantId: input.tenantId === undefined ? base.tenantId : normalizeText(input.tenantId),
+      clientId: input.clientId === undefined ? base.clientId : normalizeText(input.clientId),
+      clientSecret:
+        input.clientSecret === undefined
+          ? base.clientSecret
+          : String(input.clientSecret ?? '').trim() || base.clientSecret
+    })
+    const now = new Date().toISOString()
+    this.entra = toStoredEntraRecord(next, this.entra?.createdAt || now, now)
+    return cloneEntraSettings(next)
+  }
+
   async close(): Promise<void> {
     this.smtp = null
     this.passwordPolicy = null
+    this.entra = null
   }
 }
 
 export function createMemoryAppSettingsStore(
   defaults: SmtpDefaults = {},
-  passwordPolicyDefaults: PasswordPolicyDefaults = {}
+  passwordPolicyDefaults: PasswordPolicyDefaults = {},
+  entraDefaults: EntraDefaults = {}
 ): AppSettingsStore {
-  return new MemoryAppSettingsStore(defaults, passwordPolicyDefaults)
+  return new MemoryAppSettingsStore(defaults, passwordPolicyDefaults, entraDefaults)
 }
 
 export class MongoAppSettingsStore implements AppSettingsStore {
   constructor(
-    private readonly collection: Collection<StoredSmtpSettingsRecord | StoredPasswordPolicyRecord>,
+    private readonly collection: Collection<
+      StoredSmtpSettingsRecord | StoredPasswordPolicyRecord | StoredEntraSettingsRecord
+    >,
     private readonly client: MongoClient,
     private readonly defaults: SmtpSettingsRecord,
-    private readonly passwordPolicyDefaults: PasswordPolicyRecord
+    private readonly passwordPolicyDefaults: PasswordPolicyRecord,
+    private readonly entraDefaults: EntraSettingsRecord
   ) {}
 
   static async connect(
@@ -293,17 +406,21 @@ export class MongoAppSettingsStore implements AppSettingsStore {
     dbName = 'pst-extractor',
     defaults: SmtpDefaults = {},
     passwordPolicyDefaults: PasswordPolicyDefaults = {},
+    entraDefaults: EntraDefaults = {},
     collectionName = DEFAULT_COLLECTION_NAME
   ): Promise<MongoAppSettingsStore> {
     const client = new MongoClient(uri)
     await client.connect()
-    const collection = client.db(dbName).collection<StoredSmtpSettingsRecord | StoredPasswordPolicyRecord>(collectionName)
+    const collection = client
+      .db(dbName)
+      .collection<StoredSmtpSettingsRecord | StoredPasswordPolicyRecord | StoredEntraSettingsRecord>(collectionName)
     await collection.createIndex({ settingsKey: 1 }, { unique: true })
     return new MongoAppSettingsStore(
       collection,
       client,
       buildDefaultSmtpSettings(defaults),
-      mergePasswordPolicy(buildPasswordPolicyDefaultsFromEnv(), normalizePasswordPolicyInput(passwordPolicyDefaults))
+      mergePasswordPolicy(buildPasswordPolicyDefaultsFromEnv(), normalizePasswordPolicyInput(passwordPolicyDefaults)),
+      buildDefaultEntraSettings(entraDefaults)
     )
   }
 
@@ -353,6 +470,34 @@ export class MongoAppSettingsStore implements AppSettingsStore {
       { upsert: true }
     )
     return { ...next }
+  }
+
+  async getEntraSettings(): Promise<EntraSettingsRecord> {
+    const record = normalizeStoredEntraSettingsRecord(await this.collection.findOne({ settingsKey: 'entra' }))
+    return cloneEntraSettings(record || this.entraDefaults)
+  }
+
+  async updateEntraSettings(input: EntraSettingsInput): Promise<EntraSettingsRecord> {
+    const existing = normalizeStoredEntraSettingsRecord(await this.collection.findOne({ settingsKey: 'entra' }))
+    const base = existing ? cloneEntraSettings(existing) : cloneEntraSettings(this.entraDefaults)
+    const next = cloneEntraSettings({
+      enabled: input.enabled === undefined ? base.enabled : Boolean(input.enabled),
+      tenantId: input.tenantId === undefined ? base.tenantId : normalizeText(input.tenantId),
+      clientId: input.clientId === undefined ? base.clientId : normalizeText(input.clientId),
+      clientSecret:
+        input.clientSecret === undefined
+          ? base.clientSecret
+          : String(input.clientSecret ?? '').trim() || base.clientSecret
+    })
+    const now = new Date().toISOString()
+    await this.collection.updateOne(
+      { settingsKey: 'entra' },
+      {
+        $set: toStoredEntraRecord(next, existing?.createdAt || now, now)
+      },
+      { upsert: true }
+    )
+    return cloneEntraSettings(next)
   }
 
   async close(): Promise<void> {
@@ -409,13 +554,41 @@ export async function createAppSettingsStoreFromEnv(
 ): Promise<AppSettingsStore> {
   const defaults = buildSmtpDefaultsFromEnv(env)
   const passwordPolicyDefaults = buildPasswordPolicyDefaultsFromEnv(env)
+  const entraDefaults = buildEntraDefaultsFromEnv(env)
   const uri = normalizeText(env.MONGODB_URI)
   if (!uri) {
-    return createMemoryAppSettingsStore(defaults, passwordPolicyDefaults)
+    return createMemoryAppSettingsStore(defaults, passwordPolicyDefaults, entraDefaults)
   }
 
   const dbName = normalizeText(env.MONGODB_DB) || 'pst-extractor'
-  return MongoAppSettingsStore.connect(uri, dbName, defaults, passwordPolicyDefaults)
+  return MongoAppSettingsStore.connect(uri, dbName, defaults, passwordPolicyDefaults, entraDefaults)
+}
+
+export function buildEntraDefaultsFromEnv(env: NodeJS.ProcessEnv = process.env): EntraDefaults {
+  return {
+    enabled: parseBoolean(env.ENTRA_ENABLED, false),
+    tenantId: normalizeText(env.ENTRA_TENANT_ID),
+    clientId: normalizeText(env.ENTRA_CLIENT_ID),
+    clientSecret: String(env.ENTRA_CLIENT_SECRET || '')
+  }
+}
+
+export function buildEntraSettingsView(settings: EntraSettingsRecord): EntraSettingsView {
+  return {
+    enabled: Boolean(settings.enabled),
+    tenantId: normalizeText(settings.tenantId),
+    clientId: normalizeText(settings.clientId),
+    hasClientSecret: Boolean(normalizeText(settings.clientSecret))
+  }
+}
+
+export function normalizeEntraSettingsInput(input: Partial<EntraSettingsInput>): EntraSettingsInput {
+  return {
+    enabled: input.enabled === undefined ? undefined : Boolean(input.enabled),
+    tenantId: input.tenantId === undefined ? undefined : normalizeText(input.tenantId),
+    clientId: input.clientId === undefined ? undefined : normalizeText(input.clientId),
+    clientSecret: input.clientSecret === undefined ? undefined : String(input.clientSecret)
+  }
 }
 
 export function createAppSettingsStoreError(

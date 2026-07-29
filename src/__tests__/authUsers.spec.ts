@@ -4,20 +4,25 @@ import { DEFAULT_PASSWORD_POLICY } from '../passwordPolicy'
 function createMongoAuthUserStore(): { store: AuthUserStore; close: () => Promise<void> } {
   const records = new Map<string, Record<string, unknown>>()
 
+  function matchesFilter(record: Record<string, unknown>, filter: Record<string, unknown>): boolean {
+    for (const [key, expected] of Object.entries(filter || {})) {
+      if (expected === undefined) {
+        continue
+      }
+      if (key === '$or' && Array.isArray(expected)) {
+        return expected.some((entry) => entry && typeof entry === 'object' && matchesFilter(record, entry as Record<string, unknown>))
+      }
+      if (record[key] !== expected) {
+        return false
+      }
+    }
+    return true
+  }
+
   const collection = {
     async findOne(filter: Record<string, unknown>): Promise<Record<string, unknown> | null> {
       for (const record of records.values()) {
-        let matches = true
-        for (const [key, expected] of Object.entries(filter || {})) {
-          if (expected === undefined) {
-            continue
-          }
-          if (record[key] !== expected) {
-            matches = false
-            break
-          }
-        }
-        if (matches) {
+        if (matchesFilter(record, filter)) {
           return { ...record }
         }
       }
@@ -42,11 +47,12 @@ function createMongoAuthUserStore(): { store: AuthUserStore; close: () => Promis
         records.set(String(document.usernameKey), { ...document })
       }
     },
-    find(): { sort: () => { toArray: () => Promise<Record<string, unknown>[]> } } {
+    find(filter: Record<string, unknown> = {}): { sort: () => { toArray: () => Promise<Record<string, unknown>[]> } } {
       return {
         sort: () => ({
           toArray: async () =>
             [...records.values()]
+              .filter((record) => matchesFilter(record, filter))
               .map((record) => ({ ...record }))
               .sort((left, right) => {
                 const leftTime = Date.parse(String(left.createdAt || ''))
@@ -180,6 +186,24 @@ describe.each(['memory', 'mongo'] as const)('auth user store (%s)', (kind) => {
       expect(clearedLogin.user?.username).toBe('bob')
       expect(clearedLogin.user?.passwordChangeRequired).toBe(false)
       expect(clearedLogin.passwordChangeRequired).toBe(false)
+    } finally {
+      await harness.close()
+    }
+  })
+
+  it('looks up local login identifiers by username or recipient email', async () => {
+      const harness = await createStoreHarness(kind)
+    try {
+      await harness.store.addUser('alice', 'Alice12345!!')
+      const invite = await harness.store.createInvite('bob', 'bob@example.com', 60)
+      await harness.store.acceptInvite(invite.inviteToken, 'BobInitial123!!')
+
+      const usernameMatches = await harness.store.findUsersByLoginIdentifier('ALICE')
+      expect(usernameMatches.map((entry) => entry.username)).toContain('alice')
+
+      const emailMatches = await harness.store.findUsersByLoginIdentifier('bob@example.com')
+      expect(emailMatches.map((entry) => entry.username)).toContain('bob')
+      expect(await harness.store.findUsersByLoginIdentifier('missing@example.com')).toEqual([])
     } finally {
       await harness.close()
     }

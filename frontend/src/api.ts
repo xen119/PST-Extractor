@@ -15,6 +15,7 @@ import type {
   PasswordResetLookupResponse,
   PasswordResetRequestResponse,
   PasswordPolicyResponse,
+  EntraSettingsResponse,
   PstCatalogResponse,
   SearchResponse,
   SessionOpenResponse,
@@ -85,6 +86,10 @@ function buildQuery(params: Record<string, string | number | boolean | undefined
 export const api = {
   auth: {
     me: () => requestJson<AuthStatus>('/api/auth/me', { cache: 'no-store' }),
+    entraStartUrl: (returnTo = '') => {
+      const query = buildQuery({ returnTo })
+      return query ? `/api/auth/entra/start?${query}` : '/api/auth/entra/start'
+    },
     login: (username: string, password: string) =>
       requestJson<AuthStatus>('/api/auth/login', {
         method: 'POST',
@@ -184,6 +189,13 @@ export const api = {
     passwordPolicyGet: () => requestJson<PasswordPolicyResponse>('/api/settings/password-policy', { cache: 'no-store' }),
     passwordPolicyPut: (payload: Record<string, unknown>) =>
       requestJson<PasswordPolicyResponse>('/api/settings/password-policy', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }),
+    entraGet: () => requestJson<EntraSettingsResponse>('/api/settings/entra', { cache: 'no-store' }),
+    entraPut: (payload: Record<string, unknown>) =>
+      requestJson<EntraSettingsResponse>('/api/settings/entra', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)

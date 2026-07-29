@@ -30,6 +30,7 @@
 /connect.lock
 /coverage
 /logs/
+/certs/
 /libpeerconnection.log
 npm-debug.log
 testem.log

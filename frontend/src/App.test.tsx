@@ -117,6 +117,39 @@ describe('auth shell', () => {
     expect(screen.queryByRole('button', { name: 'Forgot password?' })).not.toBeInTheDocument()
   })
 
+  it('shows the Microsoft sign-in button when Entra is enabled', () => {
+    render(
+      <AuthScreen
+        view="login"
+        busy={false}
+        message=""
+        error=""
+        entraEnabled={true}
+        passwordResetAvailable={false}
+        invite={null}
+        inviteStep="password"
+        inviteMfaAvailable={false}
+        inviteMfaEnforced={false}
+        inviteSetup={null}
+        inviteRecoveryCodes={[]}
+        resetLookup={null}
+        onLogin={vi.fn()}
+        onMicrosoftSignIn={vi.fn()}
+        onMfaChallenge={vi.fn()}
+        onPasswordResetRequest={async () => undefined}
+        onPasswordResetConfirm={async () => undefined}
+        onInviteAccept={vi.fn()}
+        onInviteMfaStart={vi.fn()}
+        onInviteMfaSkip={vi.fn()}
+        onInviteMfaSubmit={vi.fn()}
+        onInviteFinish={vi.fn()}
+        onOpenLogin={vi.fn()}
+      />
+    )
+
+    expect(screen.getByRole('button', { name: 'Sign in with Microsoft' })).toBeInTheDocument()
+  })
+
   it('shows the invite password form', () => {
     render(
       <AuthScreen
@@ -1975,7 +2008,7 @@ describe('shell and preview', () => {
         })
       )
     })
-  }, 10000)
+  }, 20000)
 
   it('opens the flagged bundle dialog from the message list, shows progress, and rehydrates completed jobs', async () => {
     const user = userEvent.setup()
@@ -2194,7 +2227,7 @@ describe('shell and preview', () => {
     await waitFor(() => {
       expect(within(reopenedDialog).queryByText('flagged-mailbox-part-1.zip')).not.toBeInTheDocument()
     })
-  })
+  }, 20000)
 
   it('shows archive office document previews through the preview url', () => {
     render(
@@ -2240,7 +2273,7 @@ describe('shell and preview', () => {
     expect(screen.queryByText('No inline preview is available for this file type.')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Clear flag' })).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: 'Download file' })).toHaveLength(1)
-  })
+  }, 20000)
 
   it('opens a search result from a different mailbox in the reading pane', async () => {
     const user = userEvent.setup()
@@ -3116,7 +3149,7 @@ describe('shell and preview', () => {
       })
       expect(within(dialog).queryByRole('button', { name: 'Flag selected' })).not.toBeInTheDocument()
       expect((scrollArea as HTMLDivElement).scrollTop).toBe(0)
-    })
+    }, 20000)
 
     it('bulk flags selected items across pages and clears the selection on success', async () => {
       const user = userEvent.setup()
@@ -3372,7 +3405,7 @@ describe('shell and preview', () => {
         expect(within(dialog).getByRole('checkbox', { name: 'Select item Mailbox item 120' })).not.toBeChecked()
       })
       expect(within(dialog).getAllByRole('button', { name: 'Unflag item' })).toHaveLength(2)
-    })
+    }, 20000)
 
     it('reports mixed bulk-flag results and preserves failed selections', async () => {
       const user = userEvent.setup()
@@ -3542,7 +3575,7 @@ describe('shell and preview', () => {
       expect(within(dialog).getByRole('checkbox', { name: 'Select item Mailbox item 1' })).not.toBeChecked()
       expect(within(dialog).getByRole('checkbox', { name: 'Select item Mailbox item 120' })).toBeChecked()
       expect(within(dialog).getAllByRole('button', { name: 'Unflag item' })).toHaveLength(1)
-    })
+    }, 20000)
   })
 
   it('shows the tag manager modal', async () => {

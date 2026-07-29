@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { Download, KeyRound, ScanLine, ShieldAlert, ShieldCheck } from 'lucide-react'
+import { Download, KeyRound, LogIn, ScanLine, ShieldAlert, ShieldCheck } from 'lucide-react'
 import type {
   MfaEnrollmentStartResponse,
   PasswordResetLookupResponse,
@@ -15,6 +15,7 @@ export interface AuthScreenProps {
   busy: boolean
   message: string
   error: string
+  entraEnabled: boolean
   passwordResetAvailable: boolean
   invite: UserInvite | null
   inviteStep: InviteStep
@@ -25,6 +26,7 @@ export interface AuthScreenProps {
   resetLookup: PasswordResetLookupResponse | null
   passwordChangeUser?: string | null
   onLogin: (username: string, password: string) => void
+  onMicrosoftSignIn: () => void
   onMfaChallenge: (code: string) => void
   onPasswordResetRequest: (usernameOrEmail: string) => Promise<void>
   onPasswordResetConfirm: (password: string, confirmPassword: string) => Promise<void>
@@ -41,6 +43,7 @@ export function AuthScreen({
   busy,
   message,
   error,
+  entraEnabled,
   passwordResetAvailable,
   invite,
   inviteStep,
@@ -51,6 +54,7 @@ export function AuthScreen({
   resetLookup,
   passwordChangeUser,
   onLogin,
+  onMicrosoftSignIn,
   onMfaChallenge,
   onPasswordResetRequest,
   onPasswordResetConfirm,
@@ -233,6 +237,19 @@ export function AuthScreen({
                   {busy ? 'Signing in...' : 'Sign in'}
                 </Button>
               </form>
+
+              {entraEnabled ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="w-full justify-center gap-2"
+                  disabled={busy}
+                  onClick={onMicrosoftSignIn}
+                >
+                  <LogIn className="h-4 w-4" />
+                  Sign in with Microsoft
+                </Button>
+              ) : null}
 
               {passwordResetAvailable ? (
                 <div className="pt-1">

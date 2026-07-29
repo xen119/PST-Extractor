@@ -77,6 +77,7 @@ export interface AuthMfaCompletionResult {
 export interface AuthUserStore {
   listUsers(): Promise<AuthUserListItem[]>
   getUser(username: string): Promise<AuthUserListItem | null>
+  findUsersByLoginIdentifier(identifier: string): Promise<AuthUserListItem[]>
   authenticate(
     username: string,
     password: string,
@@ -799,6 +800,23 @@ class MemoryAuthUserStore implements AuthUserStore {
     return record ? toAuthUserListItem(record) : null
   }
 
+  async findUsersByLoginIdentifier(identifier: string): Promise<AuthUserListItem[]> {
+    const normalizedIdentifier = normalizeLoginIdentifier(identifier)
+    if (!normalizedIdentifier) {
+      return []
+    }
+
+    const matches = [...this.users.values()]
+      .filter((record) => matchesLoginIdentifier(record, normalizedIdentifier))
+      .map(toAuthUserListItem)
+
+    const unique = new Map<string, AuthUserListItem>()
+    for (const match of matches) {
+      unique.set(normalizeUsernameKey(match.username), match)
+    }
+    return sortAuthUsers([...unique.values()])
+  }
+
   async authenticate(
     username: string,
     password: string,
@@ -1503,6 +1521,31 @@ export class MongoAuthUserStore implements AuthUserStore {
   async getUser(username: string): Promise<AuthUserListItem | null> {
     const record = await this.getRecord(username)
     return record ? toAuthUserListItem(record) : null
+  }
+
+  async findUsersByLoginIdentifier(identifier: string): Promise<AuthUserListItem[]> {
+    const normalizedIdentifier = normalizeLoginIdentifier(identifier)
+    if (!normalizedIdentifier) {
+      return []
+    }
+
+    const records = await this.collection
+      .find({
+        $or: [{ usernameKey: normalizedIdentifier }, { recipientEmail: normalizedIdentifier }]
+      })
+      .sort({ createdAt: 1, username: 1 })
+      .toArray()
+
+    const unique = new Map<string, AuthUserListItem>()
+    for (const record of records) {
+      const normalized = normalizeStoredAuthUserRecord(record)
+      if (!normalized) {
+        continue
+      }
+      unique.set(normalized.usernameKey, toAuthUserListItem(normalized))
+    }
+
+    return sortAuthUsers([...unique.values()])
   }
 
   async authenticate(

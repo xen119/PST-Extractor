@@ -117,6 +117,8 @@ If you set `MONGODB_URI`, review state, local users, and SMTP settings are store
 
 `CORS_ALLOWED_ORIGINS` is a comma-separated allowlist for cross-origin browser access to the `/api` routes. Same-origin requests to the built-in UI do not need to be listed.
 
+For Microsoft Entra SSO and optional HTTPS enablement, see [doc/entra-sso-and-https.md](doc/entra-sso-and-https.md). That guide covers the local certificate helper, HTTPS listener settings, and the exact Entra redirect URI to register.
+
 Refreshing the tab will reopen the last selected case/search and mailbox from `PST/` while the server process is still running.
 
 A simple script looks like this:

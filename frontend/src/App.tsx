@@ -52,6 +52,8 @@ import type {
   AuthStatus,
   CatalogEntry,
   CatalogScope,
+  EntraSettings,
+  EntraSettingsResponse,
   FolderNode,
   HiddenRule,
   HiddenRulesResponse,
@@ -98,6 +100,12 @@ type SmtpFormState = {
   replyTo: string
 }
 
+type EntraFormState = {
+  enabled: boolean
+  tenantId: string
+  clientId: string
+}
+
 const DEFAULT_SMTP_FORM: SmtpFormState = {
   enabled: false,
   host: '',
@@ -107,6 +115,12 @@ const DEFAULT_SMTP_FORM: SmtpFormState = {
   fromName: '',
   fromAddress: '',
   replyTo: ''
+}
+
+const DEFAULT_ENTRA_FORM: EntraFormState = {
+  enabled: false,
+  tenantId: '',
+  clientId: ''
 }
 
 const DEFAULT_PASSWORD_POLICY_FORM: PasswordPolicy = {
@@ -357,6 +371,7 @@ export function App() {
   const [inviteRecoveryCodes, setInviteRecoveryCodes] = React.useState<string[]>([])
   const [passwordResetAvailable, setPasswordResetAvailable] = React.useState(false)
   const [resetLookup, setResetLookup] = React.useState<PasswordResetLookupResponse | null>(null)
+  const [entraEnabled, setEntraEnabled] = React.useState(false)
   const [selfMfaOpen, setSelfMfaOpen] = React.useState(false)
   const [selfMfaLoading, setSelfMfaLoading] = React.useState(false)
   const [selfMfaMessage, setSelfMfaMessage] = React.useState('')
@@ -421,6 +436,15 @@ export function App() {
   const [smtpForm, setSmtpForm] = React.useState<SmtpFormState>(DEFAULT_SMTP_FORM)
   const [smtpPassword, setSmtpPassword] = React.useState('')
   const [smtpTestRecipient, setSmtpTestRecipient] = React.useState('')
+
+  const [entraDialogOpen, setEntraDialogOpen] = React.useState(false)
+  const [entraLoading, setEntraLoading] = React.useState(false)
+  const [entraError, setEntraError] = React.useState('')
+  const [entraMessage, setEntraMessage] = React.useState('')
+  const [entraForm, setEntraForm] = React.useState<EntraFormState>(DEFAULT_ENTRA_FORM)
+  const [entraClientSecret, setEntraClientSecret] = React.useState('')
+  const [entraRedirectUri, setEntraRedirectUri] = React.useState('')
+  const [entraHasClientSecret, setEntraHasClientSecret] = React.useState(false)
 
   const [passwordPolicyDialogOpen, setPasswordPolicyDialogOpen] = React.useState(false)
   const [passwordPolicyLoading, setPasswordPolicyLoading] = React.useState(false)
@@ -958,8 +982,13 @@ export function App() {
       try {
         const token = getInviteToken()
         const passwordResetToken = getPasswordResetToken()
+        const entraError = new URL(window.location.href).searchParams.get('entraError') || ''
         setInviteToken(token)
         setResetToken(passwordResetToken)
+        if (entraError) {
+          setAuthError(entraError)
+          window.history.replaceState({}, '', `${window.location.pathname}${window.location.hash}`)
+        }
         if (passwordResetToken) {
           try {
             const response = await api.auth.passwordResetLookup(passwordResetToken)
@@ -1000,6 +1029,7 @@ export function App() {
           }
           if (status.authenticated) {
             setAuthStatus(status)
+            setEntraEnabled(Boolean(status.entraEnabled))
             setPasswordResetAvailable(Boolean(status.passwordResetAvailable))
             setAuthReady(true)
             setAuthView('login')
@@ -1015,6 +1045,7 @@ export function App() {
             }
           } else if (status.passwordChangeRequired && status.user?.username) {
             setAuthStatus(status)
+            setEntraEnabled(Boolean(status.entraEnabled))
             setPasswordResetAvailable(Boolean(status.passwordResetAvailable))
             setAuthReady(true)
             setAuthView('change')
@@ -1022,12 +1053,14 @@ export function App() {
             setAuthError('')
             setAuthMessage('Temporary password accepted. Change it to continue.')
           } else if (status.mfaRequired && status.user?.username) {
+            setEntraEnabled(Boolean(status.entraEnabled))
             setPasswordResetAvailable(Boolean(status.passwordResetAvailable))
             setAuthView('mfa')
             setMfaChallengeUsername(status.user.username)
             setAuthMessage('')
           } else {
             setAuthStatus(null)
+            setEntraEnabled(Boolean(status.entraEnabled))
             setPasswordResetAvailable(Boolean(status.passwordResetAvailable))
             setAuthReady(true)
             setAuthView(token ? 'invite' : 'login')
@@ -1037,18 +1070,21 @@ export function App() {
             const payload = error.payload as AuthStatus | undefined
             if (payload?.passwordChangeRequired && payload?.user?.username) {
               setAuthStatus(payload)
+              setEntraEnabled(Boolean(payload.entraEnabled))
               setPasswordResetAvailable(Boolean(payload.passwordResetAvailable))
               setAuthReady(true)
               setAuthView('change')
               setMfaChallengeUsername('')
               setAuthMessage('Temporary password accepted. Change it to continue.')
             } else if (payload?.mfaRequired && payload?.user?.username) {
+              setEntraEnabled(Boolean(payload.entraEnabled))
               setPasswordResetAvailable(Boolean(payload.passwordResetAvailable))
               setAuthView('mfa')
               setMfaChallengeUsername(payload.user.username)
               setAuthMessage('')
             } else {
               setAuthStatus(null)
+              setEntraEnabled(Boolean(payload?.entraEnabled))
               setPasswordResetAvailable(Boolean(payload?.passwordResetAvailable))
               setAuthReady(true)
               setAuthView(token ? 'invite' : 'login')
@@ -1759,6 +1795,14 @@ export function App() {
   }, [canManageUsers, smtpDialogOpen])
 
   React.useEffect(() => {
+    if (!entraDialogOpen || !canManageUsers) {
+      return
+    }
+
+    void loadEntraSettings()
+  }, [canManageUsers, entraDialogOpen])
+
+  React.useEffect(() => {
     if (!passwordPolicyDialogOpen || !canManageUsers) {
       return
     }
@@ -1796,6 +1840,7 @@ export function App() {
     setAuthMessage('')
     try {
       const response = await api.auth.login(usernameInput, password)
+      setEntraEnabled(Boolean(response.entraEnabled))
       setPasswordResetAvailable(Boolean(response.passwordResetAvailable))
       if (response.passwordChangeRequired && response.user?.username) {
         setAuthStatus(response)
@@ -1824,12 +1869,18 @@ export function App() {
     } catch (error) {
       if (error instanceof ApiError && error.payload && typeof error.payload === 'object') {
         const payload = error.payload as Partial<AuthStatus>
+        setEntraEnabled(Boolean(payload.entraEnabled))
         setPasswordResetAvailable(Boolean(payload.passwordResetAvailable))
       }
       setAuthError(error instanceof Error ? error.message : 'Login failed')
     } finally {
       setAuthBusy(false)
     }
+  }
+
+  function handleMicrosoftSignIn(): void {
+    const returnTo = `${window.location.pathname}${window.location.hash}`
+    window.location.assign(api.auth.entraStartUrl(returnTo))
   }
 
   async function handlePasswordResetRequest(usernameOrEmail: string): Promise<void> {
@@ -2353,6 +2404,27 @@ export function App() {
     }
   }
 
+  async function loadEntraSettings(): Promise<void> {
+    setEntraLoading(true)
+    setEntraError('')
+    setEntraMessage('')
+    try {
+      const response: EntraSettingsResponse = await api.settings.entraGet()
+      setEntraForm({
+        enabled: response.settings.enabled,
+        tenantId: response.settings.tenantId,
+        clientId: response.settings.clientId
+      })
+      setEntraClientSecret('')
+      setEntraRedirectUri(response.redirectUri)
+      setEntraHasClientSecret(Boolean(response.settings.hasClientSecret))
+    } catch (error) {
+      setEntraError(error instanceof Error ? error.message : 'Unable to load Microsoft Entra settings')
+    } finally {
+      setEntraLoading(false)
+    }
+  }
+
   async function loadPasswordPolicy(): Promise<void> {
     setPasswordPolicyLoading(true)
     setPasswordPolicyError('')
@@ -2403,6 +2475,31 @@ export function App() {
       setSmtpError(error instanceof Error ? error.message : 'Unable to save SMTP settings')
     } finally {
       setSmtpLoading(false)
+    }
+  }
+
+  async function saveEntraSettings(): Promise<void> {
+    setEntraLoading(true)
+    setEntraError('')
+    setEntraMessage('')
+    try {
+      const response: EntraSettingsResponse = await api.settings.entraPut({
+        ...entraForm,
+        clientSecret: entraClientSecret || undefined
+      })
+      setEntraForm({
+        enabled: response.settings.enabled,
+        tenantId: response.settings.tenantId,
+        clientId: response.settings.clientId
+      })
+      setEntraClientSecret('')
+      setEntraRedirectUri(response.redirectUri)
+      setEntraHasClientSecret(Boolean(response.settings.hasClientSecret))
+      setEntraMessage('Microsoft Entra settings saved.')
+    } catch (error) {
+      setEntraError(error instanceof Error ? error.message : 'Unable to save Microsoft Entra settings')
+    } finally {
+      setEntraLoading(false)
     }
   }
 
@@ -3064,6 +3161,16 @@ export function App() {
             <Button
               variant="ghost"
               className="w-full justify-start gap-3"
+              onClick={() => setEntraDialogOpen(true)}
+            >
+              <ShieldAlert className="h-4 w-4" />
+              Microsoft Entra SSO
+            </Button>
+          </PopoverClose>
+          <PopoverClose asChild>
+            <Button
+              variant="ghost"
+              className="w-full justify-start gap-3"
               onClick={() => setPasswordPolicyDialogOpen(true)}
             >
               <ShieldCheck className="h-4 w-4" />
@@ -3509,6 +3616,28 @@ export function App() {
         }}
       />
 
+      <EntraSettingsDialog
+        open={entraDialogOpen}
+        loading={entraLoading}
+        error={entraError}
+        message={entraMessage}
+        form={entraForm}
+        clientSecret={entraClientSecret}
+        redirectUri={entraRedirectUri}
+        hasClientSecret={entraHasClientSecret}
+        onClose={() => {
+          setEntraDialogOpen(false)
+        }}
+        onRefresh={() => {
+          void loadEntraSettings()
+        }}
+        onFormChange={setEntraForm}
+        onClientSecretChange={setEntraClientSecret}
+        onSave={() => {
+          void saveEntraSettings()
+        }}
+      />
+
       <UserPasswordResetDialog
         open={userPasswordResetDialogOpen}
         loading={userPasswordResetLoading}
@@ -3697,6 +3826,7 @@ export function App() {
           busy={authBusy || inviteLoading || selfMfaLoading}
           message={authMessage}
           error={authError}
+          entraEnabled={entraEnabled}
           passwordResetAvailable={passwordResetAvailable}
           invite={invite}
           inviteStep={inviteStep}
@@ -3715,6 +3845,7 @@ export function App() {
           onLogin={(user, pass) => {
             void handleLogin(user, pass)
           }}
+          onMicrosoftSignIn={handleMicrosoftSignIn}
           onMfaChallenge={(code) => {
             void handleMfaChallenge(code)
           }}
@@ -4509,6 +4640,165 @@ function SmtpSettingsDialog({
                 </div>
                 <div className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-4 text-sm text-[color:var(--muted)]">
                   The SMTP password is never returned to the browser. Leave it blank to keep the stored secret.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function EntraSettingsDialog({
+  open,
+  loading,
+  error,
+  message,
+  form,
+  clientSecret,
+  redirectUri,
+  hasClientSecret,
+  onClose,
+  onRefresh,
+  onFormChange,
+  onClientSecretChange,
+  onSave
+}: {
+  open: boolean
+  loading: boolean
+  error: string
+  message: string
+  form: EntraFormState
+  clientSecret: string
+  redirectUri: string
+  hasClientSecret: boolean
+  onClose: () => void
+  onRefresh: () => void
+  onFormChange: (value: EntraFormState) => void
+  onClientSecretChange: (value: string) => void
+  onSave: () => void
+}) {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) {
+          onClose()
+        }
+      }}
+    >
+      <DialogContent className="w-[min(98vw,1120px)]">
+        <div className="flex h-[82vh] flex-col overflow-hidden">
+          <div className="flex items-start justify-between gap-4 border-b border-[color:var(--line)] px-6 py-5">
+            <div>
+              <div className="text-xs font-semibold tracking-[0.18em] text-[color:var(--muted)] uppercase">Settings</div>
+              <DialogTitle className="mt-1 text-2xl">Microsoft Entra SSO</DialogTitle>
+              <DialogDescription>Configure Microsoft sign-in and map Entra identities to local users.</DialogDescription>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" onClick={onRefresh}>
+                <RefreshCw className="h-4 w-4" />
+                Refresh
+              </Button>
+              <Button variant="ghost" onClick={onClose}>
+                Close
+              </Button>
+            </div>
+          </div>
+
+          <div className="grid min-h-0 flex-1 gap-4 overflow-hidden p-6 xl:grid-cols-[1.2fr_0.8fr]">
+            <div className="panel-surface-strong min-h-0 overflow-auto p-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
+                  Enabled
+                  <div className="mt-2 flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={form.enabled}
+                      onChange={(event) => onFormChange({ ...form, enabled: event.target.checked })}
+                    />
+                    <span className="text-sm text-[color:var(--muted)]">Show Microsoft sign-in on the login screen</span>
+                  </div>
+                </label>
+                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
+                  Secret stored
+                  <div className="mt-2 flex items-center gap-3">
+                    <Badge>{hasClientSecret ? 'Yes' : 'No'}</Badge>
+                    <span className="text-sm text-[color:var(--muted)]">
+                      Leave the secret blank to keep the existing stored value.
+                    </span>
+                  </div>
+                </label>
+                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
+                  Tenant ID
+                  <Input
+                    className="mt-2"
+                    value={form.tenantId}
+                    onChange={(event) => onFormChange({ ...form, tenantId: event.target.value })}
+                    placeholder="Directory (tenant) ID"
+                  />
+                </label>
+                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
+                  Client ID
+                  <Input
+                    className="mt-2"
+                    value={form.clientId}
+                    onChange={(event) => onFormChange({ ...form, clientId: event.target.value })}
+                    placeholder="Application (client) ID"
+                  />
+                </label>
+                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)] md:col-span-2">
+                  Client secret
+                  <Input
+                    className="mt-2"
+                    type="password"
+                    value={clientSecret}
+                    onChange={(event) => onClientSecretChange(event.target.value)}
+                    placeholder="Leave blank to keep current secret"
+                  />
+                </label>
+              </div>
+
+              {error ? (
+                <div className="mt-4 rounded-2xl border border-[color:rgba(220,38,38,0.2)] bg-[color:rgba(220,38,38,0.08)] px-4 py-3 text-sm text-[color:var(--danger)]">
+                  {error}
+                </div>
+              ) : null}
+              {message ? (
+                <div className="mt-4 rounded-2xl border border-[color:var(--accent-soft)] bg-[color:var(--accent-soft)] px-4 py-3 text-sm text-[color:var(--accent-strong)]">
+                  {message}
+                </div>
+              ) : null}
+
+              <div className="mt-4 flex items-center justify-end gap-2">
+                <Button variant="ghost" onClick={onClose}>
+                  Cancel
+                </Button>
+                <Button onClick={onSave} disabled={loading}>
+                  {loading ? 'Saving...' : 'Save settings'}
+                </Button>
+              </div>
+            </div>
+
+            <div className="panel-surface-strong min-h-0 overflow-hidden">
+              <div className="border-b border-[color:var(--line)] px-4 py-3">
+                <div className="text-sm font-semibold text-[color:var(--text)]">App registration</div>
+                <div className="text-xs text-[color:var(--muted)]">
+                  Configure this redirect URI in Microsoft Entra before enabling sign-in.
+                </div>
+              </div>
+              <div className="space-y-4 p-4">
+                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
+                  Redirect URI
+                  <Input className="mt-2" readOnly value={redirectUri} />
+                </label>
+                <div className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-4 text-sm text-[color:var(--muted)]">
+                  Use <span className="font-medium text-[color:var(--text)]">openid profile email</span> scopes and map the
+                  returned email or UPN to an existing local account.
+                </div>
+                <div className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-4 text-sm text-[color:var(--muted)]">
+                  The client secret is stored server-side only and never returned to the browser.
                 </div>
               </div>
             </div>

@@ -1,5 +1,6 @@
 import * as fs from 'fs'
 import * as http from 'http'
+import { createSign, generateKeyPairSync } from 'crypto'
 import * as os from 'os'
 import * as path from 'path'
 import AdmZip from 'adm-zip'
@@ -168,6 +169,23 @@ function createDeferred<T>() {
   })
 
   return { promise, resolve, reject }
+}
+
+function base64UrlEncode(input: string | Buffer): string {
+  return Buffer.from(input)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '')
+}
+
+function signJwt(privateKey: any, payload: Record<string, unknown>, kid = 'entra-test-kid'): string {
+  const header = { alg: 'RS256', typ: 'JWT', kid }
+  const encodedHeader = base64UrlEncode(JSON.stringify(header))
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload))
+  const signingInput = `${encodedHeader}.${encodedPayload}`
+  const signature = createSign('RSA-SHA256').update(signingInput).sign(privateKey)
+  return `${signingInput}.${base64UrlEncode(signature)}`
 }
 
 function parseStoredZipEntries(buffer: Buffer): Map<string, Buffer> {
@@ -3255,6 +3273,271 @@ describe('pst review api', () => {
     expect(bobSessionMePayload.passwordChangeRequired).toBe(false)
   })
 
+  it('reads and updates Microsoft Entra settings through the admin route', async () => {
+    rootDir = makeTempDir('pst-review-api-auth-entra-settings-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(pstDir)
+
+    const authUserStore = createMemoryAuthUserStore([{ username: 'admin', password: 'pst-extractor' }])
+    const appSettingsStore = createMemoryAppSettingsStore()
+    await appSettingsStore.updateEntraSettings({
+      enabled: true,
+      tenantId: 'tenant-123',
+      clientId: 'client-123',
+      clientSecret: 'secret-123'
+    })
+
+    const started = await startApp(
+      pstDir,
+      undefined,
+      {
+        username: 'admin',
+        password: 'pst-extractor',
+        sessionTtlMinutes: 180,
+        publicBaseUrl: 'https://portal.example.test'
+      },
+      authUserStore,
+      appSettingsStore
+    )
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const loginResponse = await fetch(`${started.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: 'admin',
+        password: 'pst-extractor'
+      })
+    })
+    const adminCookie = getCookieValue(getSetCookieHeader(loginResponse), 'pst-review-session')
+    expect(loginResponse.status).toBe(200)
+    expect(adminCookie).toContain('pst-review-session=')
+
+    const settingsResponse = await fetch(`${started.baseUrl}/api/settings/entra`, {
+      headers: {
+        cookie: adminCookie
+      }
+    })
+    const settingsPayload = await readJson(settingsResponse)
+    expect(settingsResponse.status).toBe(200)
+    expect(settingsPayload.redirectUri).toBe('https://portal.example.test/api/auth/entra/callback')
+    expect(settingsPayload.settings.enabled).toBe(true)
+    expect(settingsPayload.settings.tenantId).toBe('tenant-123')
+    expect(settingsPayload.settings.clientId).toBe('client-123')
+    expect(settingsPayload.settings.hasClientSecret).toBe(true)
+    expect(settingsPayload.settings.clientSecret).toBeUndefined()
+
+    const updateResponse = await fetch(`${started.baseUrl}/api/settings/entra`, {
+      method: 'PUT',
+      headers: {
+        cookie: adminCookie,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        enabled: false,
+        tenantId: 'tenant-456',
+        clientId: 'client-456',
+        clientSecret: 'secret-456'
+      })
+    })
+    const updatePayload = await readJson(updateResponse)
+    expect(updateResponse.status).toBe(200)
+    expect(updatePayload.settings.enabled).toBe(false)
+    expect(updatePayload.settings.tenantId).toBe('tenant-456')
+    expect(updatePayload.settings.clientId).toBe('client-456')
+    expect(updatePayload.settings.hasClientSecret).toBe(true)
+    expect(updatePayload.redirectUri).toBe('https://portal.example.test/api/auth/entra/callback')
+
+    const storedSettings = await appSettingsStore.getEntraSettings()
+    expect(storedSettings.enabled).toBe(false)
+    expect(storedSettings.tenantId).toBe('tenant-456')
+    expect(storedSettings.clientId).toBe('client-456')
+    expect(storedSettings.clientSecret).toBe('secret-456')
+  })
+
+  it('maps Microsoft Entra sign-ins to local users and rejects unmatched or ambiguous identities', async () => {
+    rootDir = makeTempDir('pst-review-api-auth-entra-callback-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(pstDir)
+
+    const authUserStore = createMemoryAuthUserStore([{ username: 'admin', password: 'pst-extractor' }])
+    await authUserStore.createInvite('alice', 'alice@example.com', 60)
+    await authUserStore.acceptInvite(
+      (await authUserStore.createInvite('alice-two', 'shared@example.com', 60)).inviteToken,
+      'AliceTwo123!!'
+    )
+    await authUserStore.acceptInvite(
+      (await authUserStore.createInvite('alice-three', 'shared@example.com', 60)).inviteToken,
+      'AliceThree123!!'
+    )
+    await authUserStore.acceptInvite(
+      (await authUserStore.createInvite('alice-match', 'alice@example.com', 60)).inviteToken,
+      'AliceMatch123!!'
+    )
+
+    const appSettingsStore = createMemoryAppSettingsStore()
+    await appSettingsStore.updateEntraSettings({
+      enabled: true,
+      tenantId: 'tenant-123',
+      clientId: 'client-123',
+      clientSecret: 'secret-123'
+    })
+
+    const started = await startApp(
+      pstDir,
+      undefined,
+      {
+        username: 'admin',
+        password: 'pst-extractor',
+        sessionTtlMinutes: 180,
+        publicBaseUrl: 'https://portal.example.test'
+      },
+      authUserStore,
+      appSettingsStore
+    )
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
+    const jwk = {
+      ...(publicKey.export({ format: 'jwk' }) as Record<string, unknown>),
+      kid: 'entra-test-kid',
+      alg: 'RS256',
+      use: 'sig'
+    }
+
+    let currentToken = ''
+    const originalFetch = globalThis.fetch.bind(globalThis)
+    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(async (input: any, init?: RequestInit) => {
+      const requestUrl = typeof input === 'string' ? input : String(input?.url || input || '')
+      if (requestUrl === 'https://login.microsoftonline.com/tenant-123/oauth2/v2.0/token') {
+        return new Response(
+          JSON.stringify({
+            token_type: 'Bearer',
+            expires_in: 3600,
+            access_token: 'access-token',
+            id_token: currentToken
+          }),
+          {
+            status: 200,
+            headers: {
+              'content-type': 'application/json'
+            }
+          }
+        )
+      }
+      if (requestUrl === 'https://login.microsoftonline.com/tenant-123/discovery/v2.0/keys') {
+        return new Response(
+          JSON.stringify({
+            keys: [jwk]
+          }),
+          {
+            status: 200,
+            headers: {
+              'content-type': 'application/json'
+            }
+          }
+        )
+      }
+      return originalFetch(input as never, init)
+    })
+
+    const createIdentityToken = (email: string, nonce: string): string =>
+      signJwt(privateKey, {
+        aud: 'client-123',
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        nbf: Math.floor(Date.now() / 1000) - 60,
+        tid: 'tenant-123',
+        iss: 'https://login.microsoftonline.com/tenant-123/v2.0',
+        nonce,
+        email,
+        preferred_username: email,
+        upn: email
+      })
+
+    const startEntraLogin = async (returnTo: string): Promise<{ state: string; nonce: string }> => {
+      const response = await fetch(
+        `${started.baseUrl}/api/auth/entra/start?returnTo=${encodeURIComponent(returnTo)}`,
+        {
+          redirect: 'manual'
+        }
+      )
+      expect(response.status).toBe(302)
+      const location = response.headers.get('location') || ''
+      expect(location).toContain('login.microsoftonline.com')
+      const url = new URL(location)
+      const state = url.searchParams.get('state') || ''
+      const nonce = url.searchParams.get('nonce') || ''
+      expect(state).toBeTruthy()
+      expect(nonce).toBeTruthy()
+      return { state, nonce }
+    }
+
+    try {
+      const successStart = await startEntraLogin('/workspace')
+      currentToken = createIdentityToken('alice@example.com', successStart.nonce)
+      const successCallback = await fetch(
+        `${started.baseUrl}/api/auth/entra/callback?code=success-code&state=${encodeURIComponent(successStart.state)}`,
+        {
+          redirect: 'manual'
+        }
+      )
+      const successCookie = getCookieValue(getSetCookieHeader(successCallback), 'pst-review-session')
+      expect(successCallback.status).toBe(302)
+      expect(successCallback.headers.get('location')).toBe('/workspace')
+      expect(successCookie).toContain('pst-review-session=')
+
+      const successMeResponse = await fetch(`${started.baseUrl}/api/auth/me`, {
+        headers: {
+          cookie: successCookie
+        }
+      })
+      const successMePayload = await readJson(successMeResponse)
+      expect(successMeResponse.status).toBe(200)
+      expect(successMePayload.authenticated).toBe(true)
+      expect(successMePayload.user.username).toBe('alice-match')
+
+      const missingStart = await startEntraLogin('/missing')
+      currentToken = createIdentityToken('missing@example.com', missingStart.nonce)
+      const missingCallback = await fetch(
+        `${started.baseUrl}/api/auth/entra/callback?code=missing-code&state=${encodeURIComponent(missingStart.state)}`,
+        {
+          redirect: 'manual'
+        }
+      )
+      const missingLocation = missingCallback.headers.get('location') || ''
+      expect(missingCallback.status).toBe(302)
+      expect(missingLocation).toContain('entraError=')
+      expect(decodeURIComponent(new URL(`https://example.test${missingLocation}`).searchParams.get('entraError') || '')).toContain(
+        'No local user matches the Microsoft identity'
+      )
+      expect(getSetCookieHeader(missingCallback)).not.toContain('pst-review-session=')
+
+      const ambiguousStart = await startEntraLogin('/ambiguous')
+      currentToken = createIdentityToken('shared@example.com', ambiguousStart.nonce)
+      const ambiguousCallback = await fetch(
+        `${started.baseUrl}/api/auth/entra/callback?code=ambiguous-code&state=${encodeURIComponent(ambiguousStart.state)}`,
+        {
+          redirect: 'manual'
+        }
+      )
+      const ambiguousLocation = ambiguousCallback.headers.get('location') || ''
+      expect(ambiguousCallback.status).toBe(302)
+      expect(ambiguousLocation).toContain('entraError=')
+      expect(
+        decodeURIComponent(new URL(`https://example.test${ambiguousLocation}`).searchParams.get('entraError') || '')
+      ).toContain('matched multiple local users')
+      expect(getSetCookieHeader(ambiguousCallback)).not.toContain('pst-review-session=')
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
   it('adds additional viewer users and persists them across restarts', async () => {
     rootDir = makeTempDir('pst-review-api-auth-users-')
     const pstDir = path.join(rootDir, 'PST')
@@ -3483,7 +3766,10 @@ describe('pst review api', () => {
       })
     })
     const aliceLoginPayload = await readJson(aliceLoginResponse)
-    const aliceChallengeCookiePair = getCookiePair(getSetCookieHeader(aliceLoginResponse))
+    const aliceChallengeCookiePair = getCookieValue(
+      getSetCookieHeader(aliceLoginResponse),
+      'pst-review-session-mfa-challenge'
+    )
     expect(aliceLoginResponse.status).toBe(200)
     expect(aliceLoginPayload.authenticated).toBe(false)
     expect(aliceLoginPayload.mfaRequired).toBe(true)
@@ -3531,7 +3817,10 @@ describe('pst review api', () => {
       })
     })
     const aliceRecoveryLoginPayload = await readJson(aliceRecoveryLoginResponse)
-    const aliceRecoveryChallengeCookiePair = getCookiePair(getSetCookieHeader(aliceRecoveryLoginResponse))
+    const aliceRecoveryChallengeCookiePair = getCookieValue(
+      getSetCookieHeader(aliceRecoveryLoginResponse),
+      'pst-review-session-mfa-challenge'
+    )
     expect(aliceRecoveryLoginResponse.status).toBe(200)
     expect(aliceRecoveryLoginPayload.mfaRequired).toBe(true)
 
@@ -3686,7 +3975,7 @@ describe('pst review api', () => {
       {
         method: 'POST',
         headers: {
-          Cookie: getCookiePair(getSetCookieHeader(aliceRestartLoginResponse)),
+          Cookie: getCookieValue(getSetCookieHeader(aliceRestartLoginResponse), 'pst-review-session-mfa-challenge'),
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
@@ -3695,7 +3984,10 @@ describe('pst review api', () => {
       }
     )
     const aliceRestartChallengePayload = await readJson(aliceRestartChallengeResponse)
-    const aliceRestartSessionCookiePair = getCookiePair(getSetCookieHeader(aliceRestartChallengeResponse))
+    const aliceRestartSessionCookiePair = getCookieValue(
+      getSetCookieHeader(aliceRestartChallengeResponse),
+      'pst-review-session'
+    )
     expect(aliceRestartChallengeResponse.status).toBe(200)
     expect(aliceRestartChallengePayload.authenticated).toBe(true)
     expect(aliceRestartChallengePayload.mfaEnabled).toBe(true)
@@ -3713,7 +4005,7 @@ describe('pst review api', () => {
       })
     })
     const adminRestartLoginPayload = await readJson(adminRestartLoginResponse)
-    const adminRestartCookiePair = getCookiePair(getSetCookieHeader(adminRestartLoginResponse))
+    const adminRestartCookiePair = getCookieValue(getSetCookieHeader(adminRestartLoginResponse), 'pst-review-session')
     expect(adminRestartLoginResponse.status).toBe(200)
     expect(adminRestartLoginPayload.authenticated).toBe(true)
     expect(adminRestartLoginPayload.canManageUsers).toBe(true)

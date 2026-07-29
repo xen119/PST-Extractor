@@ -1,6 +1,7 @@
 import * as dotenv from 'dotenv'
 import * as fs from 'fs'
 import * as http from 'http'
+import * as https from 'https'
 import * as path from 'path'
 import { buildOpenApiDocument } from '../src/openApi'
 import { MongoAuthUserStore } from '../src/authUsers'
@@ -43,6 +44,86 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 
+function parseBoolean(value: string | undefined, fallback = false): boolean {
+  if (value === undefined) {
+    return fallback
+  }
+
+  const normalized = value.trim().toLowerCase()
+  if (!normalized) {
+    return fallback
+  }
+
+  return !['0', 'false', 'no', 'off'].includes(normalized)
+}
+
+function resolveExamplePath(value: string | undefined): string {
+  const normalized = (value || '').trim()
+  if (!normalized) {
+    return ''
+  }
+
+  return path.isAbsolute(normalized) ? normalized : path.resolve(__dirname, normalized)
+}
+
+function loadHttpsServerOptions(): https.ServerOptions | null {
+  if (!parseBoolean(process.env.HTTPS_ENABLED)) {
+    return null
+  }
+
+  const passphrase = (process.env.HTTPS_PASSPHRASE || '').trim()
+  const pfxPath = resolveExamplePath(process.env.HTTPS_PFX_FILE)
+  if (pfxPath) {
+    if (!fs.existsSync(pfxPath)) {
+      throw new Error(`HTTPS_PFX_FILE does not exist: ${pfxPath}`)
+    }
+
+    const options: https.ServerOptions = {
+      pfx: fs.readFileSync(pfxPath)
+    }
+
+    if (passphrase) {
+      options.passphrase = passphrase
+    }
+
+    return options
+  }
+
+  const certPath = resolveExamplePath(process.env.HTTPS_CERT_FILE)
+  const keyPath = resolveExamplePath(process.env.HTTPS_KEY_FILE)
+  if (!certPath || !keyPath) {
+    throw new Error(
+      'HTTPS_ENABLED is true, but no TLS certificate was configured. Set HTTPS_PFX_FILE or both HTTPS_CERT_FILE and HTTPS_KEY_FILE.'
+    )
+  }
+
+  if (!fs.existsSync(certPath)) {
+    throw new Error(`HTTPS_CERT_FILE does not exist: ${certPath}`)
+  }
+  if (!fs.existsSync(keyPath)) {
+    throw new Error(`HTTPS_KEY_FILE does not exist: ${keyPath}`)
+  }
+
+  const options: https.ServerOptions = {
+    cert: fs.readFileSync(certPath),
+    key: fs.readFileSync(keyPath)
+  }
+
+  const caPath = resolveExamplePath(process.env.HTTPS_CA_FILE)
+  if (caPath) {
+    if (!fs.existsSync(caPath)) {
+      throw new Error(`HTTPS_CA_FILE does not exist: ${caPath}`)
+    }
+    options.ca = fs.readFileSync(caPath)
+  }
+
+  if (passphrase) {
+    options.passphrase = passphrase
+  }
+
+  return options
+}
+
 function getFallbackRequestInfo(req: any) {
   const headers = req.headers || {}
   const forwardedFor = typeof headers['x-forwarded-for'] === 'string' ? headers['x-forwarded-for'] : ''
@@ -62,6 +143,7 @@ loadEnvFile(path.join(__dirname, '..', '.env'))
 
 const host = process.env.HOST || '127.0.0.1'
 const port = Number(process.env.PORT || 3030)
+const httpsPort = parsePositiveInt(process.env.HTTPS_PORT, port)
 const auditLogDir = path.join(__dirname, 'logs')
 const pstRootDir = resolvePstRootDirectory(process.env.PST_ROOT_DIR, __dirname)
 const webChecks = {
@@ -92,7 +174,7 @@ const auth: AppAuthConfig = {
   publicBaseUrl: (process.env.PUBLIC_BASE_URL || '').trim()
 }
 
-let server: http.Server | null = null
+let server: http.Server | https.Server | null = null
 let reviewStore = null as Awaited<ReturnType<typeof createReviewStoreFromEnv>> | null
 let searchIndexStore = null as Awaited<ReturnType<typeof createSearchIndexStoreFromEnv>> | null
 let flaggedBundleStore = null as Awaited<ReturnType<typeof createFlaggedBundleStoreFromEnv>> | null
@@ -199,8 +281,12 @@ async function main(): Promise<void> {
     apiSecurity
   })
 
-  server = app.listen(port, host, () => {
-    console.log(`PST Mail Explorer running at http://${host}:${port}`)
+  const httpsOptions = loadHttpsServerOptions()
+  const listenerProtocol = httpsOptions ? 'https' : 'http'
+  const listenerPort = httpsOptions ? httpsPort : port
+  server = httpsOptions ? https.createServer(httpsOptions, app) : http.createServer(app)
+  server.listen(listenerPort, host, () => {
+    console.log(`PST Mail Explorer running at ${listenerProtocol}://${host}:${listenerPort}`)
   })
 
   process.once('SIGINT', () => {
