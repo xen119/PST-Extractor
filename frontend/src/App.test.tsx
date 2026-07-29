@@ -19,6 +19,7 @@ import type {
   PageResponse,
   PasswordResetConfirmResponse,
   PasswordResetLookupResponse,
+  PasswordPolicyResponse,
   PstCatalogResponse,
   FlaggedBundleJob,
   FlaggedBundleJobsResponse,
@@ -641,6 +642,113 @@ describe('auth shell', () => {
 
     expect(await screen.findByRole('heading', { name: 'Case access' })).toBeInTheDocument()
     expect(screen.getByText('Users start with no cases assigned. Leave everything unchecked for no access.')).toBeInTheDocument()
+  })
+
+  it('opens the password policy modal from the settings menu and saves changes', async () => {
+    const user = userEvent.setup()
+    const now = new Date().toISOString()
+    const authenticatedStatus: AuthStatus = {
+      authenticated: true,
+      enabled: true,
+      canManageUsers: true,
+      mfaEnabled: true,
+      mfaEnforced: false,
+      lockedUntil: null,
+      loginFailedCount: 0,
+      passwordResetAvailable: false,
+      user: { username: 'admin', assignedCasePaths: [] },
+      expiresAt: null
+    }
+    const emptyCatalog: PstCatalogResponse = {
+      rootPath: '',
+      rootExists: true,
+      message: '',
+      scopePath: '',
+      scopeLabel: 'PST root',
+      scopes: [],
+      files: []
+    }
+    const hiddenRulesResponse: HiddenRulesResponse = { items: [] }
+    const usersResponse: UsersResponse = {
+      users: [
+        {
+          username: 'admin',
+          createdAt: now,
+          recipientEmail: 'admin@example.com',
+          inviteStatus: 'active',
+          inviteSentAt: now,
+          inviteExpiresAt: '',
+          inviteAcceptedAt: now,
+          inviteRevokedAt: '',
+          mfaEnabled: true,
+          mfaEnforced: false,
+          mfaEnrolledAt: now,
+          assignedCasePaths: []
+        }
+      ]
+    }
+    const activityResponse: ActivityLogResponse = { entries: [] }
+    const initialPolicy: PasswordPolicyResponse = {
+      settings: {
+        minLength: 14,
+        requireUppercase: true,
+        requireLowercase: true,
+        requireNumber: true,
+        requireSpecial: true,
+        forgotPasswordAfterFailures: 3,
+        lockoutThreshold: 5,
+        lockoutDurationSeconds: 45,
+        resetTokenTtlMinutes: 90,
+        enforceMfa: true
+      }
+    }
+    const savedPolicy: PasswordPolicyResponse = {
+      settings: {
+        minLength: 16,
+        requireUppercase: true,
+        requireLowercase: true,
+        requireNumber: false,
+        requireSpecial: true,
+        forgotPasswordAfterFailures: 4,
+        lockoutThreshold: 6,
+        lockoutDurationSeconds: 60,
+        resetTokenTtlMinutes: 120,
+        enforceMfa: false
+      }
+    }
+
+    const passwordPolicyGetSpy = vi.spyOn(api.settings, 'passwordPolicyGet').mockResolvedValueOnce(initialPolicy)
+    const passwordPolicyPutSpy = vi.spyOn(api.settings, 'passwordPolicyPut').mockResolvedValueOnce(savedPolicy)
+    vi.spyOn(api.auth, 'me').mockResolvedValueOnce(authenticatedStatus)
+    vi.spyOn(api.pst, 'catalog').mockResolvedValueOnce(emptyCatalog)
+    vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue(hiddenRulesResponse)
+    vi.spyOn(api.auth, 'users').mockResolvedValue(usersResponse)
+    vi.spyOn(api.activityLog, 'list').mockResolvedValue(activityResponse)
+
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'admin' }))
+    await user.click(await screen.findByRole('button', { name: 'Password policy' }))
+
+    expect(await screen.findByRole('heading', { name: 'Password policy' })).toBeInTheDocument()
+    expect(passwordPolicyGetSpy).toHaveBeenCalledTimes(1)
+    expect(await screen.findByDisplayValue('14')).toBeInTheDocument()
+    expect(await screen.findByRole('checkbox', { name: /Force MFA by default/ })).toBeChecked()
+
+    await user.clear(screen.getByLabelText('Minimum length'))
+    await user.type(screen.getByLabelText('Minimum length'), '16')
+    await user.click(screen.getByRole('checkbox', { name: /Require number/ }))
+    await user.click(screen.getByRole('checkbox', { name: /Force MFA by default/ }))
+    await user.click(screen.getByRole('button', { name: 'Save policy' }))
+
+    expect(passwordPolicyPutSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        minLength: 16,
+        requireNumber: false,
+        enforceMfa: false
+      })
+    )
+    expect(await screen.findByText('Password policy saved.')).toBeInTheDocument()
   })
 
   it('opens the admin password reset modal and generates a temporary password', async () => {

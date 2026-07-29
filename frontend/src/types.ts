@@ -39,6 +39,10 @@ export interface PasswordPolicy {
   enforceMfa: boolean
 }
 
+export interface PasswordPolicyResponse {
+  settings: PasswordPolicy
+}
+
 export interface ReviewState {
   flagged: boolean
   tags: string[]

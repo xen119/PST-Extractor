@@ -756,6 +756,7 @@ describe('pst review api', () => {
     expect(openApi.paths['/api/auth/password-reset/{token}/confirm']).toBeDefined()
     expect(openApi.paths['/api/auth/password-change/confirm']).toBeDefined()
     expect(openApi.paths['/api/auth/users/{username}/password-reset']).toBeDefined()
+    expect(openApi.paths['/api/settings/password-policy']).toBeDefined()
     expect(openApi.paths['/api/auth/users/{username}/mfa/enforce']).toBeDefined()
     expect(openApi.paths['/api/auth/users/{username}/access']).toBeDefined()
     const authStatusSchema = (openApi.components as { schemas?: Record<string, { properties?: Record<string, unknown> }> } | undefined)?.schemas?.AuthStatus
@@ -2818,7 +2819,7 @@ describe('pst review api', () => {
       })
     })
     const loginPayload = await readJson(loginResponse)
-    const cookiePair = getCookiePair(getSetCookieHeader(loginResponse))
+    const cookiePair = getCookieValue(getSetCookieHeader(loginResponse), 'pst-review-session')
     expect(loginResponse.status).toBe(200)
     expect(loginPayload.authenticated).toBe(true)
 
@@ -3313,7 +3314,7 @@ describe('pst review api', () => {
       })
     })
     const loginPayload = await readJson(loginResponse)
-    const cookiePair = getCookiePair(getSetCookieHeader(loginResponse))
+    const cookiePair = getCookieValue(getSetCookieHeader(loginResponse), 'pst-review-session')
     expect(loginResponse.status).toBe(200)
     expect(loginPayload.authenticated).toBe(true)
     expect(loginPayload.canManageUsers).toBe(true)
@@ -4387,7 +4388,7 @@ describe('pst review api', () => {
       })
     })
     const loginPayload = await readJson(loginResponse)
-    const cookiePair = getCookiePair(getSetCookieHeader(loginResponse))
+    const cookiePair = getCookieValue(getSetCookieHeader(loginResponse), 'pst-review-session')
     expect(loginResponse.status).toBe(200)
     expect(loginPayload.authenticated).toBe(true)
 
@@ -4427,6 +4428,17 @@ describe('pst review api', () => {
       fromName: 'Initial Sender',
       fromAddress: 'notify@example.com',
       replyTo: 'reply@example.com'
+    }, {
+      minLength: 14,
+      requireUppercase: false,
+      requireLowercase: true,
+      requireNumber: true,
+      requireSpecial: true,
+      forgotPasswordAfterFailures: 3,
+      lockoutThreshold: 4,
+      lockoutDurationSeconds: 45,
+      resetTokenTtlMinutes: 90,
+      enforceMfa: false
     })
     const sentMessages: Array<{
       settings: Record<string, unknown>
@@ -4479,7 +4491,7 @@ describe('pst review api', () => {
       })
     })
     const loginPayload = await readJson(loginResponse)
-    const cookiePair = getCookiePair(getSetCookieHeader(loginResponse))
+    const cookiePair = getCookieValue(getSetCookieHeader(loginResponse), 'pst-review-session')
     expect(loginResponse.status).toBe(200)
     expect(loginPayload.authenticated).toBe(true)
 
@@ -4494,6 +4506,44 @@ describe('pst review api', () => {
     expect(smtpSettingsPayload.settings.host).toBe('smtp.initial.local')
     expect(smtpSettingsPayload.settings.hasPassword).toBe(true)
     expect(smtpSettingsPayload.settings.password).toBeUndefined()
+
+    const passwordPolicyResponse = await fetch(`${started.baseUrl}/api/settings/password-policy`, {
+      headers: {
+        Cookie: cookiePair
+      }
+    })
+    const passwordPolicyPayload = await readJson(passwordPolicyResponse)
+    expect(passwordPolicyResponse.status).toBe(200)
+    expect(passwordPolicyPayload.settings.minLength).toBe(14)
+    expect(passwordPolicyPayload.settings.enforceMfa).toBe(false)
+
+    const passwordPolicyUpdateResponse = await fetch(`${started.baseUrl}/api/settings/password-policy`, {
+      method: 'PUT',
+      headers: {
+        Cookie: cookiePair,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        minLength: 16,
+        requireUppercase: true,
+        requireLowercase: false,
+        requireNumber: false,
+        requireSpecial: true,
+        forgotPasswordAfterFailures: 4,
+        lockoutThreshold: 6,
+        lockoutDurationSeconds: 60,
+        resetTokenTtlMinutes: 120,
+        enforceMfa: false
+      })
+    })
+    const passwordPolicyUpdatePayload = await readJson(passwordPolicyUpdateResponse)
+    expect(passwordPolicyUpdateResponse.status).toBe(200)
+    expect(passwordPolicyUpdatePayload.settings.minLength).toBe(16)
+    expect(passwordPolicyUpdatePayload.settings.requireLowercase).toBe(false)
+
+    const storedPasswordPolicy = await settingsStore.getPasswordPolicy()
+    expect(storedPasswordPolicy.minLength).toBe(16)
+    expect(storedPasswordPolicy.enforceMfa).toBe(false)
 
     const updateResponse = await fetch(`${started.baseUrl}/api/settings/smtp`, {
       method: 'PUT',
@@ -4576,7 +4626,7 @@ describe('pst review api', () => {
         password: 'password123'
       })
     })
-    const bobCookiePair = getCookiePair(getSetCookieHeader(bobLoginResponse))
+    const bobCookiePair = getCookieValue(getSetCookieHeader(bobLoginResponse), 'pst-review-session')
     expect(bobLoginResponse.status).toBe(200)
 
     const bobSettingsResponse = await fetch(`${started.baseUrl}/api/settings/smtp`, {
@@ -4651,7 +4701,7 @@ describe('pst review api', () => {
         password: 'pst-extractor'
       })
     })
-    const restartedCookiePair = getCookiePair(getSetCookieHeader(restartedLoginResponse))
+    const restartedCookiePair = getCookieValue(getSetCookieHeader(restartedLoginResponse), 'pst-review-session')
     expect(restartedLoginResponse.status).toBe(200)
 
     const restartedSettingsResponse = await fetch(`${restarted.baseUrl}/api/settings/smtp`, {

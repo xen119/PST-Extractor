@@ -14,6 +14,7 @@ import type {
   PasswordResetConfirmResponse,
   PasswordResetLookupResponse,
   PasswordResetRequestResponse,
+  PasswordPolicyResponse,
   PstCatalogResponse,
   SearchResponse,
   SessionOpenResponse,
@@ -180,6 +181,13 @@ export const api = {
       })
   },
   settings: {
+    passwordPolicyGet: () => requestJson<PasswordPolicyResponse>('/api/settings/password-policy', { cache: 'no-store' }),
+    passwordPolicyPut: (payload: Record<string, unknown>) =>
+      requestJson<PasswordPolicyResponse>('/api/settings/password-policy', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }),
     smtpGet: () => requestJson<SmtpSettingsResponse>('/api/settings/smtp', { cache: 'no-store' }),
     smtpPut: (payload: Record<string, unknown>) =>
       requestJson<SmtpSettingsResponse>('/api/settings/smtp', {

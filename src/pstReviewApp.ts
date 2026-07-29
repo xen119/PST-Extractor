@@ -40,7 +40,9 @@ import {
 } from './extraction'
 import {
   buildPasswordPolicyDefaultsFromEnv,
+  normalizePasswordPolicyInput,
   validatePasswordAgainstPolicy,
+  type PasswordPolicyInput,
   type PasswordPolicyRecord
 } from './passwordPolicy'
 import {
@@ -269,6 +271,10 @@ interface ActivityLogResponse {
 
 interface SmtpSettingsResponse {
   settings: ReturnType<typeof buildSmtpSettingsView>
+}
+
+interface PasswordPolicyResponse {
+  settings: PasswordPolicyRecord
 }
 
 interface SmtpTestRequestBody {
@@ -5520,6 +5526,126 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           session,
           action: 'settings.smtp.update',
           target: 'smtp settings',
+          outcome: 'failure',
+          metadata: {
+            reason: error instanceof Error ? error.message : String(error)
+          }
+        })
+      }
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.passwordPolicySettings, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        responseJson(res, 400, {
+          error: 'Authentication is disabled'
+        })
+        return
+      }
+
+      const session = getAuthSessionFromRequest(req)
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      if (!isAdminAuthSession(session, authConfig)) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'settings.password_policy.read',
+          target: 'password policy',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Admin access required'
+        })
+        return
+      }
+
+      responseJson(res, 200, {
+        settings: await appSettingsStore.getPasswordPolicy()
+      } satisfies PasswordPolicyResponse)
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.put(API_ROUTES.passwordPolicySettings, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      if (!authConfig.enabled) {
+        responseJson(res, 400, {
+          error: 'Authentication is disabled'
+        })
+        return
+      }
+
+      const session = getAuthSessionFromRequest(req)
+      if (!session) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      if (!isAdminAuthSession(session, authConfig)) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'settings.password_policy.update',
+          target: 'password policy',
+          outcome: 'denied',
+          metadata: {
+            reason: 'Admin access required'
+          }
+        })
+        responseJson(res, 403, {
+          error: 'Admin access required'
+        })
+        return
+      }
+
+      const body = normalizePasswordPolicyInput((req.body || {}) as PasswordPolicyInput)
+      const updated = await appSettingsStore.updatePasswordPolicy(body)
+      recordAuditEvent({
+        req,
+        session,
+        action: 'settings.password_policy.update',
+        target: 'password policy',
+        outcome: 'success',
+        metadata: {
+          minLength: updated.minLength,
+          requireUppercase: updated.requireUppercase,
+          requireLowercase: updated.requireLowercase,
+          requireNumber: updated.requireNumber,
+          requireSpecial: updated.requireSpecial,
+          forgotPasswordAfterFailures: updated.forgotPasswordAfterFailures,
+          lockoutThreshold: updated.lockoutThreshold,
+          lockoutDurationSeconds: updated.lockoutDurationSeconds,
+          resetTokenTtlMinutes: updated.resetTokenTtlMinutes,
+          enforceMfa: updated.enforceMfa
+        }
+      })
+      responseJson(res, 200, {
+        settings: updated
+      } satisfies PasswordPolicyResponse)
+    } catch (error) {
+      const session = getAuthSessionFromRequest(req)
+      if (session) {
+        recordAuditEvent({
+          req,
+          session,
+          action: 'settings.password_policy.update',
+          target: 'password policy',
           outcome: 'failure',
           metadata: {
             reason: error instanceof Error ? error.message : String(error)

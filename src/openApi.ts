@@ -618,6 +618,67 @@ function smtpSettingsUpdateRequestSchema(): Record<string, unknown> {
   }
 }
 
+function passwordPolicySchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: [
+      'minLength',
+      'requireUppercase',
+      'requireLowercase',
+      'requireNumber',
+      'requireSpecial',
+      'forgotPasswordAfterFailures',
+      'lockoutThreshold',
+      'lockoutDurationSeconds',
+      'resetTokenTtlMinutes',
+      'enforceMfa'
+    ],
+    properties: {
+      minLength: { type: 'integer' },
+      requireUppercase: { type: 'boolean' },
+      requireLowercase: { type: 'boolean' },
+      requireNumber: { type: 'boolean' },
+      requireSpecial: { type: 'boolean' },
+      forgotPasswordAfterFailures: { type: 'integer' },
+      lockoutThreshold: { type: 'integer' },
+      lockoutDurationSeconds: { type: 'integer' },
+      resetTokenTtlMinutes: { type: 'integer' },
+      enforceMfa: { type: 'boolean' }
+    }
+  }
+}
+
+function passwordPolicyResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: true,
+    required: ['settings'],
+    properties: {
+      settings: passwordPolicySchema()
+    }
+  }
+}
+
+function passwordPolicyUpdateRequestSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      minLength: { type: ['integer', 'string'] },
+      requireUppercase: { type: 'boolean' },
+      requireLowercase: { type: 'boolean' },
+      requireNumber: { type: 'boolean' },
+      requireSpecial: { type: 'boolean' },
+      forgotPasswordAfterFailures: { type: ['integer', 'string'] },
+      lockoutThreshold: { type: ['integer', 'string'] },
+      lockoutDurationSeconds: { type: ['integer', 'string'] },
+      resetTokenTtlMinutes: { type: ['integer', 'string'] },
+      enforceMfa: { type: 'boolean' }
+    }
+  }
+}
+
 function smtpTestRequestSchema(): Record<string, unknown> {
   return {
     allOf: [
@@ -1443,6 +1504,36 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
           },
           responses: {
             200: jsonResponse(smtpSettingsResponseSchema()),
+            ...errorResponse(400, 'Authentication is disabled'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Admin access required')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.passwordPolicySettings)]: {
+        get: {
+          tags: ['Settings'],
+          summary: 'Read the current password policy settings',
+          responses: {
+            200: jsonResponse(passwordPolicyResponseSchema()),
+            ...errorResponse(400, 'Authentication is disabled'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Admin access required')
+          }
+        },
+        put: {
+          tags: ['Settings'],
+          summary: 'Update the password policy settings',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: passwordPolicyUpdateRequestSchema()
+              }
+            }
+          },
+          responses: {
+            200: jsonResponse(passwordPolicyResponseSchema()),
             ...errorResponse(400, 'Authentication is disabled'),
             ...errorResponse(401, 'Authentication required'),
             ...errorResponse(403, 'Admin access required')
@@ -2712,6 +2803,9 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
         PasswordChangeConfirmRequest: passwordResetConfirmRequestSchema(),
         AuthUserPasswordResetRequest: authUserPasswordResetRequestSchema(),
         AuthUserPasswordResetResponse: authUserPasswordResetResponseSchema(),
+        PasswordPolicy: passwordPolicySchema(),
+        PasswordPolicyResponse: passwordPolicyResponseSchema(),
+        PasswordPolicyUpdateRequest: passwordPolicyUpdateRequestSchema(),
         SmtpSettings: smtpSettingsSchema(),
         SmtpSettingsResponse: smtpSettingsResponseSchema(),
         SmtpSettingsUpdateRequest: smtpSettingsUpdateRequestSchema(),

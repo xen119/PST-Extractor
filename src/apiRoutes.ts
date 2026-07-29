@@ -19,6 +19,7 @@ export const API_ROUTES = {
   authUserMfaReset: '/api/auth/users/:username/mfa/reset',
   authUserMfaEnforce: '/api/auth/users/:username/mfa/enforce',
   authUserPasswordReset: '/api/auth/users/:username/password-reset',
+  passwordPolicySettings: '/api/settings/password-policy',
   smtpSettings: '/api/settings/smtp',
   smtpSettingsTest: '/api/settings/smtp/test',
   activityLog: '/api/activity-log',

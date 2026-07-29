@@ -63,6 +63,8 @@ import type {
   MfaEnrollmentStartResponse,
   PasswordResetLookupResponse,
   PageResponse,
+  PasswordPolicy,
+  PasswordPolicyResponse,
   PstCatalogResponse,
   SearchSourceType,
   SessionOpenResponse,
@@ -105,6 +107,19 @@ const DEFAULT_SMTP_FORM: SmtpFormState = {
   fromName: '',
   fromAddress: '',
   replyTo: ''
+}
+
+const DEFAULT_PASSWORD_POLICY_FORM: PasswordPolicy = {
+  minLength: 12,
+  requireUppercase: true,
+  requireLowercase: true,
+  requireNumber: true,
+  requireSpecial: true,
+  forgotPasswordAfterFailures: 2,
+  lockoutThreshold: 5,
+  lockoutDurationSeconds: 30,
+  resetTokenTtlMinutes: 60,
+  enforceMfa: false
 }
 
 const SEARCH_INDEX_REFRESH_POLL_INTERVAL_MS = 2000
@@ -406,6 +421,12 @@ export function App() {
   const [smtpForm, setSmtpForm] = React.useState<SmtpFormState>(DEFAULT_SMTP_FORM)
   const [smtpPassword, setSmtpPassword] = React.useState('')
   const [smtpTestRecipient, setSmtpTestRecipient] = React.useState('')
+
+  const [passwordPolicyDialogOpen, setPasswordPolicyDialogOpen] = React.useState(false)
+  const [passwordPolicyLoading, setPasswordPolicyLoading] = React.useState(false)
+  const [passwordPolicyError, setPasswordPolicyError] = React.useState('')
+  const [passwordPolicyMessage, setPasswordPolicyMessage] = React.useState('')
+  const [passwordPolicyForm, setPasswordPolicyForm] = React.useState<PasswordPolicy>(DEFAULT_PASSWORD_POLICY_FORM)
 
   const [activityDialogOpen, setActivityDialogOpen] = React.useState(false)
   const [activityLoading, setActivityLoading] = React.useState(false)
@@ -1738,6 +1759,14 @@ export function App() {
   }, [canManageUsers, smtpDialogOpen])
 
   React.useEffect(() => {
+    if (!passwordPolicyDialogOpen || !canManageUsers) {
+      return
+    }
+
+    void loadPasswordPolicy()
+  }, [canManageUsers, passwordPolicyDialogOpen])
+
+  React.useEffect(() => {
     if (!activityDialogOpen || !canManageUsers) {
       return
     }
@@ -2324,6 +2353,31 @@ export function App() {
     }
   }
 
+  async function loadPasswordPolicy(): Promise<void> {
+    setPasswordPolicyLoading(true)
+    setPasswordPolicyError('')
+    setPasswordPolicyMessage('')
+    try {
+      const response: PasswordPolicyResponse = await api.settings.passwordPolicyGet()
+      setPasswordPolicyForm({
+        minLength: response.settings.minLength,
+        requireUppercase: response.settings.requireUppercase,
+        requireLowercase: response.settings.requireLowercase,
+        requireNumber: response.settings.requireNumber,
+        requireSpecial: response.settings.requireSpecial,
+        forgotPasswordAfterFailures: response.settings.forgotPasswordAfterFailures,
+        lockoutThreshold: response.settings.lockoutThreshold,
+        lockoutDurationSeconds: response.settings.lockoutDurationSeconds,
+        resetTokenTtlMinutes: response.settings.resetTokenTtlMinutes,
+        enforceMfa: response.settings.enforceMfa
+      })
+    } catch (error) {
+      setPasswordPolicyError(error instanceof Error ? error.message : 'Unable to load password policy')
+    } finally {
+      setPasswordPolicyLoading(false)
+    }
+  }
+
   async function saveSmtpSettings(): Promise<void> {
     setSmtpLoading(true)
     setSmtpError('')
@@ -2349,6 +2403,32 @@ export function App() {
       setSmtpError(error instanceof Error ? error.message : 'Unable to save SMTP settings')
     } finally {
       setSmtpLoading(false)
+    }
+  }
+
+  async function savePasswordPolicy(): Promise<void> {
+    setPasswordPolicyLoading(true)
+    setPasswordPolicyError('')
+    setPasswordPolicyMessage('')
+    try {
+      const response: PasswordPolicyResponse = await api.settings.passwordPolicyPut(passwordPolicyForm)
+      setPasswordPolicyForm({
+        minLength: response.settings.minLength,
+        requireUppercase: response.settings.requireUppercase,
+        requireLowercase: response.settings.requireLowercase,
+        requireNumber: response.settings.requireNumber,
+        requireSpecial: response.settings.requireSpecial,
+        forgotPasswordAfterFailures: response.settings.forgotPasswordAfterFailures,
+        lockoutThreshold: response.settings.lockoutThreshold,
+        lockoutDurationSeconds: response.settings.lockoutDurationSeconds,
+        resetTokenTtlMinutes: response.settings.resetTokenTtlMinutes,
+        enforceMfa: response.settings.enforceMfa
+      })
+      setPasswordPolicyMessage('Password policy saved.')
+    } catch (error) {
+      setPasswordPolicyError(error instanceof Error ? error.message : 'Unable to save password policy')
+    } finally {
+      setPasswordPolicyLoading(false)
     }
   }
 
@@ -2984,6 +3064,16 @@ export function App() {
             <Button
               variant="ghost"
               className="w-full justify-start gap-3"
+              onClick={() => setPasswordPolicyDialogOpen(true)}
+            >
+              <ShieldCheck className="h-4 w-4" />
+              Password policy
+            </Button>
+          </PopoverClose>
+          <PopoverClose asChild>
+            <Button
+              variant="ghost"
+              className="w-full justify-start gap-3"
               onClick={() => setActivityDialogOpen(true)}
             >
               <Activity className="h-4 w-4" />
@@ -3482,6 +3572,24 @@ export function App() {
         }}
         onSendTest={() => {
           void sendSmtpTest()
+        }}
+      />
+
+      <PasswordPolicyDialog
+        open={passwordPolicyDialogOpen}
+        loading={passwordPolicyLoading}
+        error={passwordPolicyError}
+        message={passwordPolicyMessage}
+        form={passwordPolicyForm}
+        onClose={() => {
+          setPasswordPolicyDialogOpen(false)
+        }}
+        onRefresh={() => {
+          void loadPasswordPolicy()
+        }}
+        onFormChange={setPasswordPolicyForm}
+        onSave={() => {
+          void savePasswordPolicy()
         }}
       />
 
@@ -4401,6 +4509,189 @@ function SmtpSettingsDialog({
                 </div>
                 <div className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-4 text-sm text-[color:var(--muted)]">
                   The SMTP password is never returned to the browser. Leave it blank to keep the stored secret.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function PasswordPolicyDialog({
+  open,
+  loading,
+  error,
+  message,
+  form,
+  onClose,
+  onRefresh,
+  onFormChange,
+  onSave
+}: {
+  open: boolean
+  loading: boolean
+  error: string
+  message: string
+  form: PasswordPolicy
+  onClose: () => void
+  onRefresh: () => void
+  onFormChange: (value: PasswordPolicy) => void
+  onSave: () => void
+}) {
+  return (
+    <Dialog open={open}>
+      <DialogContent className="w-[min(98vw,1180px)]">
+        <div className="flex h-[84vh] flex-col overflow-hidden">
+          <div className="flex items-start justify-between gap-4 border-b border-[color:var(--line)] px-6 py-5">
+            <div>
+              <div className="text-xs font-semibold tracking-[0.18em] text-[color:var(--muted)] uppercase">Settings</div>
+              <DialogTitle className="mt-1 text-2xl">Password policy</DialogTitle>
+              <DialogDescription>Control local sign-in failure thresholds and global password requirements.</DialogDescription>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" onClick={onRefresh}>
+                <RefreshCw className="h-4 w-4" />
+                Refresh
+              </Button>
+              <Button variant="ghost" onClick={onClose}>
+                Close
+              </Button>
+            </div>
+          </div>
+          <div className="grid min-h-0 flex-1 gap-4 overflow-hidden p-6 xl:grid-cols-[1.2fr_0.8fr]">
+            <div className="panel-surface-strong min-h-0 overflow-auto p-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
+                  Minimum length
+                  <Input
+                    className="mt-2"
+                    type="number"
+                    min={1}
+                    value={form.minLength}
+                    onChange={(event) => onFormChange({ ...form, minLength: Number(event.target.value || 0) })}
+                  />
+                </label>
+                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
+                  Forgot password after failures
+                  <Input
+                    className="mt-2"
+                    type="number"
+                    min={1}
+                    value={form.forgotPasswordAfterFailures}
+                    onChange={(event) =>
+                      onFormChange({ ...form, forgotPasswordAfterFailures: Number(event.target.value || 0) })
+                    }
+                  />
+                </label>
+                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
+                  Lockout threshold
+                  <Input
+                    className="mt-2"
+                    type="number"
+                    min={1}
+                    value={form.lockoutThreshold}
+                    onChange={(event) => onFormChange({ ...form, lockoutThreshold: Number(event.target.value || 0) })}
+                  />
+                </label>
+                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
+                  Lockout duration seconds
+                  <Input
+                    className="mt-2"
+                    type="number"
+                    min={1}
+                    value={form.lockoutDurationSeconds}
+                    onChange={(event) =>
+                      onFormChange({ ...form, lockoutDurationSeconds: Number(event.target.value || 0) })
+                    }
+                  />
+                </label>
+                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
+                  Reset token TTL minutes
+                  <Input
+                    className="mt-2"
+                    type="number"
+                    min={1}
+                    value={form.resetTokenTtlMinutes}
+                    onChange={(event) =>
+                      onFormChange({ ...form, resetTokenTtlMinutes: Number(event.target.value || 0) })
+                    }
+                  />
+                </label>
+                <div className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
+                    Requirements
+                  </div>
+                  <div className="mt-3 space-y-3">
+                    {(
+                      [
+                        ['Require uppercase', 'requireUppercase'],
+                        ['Require lowercase', 'requireLowercase'],
+                        ['Require number', 'requireNumber'],
+                        ['Require special character', 'requireSpecial'],
+                        ['Force MFA by default', 'enforceMfa']
+                      ] as const
+                    ).map(([label, field]) => (
+                      <label key={field} className="flex items-center justify-between gap-4 text-sm text-[color:var(--text)]">
+                        <span>{label}</span>
+                        <input
+                          type="checkbox"
+                          checked={form[field]}
+                          onChange={(event) =>
+                            onFormChange({
+                              ...form,
+                              [field]: event.target.checked
+                            })
+                          }
+                        />
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {error ? <div className="mt-4 rounded-2xl border border-[color:rgba(220,38,38,0.2)] bg-[color:rgba(220,38,38,0.08)] px-4 py-3 text-sm text-[color:var(--danger)]">{error}</div> : null}
+              {message ? <div className="mt-4 rounded-2xl border border-[color:var(--accent-soft)] bg-[color:var(--accent-soft)] px-4 py-3 text-sm text-[color:var(--accent-strong)]">{message}</div> : null}
+
+              <div className="mt-4 flex items-center justify-end gap-2">
+                <Button variant="ghost" onClick={onClose}>Cancel</Button>
+                <Button onClick={onSave} disabled={loading}>
+                  {loading ? 'Saving...' : 'Save policy'}
+                </Button>
+              </div>
+            </div>
+
+            <div className="panel-surface-strong min-h-0 overflow-auto p-4">
+              <div className="text-sm font-semibold text-[color:var(--text)]">Effect</div>
+              <div className="mt-2 text-sm leading-6 text-[color:var(--muted)]">
+                These values affect local credentials, admin resets, and the self-service recovery path.
+              </div>
+              <div className="mt-4 space-y-3">
+                <div className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
+                    Self-service reset
+                  </div>
+                  <div className="mt-2 text-sm text-[color:var(--text)]">
+                    Shown after <Badge>{form.forgotPasswordAfterFailures}</Badge> failed sign-ins.
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
+                    Account lockout
+                  </div>
+                  <div className="mt-2 text-sm text-[color:var(--text)]">
+                    Locks after <Badge>{form.lockoutThreshold}</Badge> failures for{' '}
+                    <Badge>{form.lockoutDurationSeconds}s</Badge>.
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]">
+                    Temporary passwords
+                  </div>
+                  <div className="mt-2 text-sm text-[color:var(--text)]">
+                    Reset links expire after <Badge>{form.resetTokenTtlMinutes}m</Badge>. Admin temp passwords still force a change on next sign-in.
+                  </div>
                 </div>
               </div>
             </div>
