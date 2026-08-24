@@ -410,6 +410,7 @@ interface SearchRequestQuery {
   reviewFlagged?: boolean
   reviewTagged?: boolean
   reviewTag?: string
+  collapseDuplicates?: boolean
 }
 
 interface WorkspaceItemsRequestQuery extends SearchRequestQuery {
@@ -1099,56 +1100,59 @@ function createApiSecurityMiddleware(
 }
 
 function parsePositiveInt(
-  value: string | string[] | undefined,
+  value: unknown,
   fallback: number
 ): number {
   const raw = Array.isArray(value) ? value[0] : value
   if (!raw) {
     return fallback
   }
-  const parsed = Number.parseInt(raw, 10)
+  const parsed = Number.parseInt(String(raw), 10)
   if (Number.isNaN(parsed) || parsed < 1) {
     return fallback
   }
   return parsed
 }
 
-function parseBoolean(value: string | string[] | undefined, fallback = false): boolean {
+function parseBoolean(value: unknown, fallback = false): boolean {
   const raw = Array.isArray(value) ? value[0] : value
-  if (raw === undefined) {
+  if (raw === undefined || raw === null) {
     return fallback
   }
-  return !['0', 'false', 'no', 'off'].includes(raw.trim().toLowerCase())
+  if (typeof raw === 'boolean') {
+    return raw
+  }
+  return !['0', 'false', 'no', 'off'].includes(String(raw).trim().toLowerCase())
 }
 
-function parseSort(value: string | string[] | undefined): string {
+function parseSort(value: unknown): string {
   const raw = Array.isArray(value) ? value[0] : value
   if (!raw) {
     return 'date-desc'
   }
-  const normalized = raw.trim().toLowerCase()
+  const normalized = String(raw).trim().toLowerCase()
   if (normalized === 'order' || normalized === 'folder-order') {
     return 'order'
   }
   return 'date-desc'
 }
 
-function parseSearchMode(value: string | string[] | undefined): 'and' | 'or' {
+function parseSearchMode(value: unknown): 'and' | 'or' {
   const raw = Array.isArray(value) ? value[0] : value
   if (!raw) {
     return 'and'
   }
-  return raw.trim().toLowerCase() === 'or' ? 'or' : 'and'
+  return String(raw).trim().toLowerCase() === 'or' ? 'or' : 'and'
 }
 
-function parseQueryText(value: string | string[] | undefined): string {
+function parseQueryText(value: unknown): string {
   const raw = Array.isArray(value) ? value[0] : value
   return normalizeText(raw)
 }
 
 function parseSearchModeFromQuery(
   query: string,
-  fallbackMode: string | string[] | undefined
+  fallbackMode: unknown
 ): 'and' | 'or' {
   const text = normalizeText(query)
   if (text) {
@@ -1171,16 +1175,16 @@ function parseSearchModeFromQuery(
   return parseSearchMode(fallbackMode)
 }
 
-function parseZeroBasedInt(value: string | string[] | undefined): number {
+function parseZeroBasedInt(value: unknown): number {
   const raw = Array.isArray(value) ? value[0] : value
   if (raw === undefined) {
     return -1
   }
-  const parsed = Number.parseInt(raw, 10)
+  const parsed = Number.parseInt(String(raw), 10)
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : -1
 }
 
-function parseReviewFilters(value: Record<string, string | string[] | undefined>): ListFolderOptions {
+function parseReviewFilters(value: Record<string, unknown>): ListFolderOptions {
   const queryValue =
     value.q !== undefined && value.q !== null && value.q !== ''
       ? value.q
@@ -2760,6 +2764,20 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     return 'loaded-items.csv'
   }
 
+  function buildAllItemsCsvFileName(sourceType: string): string {
+    const normalized = normalizeText(sourceType).toLowerCase()
+    if (normalized === 'teams') {
+      return 'all-items-teams.csv'
+    }
+    if (normalized === 'sharepoint') {
+      return 'all-items-sharepoint.csv'
+    }
+    if (normalized === 'mailbox') {
+      return 'all-items-mailbox.csv'
+    }
+    return 'all-items.csv'
+  }
+
   function buildLoadedItemsCsvHeader(): string {
     return [
       'sourceType',
@@ -3072,6 +3090,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
     const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
     const reviewerUsername = getReviewOwnerUsername(authSession)
     const filters = parseReviewFilters(query as Record<string, string | string[] | undefined>)
+    const collapseDuplicates = parseBoolean(query.collapseDuplicates, false)
     const workspaceMode = normalizeText(query.workspaceMode).toLowerCase() === 'search' ? 'search' : 'folder'
 
     if (workspaceMode === 'folder') {
@@ -3197,7 +3216,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       sort: filters.sort,
       reviewFlaggedOnly: filters.reviewFlaggedOnly,
       reviewTaggedOnly: filters.reviewTaggedOnly,
-      reviewTag: filters.reviewTag
+      reviewTag: filters.reviewTag,
+      collapseDuplicates
     })
 
     return {
@@ -6829,6 +6849,7 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
       const reviewerUsername = getReviewOwnerUsername(authSession)
       const filters = parseReviewFilters(req.query as Record<string, string | string[] | undefined>)
+      const collapseDuplicates = parseBoolean(req.query.collapseDuplicates, false)
       const sourceType = parseSearchSourceType(req.query.sourceType)
       const requestedScope = parseSearchScope(req.query.scope) as SearchScope
       const requestedScopePath = normalizeScopePath(req.query.scopePath)
@@ -6987,7 +7008,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         pageSize: filters.pageSize,
         reviewFlaggedOnly: filters.reviewFlaggedOnly,
         reviewTaggedOnly: filters.reviewTaggedOnly,
-        reviewTag: filters.reviewTag
+        reviewTag: filters.reviewTag,
+        collapseDuplicates
       })
       recordAuditEvent({
         req,
@@ -7447,6 +7469,44 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
           scopePath: '',
           sourceType: 'all',
           itemCount
+        }
+      })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.allItemsCsv, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store')
+      const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      const loadedItems = await collectLoadedReviewableItems(
+        req.query as WorkspaceItemsRequestQuery,
+        authSession
+      )
+      const csv = buildLoadedItemsCsv(loadedItems.items)
+      res
+        .status(200)
+        .type('text/csv; charset=utf-8')
+        .set('Content-Disposition', `attachment; filename="${buildAllItemsCsvFileName(loadedItems.sourceType)}"`)
+        .send(csv)
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'items.export.csv',
+        target: loadedItems.scopeLabel,
+        outcome: 'success',
+        metadata: {
+          scopePath: loadedItems.scopePath,
+          sourceType: loadedItems.sourceType,
+          itemCount: loadedItems.items.length
         }
       })
     } catch (error) {

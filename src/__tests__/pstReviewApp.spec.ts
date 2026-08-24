@@ -769,6 +769,7 @@ describe('pst review api', () => {
     expect(openApi.paths['/api/sessions/{sessionId}/messages/{messageId}/review']).toBeDefined()
     expect(openApi.paths['/api/items/{itemId}/review']).toBeDefined()
     expect(openApi.paths['/api/exports/flagged.zip']).toBeDefined()
+    expect(openApi.paths['/api/exports/all-items.csv']).toBeDefined()
     expect(openApi.paths['/api/auth/password-reset/request']).toBeDefined()
     expect(openApi.paths['/api/auth/password-reset/{token}']).toBeDefined()
     expect(openApi.paths['/api/auth/password-reset/{token}/confirm']).toBeDefined()
@@ -788,6 +789,113 @@ describe('pst review api', () => {
     const docsHtml = await docsResponse.text()
     expect(docsHtml).toContain('SwaggerUIBundle')
     expect(docsHtml).toContain('/api/openapi.json')
+  })
+
+  it('exports newest conversation representatives and reviews only the selected item', async () => {
+    rootDir = makeTempDir('pst-review-duplicates-')
+    const pstDir = path.join(rootDir, 'PST')
+    fs.mkdirSync(path.join(pstDir, 'Case1', 'Search1'), { recursive: true })
+
+    const alphaMailboxPath = path.join(pstDir, 'Case1', 'Search1', 'alpha.pst')
+    const betaMailboxPath = path.join(pstDir, 'Case1', 'Search1', 'beta.pst')
+    fs.writeFileSync(alphaMailboxPath, '')
+    fs.writeFileSync(betaMailboxPath, '')
+
+    const olderMessageId = 'message:older'
+    const newerMessageId = 'message:newer'
+    const duplicateDocA = makeSearchIndexDocument({
+      mailboxKey: alphaMailboxPath,
+      fileName: 'alpha.pst',
+      mailboxName: 'Alpha',
+      messageId: olderMessageId,
+      descriptorId: 'alpha-1',
+      folderId: 'folder:alpha',
+      folderPath: 'Inbox',
+      subject: 'Shared contract',
+      originalSubject: 'Shared contract',
+      senderName: 'Alice Example',
+      senderEmailAddress: 'alice@example.com',
+      recipientText: 'Bob Example <bob@example.com>',
+      displayTo: 'Bob Example <bob@example.com>',
+      resolvedDisplayTo: 'Bob Example <bob@example.com>',
+      bodySearchText: 'contract body text',
+      searchText: 'shared contract alice example alice@example.com bob example bob@example.com contract body text ipm.note mail',
+      searchTokens: ['shared', 'contract', 'alice', 'example', 'bob'],
+      addressValues: ['alice@example.com', 'bob@example.com'],
+      subjectValues: ['shared contract'],
+      sortDate: '2024-01-02T00:00:00.000Z',
+      sortDateMs: Date.parse('2024-01-02T00:00:00.000Z'),
+      updatedAt: new Date('2024-01-02T00:00:00.000Z').toISOString(),
+      mailboxDetail: { conversationTopic: 'Shared contract' } as any
+    })
+    const duplicateDocB = makeSearchIndexDocument({
+      mailboxKey: betaMailboxPath,
+      fileName: 'beta.pst',
+      mailboxName: 'Beta',
+      messageId: newerMessageId,
+      descriptorId: 'beta-1',
+      folderId: 'folder:beta',
+      folderPath: 'Inbox',
+      subject: 'Shared contract',
+      originalSubject: 'Shared contract',
+      senderName: 'Alice Example',
+      senderEmailAddress: 'alice@example.com',
+      recipientText: 'Bob Example <bob@example.com>',
+      displayTo: 'Bob Example <bob@example.com>',
+      resolvedDisplayTo: 'Bob Example <bob@example.com>',
+      bodySearchText: 'contract body text',
+      searchText: 'shared contract alice example alice@example.com bob example bob@example.com contract body text ipm.note mail',
+      searchTokens: ['shared', 'contract', 'alice', 'example', 'bob'],
+      addressValues: ['alice@example.com', 'bob@example.com'],
+      subjectValues: ['shared contract'],
+      sortDate: '2024-01-03T00:00:00.000Z',
+      sortDateMs: Date.parse('2024-01-03T00:00:00.000Z'),
+      updatedAt: new Date('2024-01-03T00:00:00.000Z').toISOString(),
+      mailboxDetail: { conversationTopic: 'Shared contract' } as any
+    })
+
+    const seededSearchIndexStore = new MemorySearchIndexStore()
+    await seededSearchIndexStore.replaceMailboxDocuments(alphaMailboxPath, [duplicateDocA])
+    await seededSearchIndexStore.replaceMailboxDocuments(betaMailboxPath, [duplicateDocB])
+
+    const started = await startApp(pstDir, undefined, undefined, undefined, undefined, undefined, {
+      searchIndexStore: seededSearchIndexStore,
+      skipInitialRefresh: true
+    })
+    server = started.server
+    reviewStore = started.reviewStore
+    searchIndexStore = started.searchIndexStore
+
+    const csvResponse = await fetch(
+      `${started.baseUrl}/api/exports/all-items.csv?workspaceMode=search&scope=all&sourceType=mailbox&query=contract&mode=and&mailOnly=1&sort=date-desc&collapseDuplicates=1`
+    )
+    const csvText = await csvResponse.text()
+    expect(csvResponse.ok).toBe(true)
+    const csvLines = csvText.trim().split(/\r?\n/).filter(Boolean)
+    expect(csvLines).toHaveLength(2)
+    expect(csvLines[1]).toContain('Shared contract')
+
+    const itemId = buildMailboxSearchDocumentId(betaMailboxPath, newerMessageId)
+    const patch = await requestJson(`${started.baseUrl}/api/items/${encodeURIComponent(itemId)}/review`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        flagged: true,
+        tags: ['Review']
+      })
+    })
+    expect(patch.review.flagged).toBe(true)
+
+    const selected = await started.searchIndexStore.findDocumentById(itemId)
+    const hiddenOlderCopy = await started.searchIndexStore.findDocumentById(
+      buildMailboxSearchDocumentId(alphaMailboxPath, olderMessageId)
+    )
+    expect(selected?.review.flagged).toBe(true)
+    expect(selected?.review.tags).toEqual(['Review'])
+    expect(hiddenOlderCopy?.review.flagged).toBe(false)
+    expect(hiddenOlderCopy?.review.tags).toEqual([])
   })
 
   it('reuses an existing mailbox session when the same PST is opened repeatedly', async () => {

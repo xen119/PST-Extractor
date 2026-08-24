@@ -475,6 +475,173 @@ describe('search index cache', () => {
     expect(restored.items[0].messageId).toBe('message:1')
   })
 
+  it('collapses mailbox conversation threads to the newest matching item', async () => {
+    const store = new MemorySearchIndexStore()
+
+    await store.replaceMailboxDocuments('C:/PST/Case1/Search1/alpha.pst', [
+      makeDocument({
+        mailboxKey: 'C:/PST/Case1/Search1/alpha.pst',
+        fileName: 'alpha.pst',
+        mailboxName: 'Alpha',
+        messageId: 'message:older',
+        descriptorId: 'alpha-1',
+        folderId: 'folder:alpha',
+        folderPath: 'Inbox',
+        subject: 'Shared contract',
+        originalSubject: 'Shared contract',
+        senderName: 'Alice Example',
+        senderEmailAddress: 'alice@example.com',
+        recipientText: 'Bob Example <bob@example.com>',
+        displayTo: 'Bob Example <bob@example.com>',
+        resolvedDisplayTo: 'Bob Example <bob@example.com>',
+        bodySearchText: 'legacy-term contract body text',
+        searchText: 'shared contract legacy-term alice example alice@example.com bob example bob@example.com contract body text ipm.note mail',
+        searchTokens: ['shared', 'contract', 'legacy-term', 'alice', 'example', 'bob'],
+        addressValues: ['alice@example.com', 'bob@example.com'],
+        subjectValues: ['shared contract'],
+        sortDateMs: Date.parse('2024-01-01T00:00:00.000Z'),
+        sortDate: '2024-01-01T00:00:00.000Z',
+        updatedAt: new Date('2024-01-01T00:00:00.000Z').toISOString(),
+        mailboxDetail: { conversationTopic: 'Project Alpha' } as any
+      })
+    ])
+    await store.replaceMailboxDocuments('C:/PST/Case1/Search1/beta.pst', [
+      makeDocument({
+        mailboxKey: 'C:/PST/Case1/Search1/beta.pst',
+        fileName: 'beta.pst',
+        mailboxName: 'Beta',
+        messageId: 'message:newer',
+        descriptorId: 'beta-1',
+        folderId: 'folder:beta',
+        folderPath: 'Inbox',
+        subject: 'Shared contract',
+        originalSubject: 'Shared contract',
+        senderName: 'Alice Example',
+        senderEmailAddress: 'alice@example.com',
+        recipientText: 'Bob Example <bob@example.com>',
+        displayTo: 'Bob Example <bob@example.com>',
+        resolvedDisplayTo: 'Bob Example <bob@example.com>',
+        bodySearchText: 'contract body text',
+        searchText: 'shared contract alice example alice@example.com bob example bob@example.com contract body text ipm.note mail',
+        searchTokens: ['shared', 'contract', 'alice', 'example', 'bob'],
+        addressValues: ['alice@example.com', 'bob@example.com'],
+        subjectValues: ['shared contract'],
+        sortDateMs: Date.parse('2024-01-03T00:00:00.000Z'),
+        sortDate: '2024-01-03T00:00:00.000Z',
+        updatedAt: new Date('2024-01-03T00:00:00.000Z').toISOString(),
+        mailboxDetail: { conversationTopic: 'Project Alpha' } as any
+      })
+    ])
+
+    const uncollapsed = await store.search({
+      scope: 'all',
+      query: 'legacy-term',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'date-desc',
+      page: 1,
+      pageSize: 20,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: ''
+    })
+    expect(uncollapsed.total).toBe(1)
+    expect(uncollapsed.items[0].messageId).toBe('message:older')
+
+    const collapsed = await store.search({
+      scope: 'all',
+      query: 'legacy-term',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'date-desc',
+      page: 1,
+      pageSize: 20,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: '',
+      collapseDuplicates: true
+    })
+
+    expect(collapsed.total).toBe(1)
+    expect(collapsed.totalPages).toBe(1)
+    expect(collapsed.page).toBe(1)
+    expect(collapsed.items).toHaveLength(1)
+    expect(collapsed.items[0].messageId).toBe('message:newer')
+    expect(collapsed.sourceCounts).toEqual({ mailbox: 1, teams: 0, sharepoint: 0 })
+  })
+
+  it('collapses appointment threads and leaves untitled items independent', async () => {
+    const store = new MemorySearchIndexStore()
+    await store.replaceMailboxDocuments('C:/PST/Case1/Search1/calendar.pst', [
+      makeDocument({
+        mailboxKey: 'C:/PST/Case1/Search1/calendar.pst',
+        messageId: 'appointment:older',
+        kind: 'appointment',
+        isMailLike: false,
+        subject: 'Project Alpha meeting',
+        searchText: 'project alpha meeting appointment',
+        searchTokens: ['project', 'alpha', 'meeting', 'appointment'],
+        sortDate: '2024-01-01T00:00:00.000Z',
+        sortDateMs: Date.parse('2024-01-01T00:00:00.000Z'),
+        mailboxDetail: { conversationTopic: 'Project Alpha' } as any
+      }),
+      makeDocument({
+        mailboxKey: 'C:/PST/Case1/Search1/calendar.pst',
+        messageId: 'appointment:newer',
+        kind: 'appointment',
+        isMailLike: false,
+        subject: 'Project Alpha meeting updated',
+        searchText: 'project alpha meeting appointment',
+        searchTokens: ['project', 'alpha', 'meeting', 'appointment'],
+        sortDate: '2024-01-02T00:00:00.000Z',
+        sortDateMs: Date.parse('2024-01-02T00:00:00.000Z'),
+        mailboxDetail: { conversationTopic: 'Project Alpha' } as any
+      }),
+      makeDocument({
+        mailboxKey: 'C:/PST/Case1/Search1/calendar.pst',
+        messageId: 'appointment:untitled-a',
+        kind: 'appointment',
+        isMailLike: false,
+        subject: 'Untitled appointment',
+        searchText: 'untitled appointment',
+        searchTokens: ['untitled', 'appointment'],
+        mailboxDetail: { conversationTopic: '' } as any
+      }),
+      makeDocument({
+        mailboxKey: 'C:/PST/Case1/Search1/calendar.pst',
+        messageId: 'appointment:untitled-b',
+        kind: 'appointment',
+        isMailLike: false,
+        subject: 'Untitled appointment',
+        searchText: 'untitled appointment',
+        searchTokens: ['untitled', 'appointment'],
+        mailboxDetail: undefined
+      })
+    ])
+
+    const collapsed = await store.search({
+      scope: 'all',
+      query: 'appointment',
+      mode: 'and',
+      mailOnly: false,
+      sort: 'date-desc',
+      page: 1,
+      pageSize: 20,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: '',
+      collapseDuplicates: true
+    })
+
+    expect(collapsed.total).toBe(3)
+    expect(collapsed.items.map((item) => item.messageId)).toEqual(
+      expect.arrayContaining(['appointment:newer', 'appointment:untitled-a', 'appointment:untitled-b'])
+    )
+    expect(collapsed.items).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ messageId: 'appointment:older' })])
+    )
+  })
+
   it('includes item sizes and keeps flagged-size totals stable across paging', async () => {
     const store = new MemorySearchIndexStore()
     const flaggedAt = new Date('2024-01-03T00:00:00.000Z').toISOString()
@@ -1206,5 +1373,96 @@ describe('search index cache', () => {
       teams: 1,
       sharepoint: 0
     })
+  })
+
+  it('collapses Mongo mailbox threads after matching and clamps the representative page', async () => {
+    const older = makeDocument({
+      messageId: 'mongo:older',
+      searchText: 'legacy-term thread',
+      searchTokens: ['legacy-term', 'thread'],
+      sortDate: '2024-01-01T00:00:00.000Z',
+      sortDateMs: Date.parse('2024-01-01T00:00:00.000Z'),
+      mailboxDetail: { conversationTopic: 'Mongo thread' } as any
+    })
+    const newer = makeDocument({
+      messageId: 'mongo:newer',
+      searchText: 'thread',
+      searchTokens: ['thread'],
+      sortDate: '2024-01-02T00:00:00.000Z',
+      sortDateMs: Date.parse('2024-01-02T00:00:00.000Z'),
+      mailboxDetail: { conversationTopic: 'Mongo thread' } as any
+    })
+    const find = jest.fn(() => {
+      let skipCount = 0
+      let limitCount = 0
+      const toArray = jest.fn(async () => {
+        if (limitCount === 0) {
+          return [older, newer]
+        }
+        return [older, newer].slice(skipCount, skipCount + limitCount)
+      })
+      const limit = jest.fn((count: number) => {
+        limitCount = count
+        return { toArray }
+      })
+      const skip = jest.fn((count: number) => {
+        skipCount = count
+        return { limit }
+      })
+      const sort = jest.fn(() => ({ skip }))
+      return { sort }
+    })
+    const documentsCollection = {
+      find,
+      findOne: jest.fn().mockResolvedValue(null),
+      aggregate: jest.fn(),
+      countDocuments: jest.fn(),
+      updateOne: jest.fn().mockResolvedValue(undefined),
+      insertMany: jest.fn().mockResolvedValue(undefined),
+      deleteMany: jest.fn().mockResolvedValue({ deletedCount: 0 }),
+      createIndex: jest.fn().mockResolvedValue(undefined)
+    } as any
+    const rulesCollection = {
+      find: jest.fn(() => ({
+        sort: jest.fn(() => ({ toArray: jest.fn().mockResolvedValue([]) }))
+      })),
+      findOne: jest.fn().mockResolvedValue(null),
+      updateOne: jest.fn().mockResolvedValue(undefined),
+      deleteOne: jest.fn().mockResolvedValue({ deletedCount: 0 }),
+      deleteMany: jest.fn().mockResolvedValue({ deletedCount: 0 }),
+      createIndex: jest.fn().mockResolvedValue(undefined)
+    } as any
+    const fingerprintsCollection = {
+      find: jest.fn(() => ({
+        sort: jest.fn(() => ({ toArray: jest.fn().mockResolvedValue([]) }))
+      })),
+      findOne: jest.fn().mockResolvedValue(null),
+      updateOne: jest.fn().mockResolvedValue(undefined),
+      deleteMany: jest.fn().mockResolvedValue({ deletedCount: 0 }),
+      createIndex: jest.fn().mockResolvedValue(undefined)
+    } as any
+
+    const store = new MongoSearchIndexStore(documentsCollection, rulesCollection, fingerprintsCollection)
+    const results = await store.search({
+      scope: 'all',
+      sourceType: 'mailbox',
+      query: 'legacy-term',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'date-desc',
+      page: 9,
+      pageSize: 1,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: '',
+      collapseDuplicates: true
+    })
+
+    expect(find).toHaveBeenCalledTimes(2)
+    expect(results.total).toBe(1)
+    expect(results.page).toBe(1)
+    expect(results.totalPages).toBe(1)
+    expect(results.items[0].messageId).toBe('mongo:newer')
+    expect(results.sourceCounts).toEqual({ mailbox: 1, teams: 0, sharepoint: 0 })
   })
 })

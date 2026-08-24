@@ -1,10 +1,24 @@
 import * as React from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { ArrowDown, ArrowUp, ArrowUpDown, Cloud, FileText, Flag, Mail, RefreshCw, Search, Tag as TagIcon, X } from 'lucide-react'
+import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  Cloud,
+  Download,
+  FileText,
+  Flag,
+  Mail,
+  RefreshCw,
+  Search,
+  Tag as TagIcon,
+  X
+} from 'lucide-react'
 import { api } from '@/api'
 import { cn, formatBytes, formatDate, normalizeText } from '@/lib/utils'
 import { normalizeSearchResultsPage, resolveSelectionScope } from '@/lib/search'
-import type { MessageSummary, ReviewState, SearchSourceType } from '@/types'
+import { EmailPreview } from '@/components/layout'
+import type { MessageDetail, MessageSummary, ReviewState, SearchSourceType } from '@/types'
 import {
   Badge,
   Button,
@@ -177,20 +191,26 @@ export function AllItemsDialog({
   selectedCasePath,
   selectedScopePath,
   sourceCounts,
+  hideDuplicates,
+  theme,
   onOpenChange,
   onSelectItem,
   onReviewChange,
-  onRefreshCounts
+  onRefreshCounts,
+  onHideDuplicatesChange
 }: {
   open: boolean
   selectedItemId: string
   selectedCasePath: string
   selectedScopePath: string
   sourceCounts: Record<SearchSourceType, number> | null
+  hideDuplicates: boolean
+  theme: 'light' | 'dark'
   onOpenChange: (open: boolean) => void
   onSelectItem: (item: MessageSummary) => void
   onReviewChange: (itemId: string, review: ReviewState) => void
   onRefreshCounts: () => void
+  onHideDuplicatesChange: (value: boolean) => void
 }) {
   const parentRef = React.useRef<HTMLDivElement | null>(null)
   const selectAllRef = React.useRef<HTMLInputElement | null>(null)
@@ -202,6 +222,7 @@ export function AllItemsDialog({
   const loadedPagesRef = React.useRef<Record<AllItemsSourceTab, Set<number>>>(createPageTrackingState())
   const inFlightPagesRef = React.useRef<Record<AllItemsSourceTab, Set<number>>>(createPageTrackingState())
   const reviewRequestRef = React.useRef(0)
+  const previewRequestRef = React.useRef(0)
   const pagingGenerationRef = React.useRef(0)
   const activeTabRef = React.useRef<AllItemsSourceTab>('mailbox')
 
@@ -222,6 +243,10 @@ export function AllItemsDialog({
   const [selectedItemIdsByTab, setSelectedItemIdsByTab] = React.useState<AllItemsSelectionState>(
     createSelectionState
   )
+  const [previewItem, setPreviewItem] = React.useState<MessageSummary | null>(null)
+  const [previewDetail, setPreviewDetail] = React.useState<MessageDetail | null>(null)
+  const [previewLoading, setPreviewLoading] = React.useState(false)
+  const [previewError, setPreviewError] = React.useState('')
 
   const selectedTotalsScope = React.useMemo(
     () => resolveSelectionScope(selectedCasePath, selectedScopePath),
@@ -295,6 +320,70 @@ export function AllItemsDialog({
       return next
     })
     onReviewChange(key, review)
+  }
+
+  async function openItemPreview(item: MessageSummary): Promise<void> {
+    const itemId = normalizeText(item.id)
+    if (!itemId) {
+      return
+    }
+
+    const requestId = ++previewRequestRef.current
+    setPreviewItem(item)
+    setPreviewError('')
+    setPreviewDetail(item.mailboxDetail || null)
+    setPreviewLoading(!item.mailboxDetail)
+
+    if (item.mailboxDetail) {
+      return
+    }
+
+    try {
+      const response = await api.item.detail(itemId)
+      if (previewRequestRef.current !== requestId) {
+        return
+      }
+      setPreviewDetail(response.detail)
+    } catch (error) {
+      if (previewRequestRef.current === requestId) {
+        setPreviewError(error instanceof Error ? error.message : 'Unable to load item preview')
+      }
+    } finally {
+      if (previewRequestRef.current === requestId) {
+        setPreviewLoading(false)
+      }
+    }
+  }
+
+  function closeItemPreview(): void {
+    previewRequestRef.current += 1
+    setPreviewItem(null)
+    setPreviewDetail(null)
+    setPreviewLoading(false)
+    setPreviewError('')
+  }
+
+  async function togglePreviewFlag(): Promise<void> {
+    if (!previewItem || !previewDetail) {
+      return
+    }
+
+    const currentReview = previewDetail.review || {
+      flagged: false,
+      tags: [],
+      createdAt: '',
+      updatedAt: ''
+    }
+    try {
+      const response = await api.item.updateReview(normalizeText(previewItem.id), {
+        flagged: !currentReview.flagged,
+        tags: [...(currentReview.tags || [])]
+      })
+      setPreviewDetail((current) => (current ? { ...current, review: response.review } : current))
+      patchReviewState(previewItem.id, response.review)
+    } catch (error) {
+      setPreviewError(error instanceof Error ? error.message : 'Unable to update review')
+    }
   }
 
   const clearSelection = React.useCallback((): void => {
@@ -405,7 +494,8 @@ export function AllItemsDialog({
         mailOnly,
         sort: sortKey,
         reviewFlagged: reviewFlaggedOnly,
-        reviewTagged: reviewTaggedOnly
+        reviewTagged: reviewTaggedOnly,
+        collapseDuplicates: hideDuplicates && normalizedTab === 'mailbox'
       })
       if (pagingGenerationRef.current !== requestGeneration) {
         return
@@ -486,6 +576,34 @@ export function AllItemsDialog({
       ? value
       : PAGE_SIZE
     setPageSize(nextSize)
+  }
+
+  function triggerDownload(url: string): void {
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.rel = 'noreferrer'
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+  }
+
+  function handleExportCurrentTab(): void {
+    triggerDownload(
+      api.exports.allItemsCsvUrl({
+        workspaceMode: 'search',
+        scope: selectedTotalsScope.scope,
+        sourceType: activeTab,
+        query: appliedQuery,
+        mode: 'and',
+        mailOnly,
+        sort: sortKey,
+        reviewFlagged: reviewFlaggedOnly,
+        reviewTagged: reviewTaggedOnly,
+        scopePath: selectedTotalsScope.scopePath || undefined,
+        casePath: selectedTotalsScope.casePath || undefined,
+        collapseDuplicates: hideDuplicates && activeTab === 'mailbox'
+      })
+    )
   }
 
   async function handleReviewToggle(item: MessageSummary): Promise<void> {
@@ -610,6 +728,7 @@ export function AllItemsDialog({
     resetPagingState,
     reviewFlaggedOnly,
     reviewTaggedOnly,
+    hideDuplicates,
     selectedCasePath,
     selectedScopePath,
     pageSize,
@@ -638,6 +757,7 @@ export function AllItemsDialog({
     clearSelection()
     setBulkActionLoading(false)
     setDialogError('')
+    closeItemPreview()
   }, [open, clearSelection])
 
   React.useLayoutEffect(() => {
@@ -676,7 +796,7 @@ export function AllItemsDialog({
       <button
         type="button"
         className={cn(
-          'flex w-full items-center justify-between gap-2 rounded-xl px-2 py-1.5 text-left transition focus:outline-none focus:ring-2 focus:ring-[color:var(--focus-ring)]',
+          'flex min-w-0 w-full items-center justify-between gap-2 rounded-xl px-2 py-1.5 text-left transition focus:outline-none focus:ring-2 focus:ring-[color:var(--focus-ring)]',
           active ? 'text-[color:var(--accent)]' : 'text-[color:var(--muted)] hover:text-[color:var(--text)]'
         )}
         aria-label={`Sort by ${label}${directionLabel ? ` ${directionLabel}` : ''}`}
@@ -698,7 +818,8 @@ export function AllItemsDialog({
   }
 
   return (
-    <Dialog
+    <>
+      <Dialog
       open={open}
       onOpenChange={(nextOpen) => {
         onOpenChange(nextOpen)
@@ -732,6 +853,10 @@ export function AllItemsDialog({
                 <RefreshCw className="h-4 w-4" />
                 Refresh counts
               </Button>
+              <Button variant="ghost" onClick={() => void handleExportCurrentTab()}>
+                <Download className="h-4 w-4" />
+                Export CSV
+              </Button>
               <Button variant="ghost" onClick={() => onOpenChange(false)}>
                 <X className="h-4 w-4" />
                 Close
@@ -755,9 +880,9 @@ export function AllItemsDialog({
                         : 'border-[color:var(--line)] bg-[color:var(--surface-strong)] text-[color:var(--text)] hover:border-[color:var(--accent-soft)] hover:bg-[color:var(--surface-soft)]'
                     )}
                     onClick={() => handleTabChange(tab.key)}
-                  >
-                    {tab.icon}
-                    <span>{tab.label}</span>
+                    >
+                      {tab.icon}
+                      <span>{tab.label}</span>
                     <Badge className="border-[color:var(--line)] bg-[color:var(--surface)] text-[color:var(--muted)]">
                       {count}
                     </Badge>
@@ -813,13 +938,29 @@ export function AllItemsDialog({
                   <TagIcon className="h-4 w-4" />
                   Tagged
                 </Button>
+                {activeTab === 'mailbox' ? (
+                  <Button
+                    type="button"
+                    variant={hideDuplicates ? 'secondary' : 'ghost'}
+                    aria-pressed={hideDuplicates}
+                    aria-label="Hide duplicates"
+                    onClick={() => onHideDuplicatesChange(!hideDuplicates)}
+                  >
+                    <span className="flex h-4 w-4 items-center justify-center rounded-full border border-current text-[10px] leading-none">
+                      ∥
+                    </span>
+                    Hide duplicates
+                  </Button>
+                ) : null}
               </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
               <span className="chip">Search: {appliedQuery || 'All items'}</span>
+              <span className="chip chip-active">{`Showing ${activeState.total} items`}</span>
               <span className="chip">Sorted by {sortLabel}</span>
               <span className="chip chip-active">Flagged size: {formatBytes(activeState.flaggedSizeBytes ?? 0)}</span>
+              {hideDuplicates ? <span className="chip chip-active">Older thread items hidden</span> : null}
               {mailOnly ? <span className="chip chip-active">Mail only</span> : null}
               {reviewFlaggedOnly ? <span className="chip chip-active">Flagged</span> : null}
               {reviewTaggedOnly ? <span className="chip chip-active">Tagged</span> : null}
@@ -887,7 +1028,7 @@ export function AllItemsDialog({
             {renderSortHeader('subject', 'Subject')}
             {renderSortHeader('sender', 'Sender')}
             {renderSortHeader('location', 'Location')}
-            <div className="text-right">Size</div>
+            <div className="min-w-0 whitespace-nowrap text-right">Size</div>
             {renderSortHeader('date', 'Date')}
             <div className="text-right">Flagged</div>
           </div>
@@ -1005,12 +1146,18 @@ export function AllItemsDialog({
                         </div>
 
                         <div className="min-w-0">
-                          <div
-                            className="truncate text-sm font-semibold text-[color:var(--text)]"
+                          <button
+                            type="button"
+                            className="block w-full max-w-full truncate text-left text-sm font-semibold text-[color:var(--text)] transition hover:text-[color:var(--accent)] focus:outline-none focus:underline"
                             title={item.subject || '(no subject)'}
+                            aria-label={`Preview email: ${item.subject || '(no subject)'}`}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              void openItemPreview(item)
+                            }}
                           >
                             {item.subject || '(no subject)'}
-                          </div>
+                          </button>
                           <div className="mt-1 truncate text-xs text-[color:var(--muted)]">
                             {item.kind || item.messageClass || item.previewKind || ''}
                           </div>
@@ -1040,14 +1187,14 @@ export function AllItemsDialog({
                         </div>
 
                         <div
-                          className="text-right text-sm text-[color:var(--text)]"
+                          className="min-w-0 overflow-hidden text-right text-sm text-[color:var(--text)]"
                           title={Number.isFinite(Number(item.size)) ? formatBytes(Number(item.size)) : 'Unknown size'}
                         >
                           {formatBytes(Number(item.size))}
                         </div>
 
                         <div
-                          className="text-sm text-[color:var(--text)]"
+                          className="min-w-0 overflow-hidden whitespace-nowrap text-sm text-[color:var(--text)]"
                           title={item.sortDate || item.creationTime || item.clientSubmitTime || ''}
                         >
                           {formatDate(item.sortDate || item.creationTime || item.clientSubmitTime)}
@@ -1111,6 +1258,65 @@ export function AllItemsDialog({
           </ScrollArea>
         </div>
       </DialogContent>
-    </Dialog>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(previewItem)}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) {
+            closeItemPreview()
+          }
+        }}
+      >
+        <DialogContent
+          showCloseButton
+          className="h-[min(92vh,900px)] max-h-[92vh] w-[min(96vw,1100px)] overflow-hidden p-0"
+        >
+          <div className="flex h-full min-h-0 flex-col">
+            <div className="sr-only">
+              <DialogTitle>Email preview</DialogTitle>
+              <DialogDescription>
+                Preview the selected email from the All Items index.
+              </DialogDescription>
+            </div>
+            {previewError ? (
+              <div className="m-5 rounded-2xl border border-[color:rgba(220,38,38,0.22)] bg-[color:rgba(220,38,38,0.08)] px-4 py-3 text-sm text-[color:var(--danger)]">
+                {previewError}
+              </div>
+            ) : null}
+            <EmailPreview
+              detail={previewDetail}
+              loading={previewLoading}
+              theme={theme}
+              onDownloadEml={
+                previewItem
+                  ? () => {
+                      triggerDownload(api.item.messageEmlUrl(normalizeText(previewItem.id)))
+                    }
+                  : undefined
+              }
+              onToggleFlag={previewDetail ? () => void togglePreviewFlag() : undefined}
+              onClearReview={previewDetail ? () => void togglePreviewFlag() : undefined}
+              onOpenAttachment={(attachment) => {
+                if (!previewItem) {
+                  return
+                }
+                triggerDownload(
+                  attachment.downloadUrl || api.item.attachmentUrl(normalizeText(previewItem.id), attachment.index)
+                )
+              }}
+              onOpenPrev={() => undefined}
+              onOpenNext={() => undefined}
+              showNavigationControls={false}
+              tagCount={previewDetail?.review?.tags?.length || 0}
+              canNavigatePrev={false}
+              canNavigateNext={false}
+              emptyStateTitle={previewError ? 'Unable to load preview' : 'Loading preview...'}
+              emptyStateDescription={previewError || 'Fetching the selected email from the index.'}
+            />
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }

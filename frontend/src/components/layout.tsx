@@ -887,12 +887,12 @@ interface EmailPreviewProps {
   detail: MessageDetail | null
   loading?: boolean
   theme: 'light' | 'dark'
-  onDownloadJson: () => void
-  onDownloadEml: () => void
+  onDownloadJson?: () => void
+  onDownloadEml?: () => void
   onDownloadItem?: () => void
-  onToggleFlag: () => void
-  onClearReview: () => void
-  onOpenTags: () => void
+  onToggleFlag?: () => void
+  onClearReview?: () => void
+  onOpenTags?: () => void
   onOpenFullView?: () => void
   onOpenAttachment: (attachment: AttachmentDetail) => void
   onOpenPrev: () => void

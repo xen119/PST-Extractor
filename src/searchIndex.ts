@@ -29,6 +29,7 @@ export interface HiddenRuleRecord {
 export interface SearchIndexDocument {
   id?: string
   sourceType: SearchSourceType
+  threadKey?: string
   mailboxKey: string
   scopePath: string
   scopeLabel: string
@@ -120,6 +121,7 @@ export interface SearchIndexSearchOptions {
   reviewerUsername?: string
   sourceType?: SearchSourceType | 'all'
   requirePreviewPayload?: boolean
+  collapseDuplicates?: boolean
   query: string
   mode: SearchMode
   mailOnly: boolean
@@ -294,6 +296,76 @@ function uniqueStrings(values: string[]): string[] {
 
 function uniqueTextValues(values: string[]): string[] {
   return [...new Set(values.map((value) => normalizeText(value)).filter(Boolean))]
+}
+
+export function buildMailboxThreadKey(
+  record: Pick<SearchIndexDocument, 'sourceType' | 'kind' | 'mailboxDetail'>
+): string {
+  const kind = normalizeText(record.kind).toLowerCase()
+  if (normalizeSourceType(record.sourceType) !== 'mailbox' || (kind !== 'mail' && kind !== 'appointment')) {
+    return ''
+  }
+
+  const conversationTopic = normalizeExactValue(
+    (record.mailboxDetail as MessageDetail | undefined)?.conversationTopic || ''
+  )
+  return conversationTopic
+}
+
+function getSearchDocumentIdentity(document: SearchIndexDocument): string {
+  return `${normalizeText(document.sourceType)}\u0000${normalizeText(document.mailboxKey)}\u0000${normalizeText(document.messageId)}`
+}
+
+function compareThreadRecency(left: SearchIndexDocument, right: SearchIndexDocument): number {
+  const leftDate = typeof left.sortDateMs === 'number' && Number.isFinite(left.sortDateMs) ? left.sortDateMs : null
+  const rightDate = typeof right.sortDateMs === 'number' && Number.isFinite(right.sortDateMs) ? right.sortDateMs : null
+  const dateComparison = compareNumberValues(leftDate, rightDate, 'desc')
+  if (dateComparison) {
+    return dateComparison
+  }
+
+  const leftSortDate = normalizeText(left.sortDate || '')
+  const rightSortDate = normalizeText(right.sortDate || '')
+  if (leftSortDate !== rightSortDate) {
+    return rightSortDate.localeCompare(leftSortDate, undefined, { sensitivity: 'base' })
+  }
+
+  return getSearchDocumentIdentity(right).localeCompare(getSearchDocumentIdentity(left), undefined, {
+    sensitivity: 'base'
+  })
+}
+
+function collapseLatestThreadDocuments(
+  scopeDocuments: SearchIndexDocument[],
+  matchingDocuments: SearchIndexDocument[]
+): SearchIndexDocument[] {
+  const matchingIdentities = new Set(matchingDocuments.map(getSearchDocumentIdentity))
+  const matchingThreadKeys = new Set(
+    matchingDocuments.map((document) => buildMailboxThreadKey(document)).filter(Boolean)
+  )
+  const latestByThread = new Map<string, SearchIndexDocument>()
+  const standaloneMatches: SearchIndexDocument[] = []
+
+  for (const document of scopeDocuments) {
+    const threadKey = buildMailboxThreadKey(document)
+    if (!threadKey) {
+      if (matchingIdentities.has(getSearchDocumentIdentity(document))) {
+        standaloneMatches.push(document)
+      }
+      continue
+    }
+
+    if (!matchingThreadKeys.has(threadKey)) {
+      continue
+    }
+
+    const current = latestByThread.get(threadKey)
+    if (!current || compareThreadRecency(document, current) < 0) {
+      latestByThread.set(threadKey, document)
+    }
+  }
+
+  return [...standaloneMatches, ...latestByThread.values()]
 }
 
 export function buildMailboxSearchDocumentId(mailboxKey: string, messageId: string): string {
@@ -1119,6 +1191,12 @@ export function buildSearchIndexDocumentsFromSession(
   for (const message of session.messages.values()) {
     const bodySearchText = normalizeExactValue(session.searchTextByMessageId.get(message.id) || '')
     const snapshot = session.messageDetailSnapshots.get(message.id) || null
+    const mailboxDetail = snapshot ? compactMailboxDetail(snapshot) : undefined
+    const threadKey = buildMailboxThreadKey({
+      sourceType: 'mailbox',
+      kind: message.kind,
+      mailboxDetail
+    })
     documents.push(
       toDocument(
         {
@@ -1158,7 +1236,8 @@ export function buildSearchIndexDocumentsFromSession(
           hasAttachments: message.hasAttachments,
           isRead: message.isRead,
           isMailLike: message.isMailLike,
-          mailboxDetail: snapshot ? compactMailboxDetail(snapshot) : undefined
+          mailboxDetail,
+          threadKey
         },
         bodySearchText,
         reviewStatesByMessageId.get(message.id) || []
@@ -1488,6 +1567,50 @@ export class MemorySearchIndexStore implements SearchIndexStore {
     const resolved = matched.map((record) =>
       resolveSearchIndexDocument(record, options.reviewerUsername)
     )
+    if (options.collapseDuplicates) {
+      const scopeOptions: SearchIndexSearchOptions = {
+        ...options,
+        sourceType: 'all',
+        query: '',
+        reviewFlaggedOnly: false,
+        reviewTaggedOnly: false,
+        reviewTag: ''
+      }
+      const matchingOptions: SearchIndexSearchOptions = {
+        ...scopeOptions,
+        query: options.query,
+        mode: options.mode
+      }
+      const reviewOptions: SearchIndexSearchOptions = {
+        ...scopeOptions,
+        reviewFlaggedOnly: options.reviewFlaggedOnly,
+        reviewTaggedOnly: options.reviewTaggedOnly,
+        reviewTag: options.reviewTag
+      }
+      const scopeRecords = records.filter((record) => matchesDocument(record, scopeOptions, hiddenRules))
+      const matchingRecords = scopeRecords.filter((record) => matchesDocument(record, matchingOptions, hiddenRules))
+      const representatives = collapseLatestThreadDocuments(scopeRecords, matchingRecords)
+        .filter((record) => matchesDocument(record, reviewOptions, hiddenRules))
+        .sort((left, right) => sortDocuments(left, right, options.sort))
+      const resolvedRepresentatives = representatives.map((record) =>
+        resolveSearchIndexDocument(record, options.reviewerUsername)
+      )
+      const resolvedSourceCounts = resolvedRepresentatives.reduce<Record<SearchSourceType, number>>(
+        (acc, record) => {
+          const sourceType = normalizeSourceType(record.sourceType)
+          acc[sourceType] = (acc[sourceType] || 0) + 1
+          return acc
+        },
+        { mailbox: 0, teams: 0, sharepoint: 0 }
+      )
+      const selectedRepresentatives = options.sourceType && options.sourceType !== 'all'
+        ? resolvedRepresentatives.filter(
+            (record) => normalizeSourceType(record.sourceType) === normalizeSourceType(options.sourceType)
+          )
+        : resolvedRepresentatives
+      return paginateSearchResults(selectedRepresentatives, options, hiddenRules, resolvedSourceCounts)
+    }
+
     return paginateSearchResults(resolved, options, hiddenRules, sourceCounts)
   }
 
@@ -1714,6 +1837,7 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     )
     await documents.createIndex?.({ mailboxKey: 1, messageId: 1 }, { unique: true })
     await documents.createIndex?.({ messageId: 1 })
+    await documents.createIndex?.({ sourceType: 1, threadKey: 1, sortDateMs: -1 })
     await documents.createIndex?.({ sourceType: 1, scopePath: 1 })
     await documents.createIndex?.({ mailboxKey: 1, scopePath: 1 })
     await documents.createIndex?.({ scopePath: 1, searchTokens: 1 })
@@ -1951,6 +2075,95 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     const sourceTypeFilter =
       options.sourceType && options.sourceType !== 'all' ? normalizeSourceType(options.sourceType) : null
     const normalizedReviewerUsername = normalizeReviewerUsername(options.reviewerUsername)
+    const collapseDuplicates = Boolean(options.collapseDuplicates)
+
+    if (collapseDuplicates) {
+      const scopeOptions: SearchIndexSearchOptions = {
+        ...options,
+        sourceType: 'all',
+        query: '',
+        reviewFlaggedOnly: false,
+        reviewTaggedOnly: false,
+        reviewTag: ''
+      }
+      const matchingOptions: SearchIndexSearchOptions = {
+        ...scopeOptions,
+        query: options.query,
+        mode: options.mode
+      }
+      const reviewOptions: SearchIndexSearchOptions = {
+        ...scopeOptions,
+        reviewFlaggedOnly: options.reviewFlaggedOnly,
+        reviewTaggedOnly: options.reviewTaggedOnly,
+        reviewTag: options.reviewTag
+      }
+      const scopeItems = await this.documents
+        .find(buildFilterMatch(scopeOptions, hiddenRules))
+        .sort(createSortSpec(options.sort))
+        .skip(0)
+        .limit(0)
+        .toArray()
+      const matchingItems = await this.documents
+        .find(buildFilterMatch(matchingOptions, hiddenRules))
+        .sort(createSortSpec(options.sort))
+        .skip(0)
+        .limit(0)
+        .toArray()
+      const representatives = collapseLatestThreadDocuments(scopeItems, matchingItems)
+        .filter((record) => matchesDocument(record, reviewOptions, hiddenRules))
+        .sort((left, right) => sortDocuments(left, right, options.sort))
+      const resolvedAllItems = representatives.map((record) =>
+        resolveSearchIndexDocument(record, options.reviewerUsername)
+      )
+      const sourceCounts = resolvedAllItems.reduce<Record<SearchSourceType, number>>(
+        (acc, record) => {
+          const sourceType = normalizeSourceType(record.sourceType)
+          acc[sourceType] = (acc[sourceType] || 0) + 1
+          return acc
+        },
+        { mailbox: 0, teams: 0, sharepoint: 0 }
+      )
+      const resolvedItems = sourceTypeFilter
+        ? resolvedAllItems.filter((record) => normalizeSourceType(record.sourceType) === sourceTypeFilter)
+        : resolvedAllItems
+      const total = resolvedItems.length
+      const totalPages = Math.max(1, Math.ceil(total / options.pageSize))
+      const page = Math.min(Math.max(options.page, 1), totalPages)
+      const start = (page - 1) * options.pageSize
+      const parsed = parseSearchTerms(options.query, options.mode)
+      return {
+        items: resolvedItems.slice(start, start + options.pageSize),
+        total,
+        page,
+        pageSize: options.pageSize,
+        totalPages,
+        query: normalizeText(options.query),
+        mode: parsed.mode,
+        mailOnly: options.mailOnly,
+        sort: options.sort,
+        scope: options.scope,
+        scopePath:
+          options.scope === 'search'
+            ? normalizeText(options.scopePath)
+            : '',
+        scopeLabel:
+          options.scope === 'all'
+            ? 'All cases/searches'
+            : options.scope === 'search'
+              ? normalizeText(options.scopePath ? options.scopePath.split('/').join(' / ') : '')
+              : 'Selected PST',
+        hiddenRules,
+        sourceType: options.sourceType || 'all',
+        sourceCounts,
+        flaggedSizeBytes: calculateFlaggedSizeBytes(resolvedItems),
+        reviewFilters: {
+          flaggedOnly: options.reviewFlaggedOnly,
+          taggedOnly: options.reviewTaggedOnly,
+          tag: normalizeText(options.reviewTag)
+        }
+      }
+    }
+
     const aggregateCursor = this.documents.aggregate?.([
       { $match: countFilter },
       {

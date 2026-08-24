@@ -28,6 +28,7 @@ export const API_ROUTES = {
   activityLog: '/api/activity-log',
   activityLogCsv: '/api/activity-log.csv',
   loadedItemsCsv: '/api/exports/items.csv',
+  allItemsCsv: '/api/exports/all-items.csv',
   flaggedBundlePrepare: '/api/exports/flagged',
   flaggedBundleJob: '/api/exports/flagged/:exportId',
   flaggedBundleArtifact: '/api/exports/flagged/:exportId/files/:artifactId',

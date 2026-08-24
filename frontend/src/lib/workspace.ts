@@ -16,6 +16,7 @@ const STORAGE_KEYS = {
   sort: 'pst-mail-explorer.sort',
   reviewFlaggedOnly: 'pst-mail-explorer.reviewFlaggedOnly',
   reviewTaggedOnly: 'pst-mail-explorer.reviewTaggedOnly',
+  allItemsHideDuplicates: 'pst-mail-explorer.allItemsHideDuplicates',
   flaggedBundleSizePreset: 'pst-mail-explorer.flaggedBundleSizePreset',
   flaggedBundleCustomSizeMb: 'pst-mail-explorer.flaggedBundleCustomSizeMb',
   flaggedBundleScope: 'pst-mail-explorer.flaggedBundleScope',

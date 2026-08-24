@@ -1764,6 +1764,48 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
           }
         }
       },
+      [openApiPath(API_ROUTES.allItemsCsv)]: {
+        get: {
+          tags: ['Review'],
+          summary: 'Export the current All Items modal tab as CSV',
+          parameters: [
+            {
+              name: 'workspaceMode',
+              in: 'query',
+              required: false,
+              schema: { type: 'string', enum: ['folder', 'search'] },
+              description: 'Use search mode for the All Items modal export.'
+            },
+            { name: 'sourceType', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'scope', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'scopePath', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'casePath', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'sessionId', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'folderId', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'query', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'mode', in: 'query', required: false, schema: { type: 'string', enum: ['and', 'or'] } },
+            { name: 'mailOnly', in: 'query', required: false, schema: { type: 'boolean' } },
+            { name: 'sort', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'reviewFlagged', in: 'query', required: false, schema: { type: 'boolean' } },
+            { name: 'reviewTagged', in: 'query', required: false, schema: { type: 'boolean' } },
+            { name: 'reviewTag', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'collapseDuplicates', in: 'query', required: false, schema: { type: 'boolean' } }
+          ],
+          responses: {
+            200: {
+              description: 'CSV export',
+              content: {
+                'text/csv': {
+                  schema: { type: 'string' }
+                }
+              }
+            },
+            ...errorResponse(400, 'Invalid workspace selection'),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Case access required')
+          }
+        }
+      },
       [openApiPath(API_ROUTES.reviewClearFlags)]: {
         post: {
           tags: ['Review'],
@@ -2044,7 +2086,8 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
             { name: 'pageSize', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 200 } },
             { name: 'reviewFlagged', in: 'query', required: false, schema: { type: 'boolean' } },
             { name: 'reviewTagged', in: 'query', required: false, schema: { type: 'boolean' } },
-            { name: 'reviewTag', in: 'query', required: false, schema: { type: 'string' } }
+            { name: 'reviewTag', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'collapseDuplicates', in: 'query', required: false, schema: { type: 'boolean' } }
           ],
           responses: {
             ...errorResponse(404, 'Search scope not found'),

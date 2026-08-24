@@ -242,6 +242,10 @@ export const api = {
       )
   },
   exports: {
+    allItemsCsvUrl: (params: Record<string, string | number | boolean | undefined>) => {
+      const query = buildQuery(params)
+      return query ? `/api/exports/all-items.csv?${query}` : '/api/exports/all-items.csv'
+    },
     listFlaggedBundles: (params: {
       scope: 'all' | 'search' | 'pst'
       scopePath?: string
@@ -323,6 +327,7 @@ export const api = {
     reviewFlagged?: boolean
     reviewTagged?: boolean
     reviewTag?: string
+    collapseDuplicates?: boolean
     scopePath?: string
     casePath?: string
     sessionId?: string
@@ -339,6 +344,7 @@ export const api = {
       reviewFlagged: params.reviewFlagged ? '1' : undefined,
       reviewTagged: params.reviewTagged ? '1' : undefined,
       reviewTag: params.reviewTag,
+      collapseDuplicates: params.collapseDuplicates ? '1' : undefined,
       scopePath: params.scopePath,
       casePath: params.casePath,
       sessionId: params.sessionId

@@ -16,6 +16,7 @@ interface ReviewCursorLike<T> {
 
 export interface ReviewCollectionLike {
   createIndex?: (index: Record<string, 1 | -1>, options?: { unique?: boolean; name?: string }) => Promise<unknown>
+  dropIndex?: (indexName: string) => Promise<unknown>
   findOne: (filter: Record<string, unknown>) => Promise<ReviewDocument | null>
   find: (filter: Record<string, unknown>) => ReviewCursorLike<ReviewDocument>
   updateOne: (
@@ -42,6 +43,15 @@ export interface ReviewStore {
 }
 
 const DEFAULT_COLLECTION_NAME = 'pst_reviews'
+
+function isMissingMongoIndexError(error: unknown): boolean {
+  const candidate = error as { code?: number; codeName?: string; message?: string }
+  return (
+    candidate.code === 27 ||
+    candidate.codeName === 'IndexNotFound' ||
+    /index not found/i.test(String(candidate.message || ''))
+  )
+}
 
 function normalizeText(value: unknown): string {
   return String(value ?? '')
@@ -360,6 +370,15 @@ export class MongoReviewStore implements ReviewStore {
     await client.connect()
     const collection = client.db(dbName).collection<ReviewDocument>(DEFAULT_COLLECTION_NAME)
     await collection.createIndex({ mailboxKey: 1, messageId: 1, reviewerUsername: 1 }, { unique: true })
+    try {
+      // Older deployments created a unique two-field index, which prevents
+      // separate users from reviewing the same item.
+      await (collection as unknown as ReviewCollectionLike).dropIndex?.('mailboxKey_1_messageId_1')
+    } catch (error) {
+      if (!isMissingMongoIndexError(error)) {
+        throw error
+      }
+    }
     await collection.createIndex({ mailboxKey: 1, flagged: 1 })
     await collection.createIndex({ mailboxKey: 1, updatedAt: -1 })
     await collection.createIndex({ mailboxKey: 1, tags: 1 })

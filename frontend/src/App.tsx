@@ -462,6 +462,7 @@ export function App() {
   const [clearFlagsLoading, setClearFlagsLoading] = React.useState(false)
   const [clearFlagsError, setClearFlagsError] = React.useState('')
   const [allItemsDialogOpen, setAllItemsDialogOpen] = React.useState(false)
+  const [allItemsHideDuplicates, setAllItemsHideDuplicates] = React.useState(false)
   const [flaggedBundleDialogOpen, setFlaggedBundleDialogOpen] = React.useState(false)
   const [searchIndexRefreshStatuses, setSearchIndexRefreshStatuses] = React.useState<
     Record<SearchIndexRefreshSource, SearchIndexRefreshStatus | null>
@@ -1141,6 +1142,7 @@ export function App() {
     setSort(readWorkspaceStorageItem('sort', true, username, 'date-desc'))
     setReviewFlaggedOnly(readWorkspaceStorageBool('reviewFlaggedOnly', true, username, false))
     setReviewTaggedOnly(readWorkspaceStorageBool('reviewTaggedOnly', true, username, false))
+    setAllItemsHideDuplicates(readWorkspaceStorageBool('allItemsHideDuplicates', true, username, false))
     setActivityFilterUser(readWorkspaceStorageItem('activityFilterUser', true, username, ''))
     setHiddenFiltersOpen(readWorkspaceStorageBool('hiddenFiltersOpen', true, username, hiddenFiltersOpen))
   }, [authenticated, authFlowActive, hiddenFiltersOpen, mfaEnforced, setHiddenFiltersOpen, username])
@@ -1218,6 +1220,7 @@ export function App() {
     writeWorkspaceStorageItem('sort', true, username, sort)
     writeWorkspaceStorageItem('reviewFlaggedOnly', true, username, reviewFlaggedOnly)
     writeWorkspaceStorageItem('reviewTaggedOnly', true, username, reviewTaggedOnly)
+    writeWorkspaceStorageItem('allItemsHideDuplicates', true, username, allItemsHideDuplicates)
     writeWorkspaceStorageItem('sourceType', true, username, sourceType)
     writeWorkspaceStorageItem('hiddenFiltersOpen', true, username, hiddenFiltersOpen)
     writeWorkspaceStorageItem('activityFilterUser', true, username, activityFilterUser)
@@ -1230,6 +1233,7 @@ export function App() {
     mailOnly,
     reviewFlaggedOnly,
     reviewTaggedOnly,
+    allItemsHideDuplicates,
     searchQuery,
     searchScope,
     sourceType,
@@ -3040,16 +3044,17 @@ export function App() {
   }
 
   function getWorkspaceItemsRequestParams(): Record<string, string | number | boolean | undefined> {
+    const requestWorkspaceMode = workspaceMode === 'folder' && !sessionId ? 'search' : workspaceMode
     const effectiveSearchScope =
       sourceType === 'mailbox'
         ? searchScope === 'pst' && !sessionId
           ? 'all'
           : searchScope
         : 'search'
-    const scopePath = workspaceMode === 'search' ? activeSearchScopePath : selectedScopePath || selectedCasePath
+    const scopePath = requestWorkspaceMode === 'search' ? activeSearchScopePath : selectedScopePath || selectedCasePath
 
     return {
-      workspaceMode,
+      workspaceMode: requestWorkspaceMode,
       scope: effectiveSearchScope,
       sourceType,
       query: searchQuery,
@@ -3060,12 +3065,12 @@ export function App() {
       reviewTagged: reviewTaggedOnly,
       scopePath,
       sessionId:
-        workspaceMode === 'folder'
+        requestWorkspaceMode === 'folder'
           ? sessionId || undefined
           : sourceType === 'mailbox' && effectiveSearchScope === 'pst' && sessionId
             ? sessionId
             : undefined,
-      folderId: workspaceMode === 'folder' ? currentFolderId : undefined
+      folderId: requestWorkspaceMode === 'folder' ? currentFolderId : undefined
     }
   }
 
@@ -3781,6 +3786,8 @@ export function App() {
         selectedCasePath={selectedCasePath}
         selectedScopePath={selectedScopePath}
         sourceCounts={sourceCounts}
+        hideDuplicates={allItemsHideDuplicates}
+        theme={theme}
         onOpenChange={(open) => {
           setAllItemsDialogOpen(open)
         }}
@@ -3792,6 +3799,9 @@ export function App() {
         }}
         onRefreshCounts={() => {
           void loadSourceCounts()
+        }}
+        onHideDuplicatesChange={(value) => {
+          setAllItemsHideDuplicates(value)
         }}
       />
       <FlaggedBundleDialog
