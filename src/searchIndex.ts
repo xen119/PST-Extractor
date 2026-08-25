@@ -249,7 +249,10 @@ interface SearchIndexCollectionLike {
     update: Record<string, unknown>,
     options?: { upsert?: boolean }
   ) => Promise<unknown>
-  find: (filter: Record<string, unknown>) => {
+  find: (
+    filter: Record<string, unknown>,
+    options?: { projection?: Record<string, 0 | 1> }
+  ) => {
     sort: (sort: Record<string, 1 | -1>) => {
       skip: (count: number) => {
         limit: (count: number) => {
@@ -310,6 +313,50 @@ const MAX_INDEXED_TOKEN_COUNT = 50000
 const MAX_INDEXED_ATTACHMENT_COUNT = 256
 const MAX_INDEXED_ATTACHMENT_TEXT_CHARS = 4096
 const MEMORY_STREAM_BATCH_SIZE = 25
+
+// Dedupe only needs relationship, sort, identity, and review metadata. In
+// particular, do not pull mailboxDetail/body/searchText into the in-memory
+// thread graph; some indexed messages are several megabytes each.
+const COLLAPSE_DOCUMENT_PROJECTION: Record<string, 0 | 1> = {
+  _id: 0,
+  id: 1,
+  sourceType: 1,
+  threadMetadata: 1,
+  mailboxKey: 1,
+  scopePath: 1,
+  scopeLabel: 1,
+  fileName: 1,
+  mailboxName: 1,
+  messageId: 1,
+  descriptorId: 1,
+  folderId: 1,
+  folderPath: 1,
+  order: 1,
+  messageClass: 1,
+  kind: 1,
+  size: 1,
+  subject: 1,
+  originalSubject: 1,
+  senderName: 1,
+  senderEmailAddress: 1,
+  recipientText: 1,
+  displayTo: 1,
+  displayCC: 1,
+  displayBCC: 1,
+  resolvedDisplayTo: 1,
+  resolvedDisplayCC: 1,
+  resolvedDisplayBCC: 1,
+  sortDate: 1,
+  sortDateMs: 1,
+  isMailLike: 1,
+  addressValues: 1,
+  subjectValues: 1,
+  reviewStates: 1,
+  archivePath: 1,
+  archiveEntryPath: 1,
+  archiveEntryChain: 1,
+  archiveEntryName: 1
+}
 
 export interface MongoSearchIndexStoreConnectOptions {
   documentsCollectionName?: string
@@ -1594,6 +1641,20 @@ function buildFilterMatch(
     filter.subjectValues = { $nin: hiddenSubjects }
   }
 
+  if (options.requirePreviewPayload) {
+    const previewClause: Record<string, unknown> = {
+      $or: [
+        { sourceType: { $ne: 'mailbox' } },
+        { mailboxDetail: { $exists: true } }
+      ]
+    }
+    if (filter.$and) {
+      ;(filter.$and as Record<string, unknown>[]).push(previewClause)
+    } else {
+      filter.$and = [previewClause]
+    }
+  }
+
   const searchExpression = buildSearchExpression(options.query, options.mode)
   if (Object.keys(searchExpression).length) {
     if (filter.$and) {
@@ -2257,30 +2318,9 @@ export class MemorySearchIndexStore implements SearchIndexStore {
     const mailboxKeysProvided = options.allowedMailboxKeys !== undefined
     const allowedMailboxKeys = uniqueTextValues(options.allowedMailboxKeys || [])
     const allRecords = [...this.documents.values()].flatMap((mailbox) => [...mailbox.values()])
-    const countOptions = {
-      ...options,
-      sourceType: 'all' as const
-    }
-    const sourceCounts = allRecords
-      .filter((record) => (mailboxKeysProvided ? allowedMailboxKeys.includes(record.mailboxKey) : true))
-      .filter((record) => matchesDocument(record, countOptions, hiddenRules))
-      .reduce<Record<SearchSourceType, number>>(
-        (acc, record) => {
-          const sourceType = normalizeSourceType(record.sourceType)
-          acc[sourceType] = (acc[sourceType] || 0) + 1
-          return acc
-        },
-        { mailbox: 0, teams: 0, sharepoint: 0 }
-      )
     const records = mailboxKeysProvided
       ? allRecords.filter((record) => allowedMailboxKeys.includes(record.mailboxKey))
       : allRecords
-    const matched = records
-      .filter((record) => matchesDocument(record, options, hiddenRules))
-      .sort((left, right) => sortDocuments(left, right, options.sort))
-    const resolved = matched.map((record) =>
-      resolveSearchIndexDocument(record, options.reviewerUsername)
-    )
     if (options.collapseDuplicates) {
       const scopeOptions: SearchIndexSearchOptions = {
         ...options,
@@ -2324,6 +2364,27 @@ export class MemorySearchIndexStore implements SearchIndexStore {
         : resolvedRepresentatives
       return paginateSearchResults(selectedRepresentatives, options, hiddenRules, resolvedSourceCounts)
     }
+
+    const countOptions = {
+      ...options,
+      sourceType: 'all' as const
+    }
+    const sourceCounts = records
+      .filter((record) => matchesDocument(record, countOptions, hiddenRules))
+      .reduce<Record<SearchSourceType, number>>(
+        (acc, record) => {
+          const sourceType = normalizeSourceType(record.sourceType)
+          acc[sourceType] = (acc[sourceType] || 0) + 1
+          return acc
+        },
+        { mailbox: 0, teams: 0, sharepoint: 0 }
+      )
+    const matched = records
+      .filter((record) => matchesDocument(record, options, hiddenRules))
+      .sort((left, right) => sortDocuments(left, right, options.sort))
+    const resolved = matched.map((record) =>
+      resolveSearchIndexDocument(record, options.reviewerUsername)
+    )
 
     return paginateSearchResults(resolved, options, hiddenRules, sourceCounts)
   }
@@ -2872,16 +2933,23 @@ export class MongoSearchIndexStore implements SearchIndexStore {
         ...scopeOptions,
         reviewFlaggedOnly: options.reviewFlaggedOnly,
         reviewTaggedOnly: options.reviewTaggedOnly,
-        reviewTag: options.reviewTag
+        reviewTag: options.reviewTag,
+        // The Mongo filter has already enforced this before projection. The
+        // projected graph intentionally does not carry mailboxDetail.
+        requirePreviewPayload: false
       }
       const scopeItems = await this.documents
-        .find(buildFilterMatch(scopeOptions, hiddenRules))
+        .find(buildFilterMatch(scopeOptions, hiddenRules), {
+          projection: COLLAPSE_DOCUMENT_PROJECTION
+        })
         .sort(createSortSpec(options.sort))
         .skip(0)
         .limit(0)
         .toArray()
       const matchingItems = await this.documents
-        .find(buildFilterMatch(matchingOptions, hiddenRules))
+        .find(buildFilterMatch(matchingOptions, hiddenRules), {
+          projection: COLLAPSE_DOCUMENT_PROJECTION
+        })
         .sort(createSortSpec(options.sort))
         .skip(0)
         .limit(0)
@@ -2907,9 +2975,29 @@ export class MongoSearchIndexStore implements SearchIndexStore {
       const totalPages = Math.max(1, Math.ceil(total / options.pageSize))
       const page = Math.min(Math.max(options.page, 1), totalPages)
       const start = (page - 1) * options.pageSize
+      const pageRepresentatives = resolvedItems.slice(start, start + options.pageSize)
+      const pageIdentityClauses = pageRepresentatives.map((record) => ({
+        mailboxKey: normalizeText(record.mailboxKey),
+        messageId: normalizeText(record.messageId)
+      }))
+      const pageDocuments = pageIdentityClauses.length
+        ? await this.documents.find({ $or: pageIdentityClauses }).sort({}).skip(0).limit(0).toArray()
+        : []
+      const pageDocumentsByIdentity = new Map(
+        pageDocuments.map((record) => [getSearchDocumentIdentity(record), record])
+      )
+      const resolvedPageItems = pageRepresentatives.map((representative) => {
+        const fullRecord = pageDocumentsByIdentity.get(getSearchDocumentIdentity(representative))
+        return resolveSearchIndexDocument(
+          fullRecord
+            ? { ...fullRecord, threadInfo: representative.threadInfo }
+            : representative,
+          options.reviewerUsername
+        )
+      })
       const parsed = parseSearchTerms(options.query, options.mode)
       return {
-        items: resolvedItems.slice(start, start + options.pageSize),
+        items: resolvedPageItems,
         total,
         page,
         pageSize: options.pageSize,

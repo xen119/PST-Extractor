@@ -1845,7 +1845,20 @@ describe('search index cache', () => {
       collapseDuplicates: true
     })
 
-    expect(find).toHaveBeenCalledTimes(2)
+    expect(find).toHaveBeenCalledTimes(3)
+    expect(find.mock.calls[0][1]?.projection).toEqual(expect.objectContaining({
+      threadMetadata: 1,
+      reviewStates: 1
+    }))
+    expect(find.mock.calls[0][1]?.projection).not.toHaveProperty('mailboxDetail')
+    expect(find.mock.calls[2][0]).toEqual({
+      $or: [
+        {
+          mailboxKey: older.mailboxKey,
+          messageId: newer.messageId
+        }
+      ]
+    })
     expect(results.total).toBe(1)
     expect(results.page).toBe(1)
     expect(results.totalPages).toBe(1)
