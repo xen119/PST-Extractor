@@ -291,8 +291,18 @@ interface FileFingerprintCollectionLike {
 const DEFAULT_INDEX_COLLECTION = 'pst_search_documents'
 const DEFAULT_RULE_COLLECTION = 'pst_search_hidden_rules'
 const DEFAULT_FINGERPRINT_COLLECTION = 'pst_search_file_fingerprints'
-const CURRENT_MAILBOX_SEARCH_INDEX_VERSION = 3
+const CURRENT_MAILBOX_SEARCH_INDEX_VERSION = 4
 const CURRENT_ITEM_SEARCH_INDEX_VERSION = 0
+const MAX_SEARCH_DOCUMENT_BYTES = 12 * 1024 * 1024
+const MAX_INDEXED_BODY_TEXT_CHARS = 192 * 1024
+const MAX_INDEXED_BODY_HTML_CHARS = 192 * 1024
+const MAX_INDEXED_BODY_PREFIX_CHARS = 32 * 1024
+const MAX_INDEXED_BODY_RTF_CHARS = 64 * 1024
+const MAX_INDEXED_HEADERS_CHARS = 64 * 1024
+const MAX_INDEXED_SEARCH_TEXT_CHARS = 256 * 1024
+const MAX_INDEXED_TOKEN_COUNT = 50000
+const MAX_INDEXED_ATTACHMENT_COUNT = 256
+const MAX_INDEXED_ATTACHMENT_TEXT_CHARS = 4096
 
 export interface MongoSearchIndexStoreConnectOptions {
   documentsCollectionName?: string
@@ -889,13 +899,104 @@ export function parseMailboxSearchDocumentId(
 
 function compactMailboxDetail(detail: MessageDetail): MessageDetail {
   const cloned = cloneMessageDetail(detail)
+  const limit = (value: unknown, max: number): string => {
+    const text = String(value ?? '')
+    return text.length > max ? text.slice(0, max) : text
+  }
+  const compactAttachment = (attachment: MessageDetail['attachments'][number]) => ({
+    ...attachment,
+    filename: limit(attachment.filename, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    longFilename: limit(attachment.longFilename, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    downloadFilename: limit(attachment.downloadFilename, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    mimeTag: limit(attachment.mimeTag, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    contentId: limit(attachment.contentId, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    pathname: limit(attachment.pathname, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    longPathname: limit(attachment.longPathname, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    downloadUrl: '',
+    embeddedMessage: attachment.embeddedMessage ? compactMailboxDetail(attachment.embeddedMessage) : null
+  })
   return {
     ...cloned,
-    attachments: (cloned.attachments || []).map((attachment) => ({
-      ...attachment,
-      downloadUrl: '',
-      embeddedMessage: attachment.embeddedMessage ? compactMailboxDetail(attachment.embeddedMessage) : null
-    }))
+    subject: limit(cloned.subject, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    originalSubject: limit(cloned.originalSubject, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    senderName: limit(cloned.senderName, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    senderEmailAddress: limit(cloned.senderEmailAddress, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    recipientText: limit(cloned.recipientText, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    displayTo: limit(cloned.displayTo, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    displayCC: limit(cloned.displayCC, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    displayBCC: limit(cloned.displayBCC, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    resolvedDisplayTo: limit(cloned.resolvedDisplayTo, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    resolvedDisplayCC: limit(cloned.resolvedDisplayCC, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    resolvedDisplayBCC: limit(cloned.resolvedDisplayBCC, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    bodyPrefix: limit(cloned.bodyPrefix, MAX_INDEXED_BODY_PREFIX_CHARS),
+    bodyText: limit(cloned.bodyText, MAX_INDEXED_BODY_TEXT_CHARS),
+    bodyHtml: limit(cloned.bodyHtml, MAX_INDEXED_BODY_HTML_CHARS),
+    bodyRtf: limit(cloned.bodyRtf, MAX_INDEXED_BODY_RTF_CHARS),
+    transportMessageHeaders: limit(cloned.transportMessageHeaders, MAX_INDEXED_HEADERS_CHARS),
+    conversationTopic: limit(cloned.conversationTopic, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    internetMessageId: limit(cloned.internetMessageId, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    inReplyToId: limit(cloned.inReplyToId, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    returnPath: limit(cloned.returnPath, MAX_INDEXED_ATTACHMENT_TEXT_CHARS),
+    attachments: (cloned.attachments || []).slice(0, MAX_INDEXED_ATTACHMENT_COUNT).map(compactAttachment)
+  }
+}
+
+function estimateSearchDocumentBytes(document: SearchIndexDocument): number {
+  return Buffer.byteLength(JSON.stringify(document), 'utf8')
+}
+
+function compactSearchIndexDocument(document: SearchIndexDocument): SearchIndexDocument {
+  let compacted: SearchIndexDocument = {
+    ...document,
+    bodySearchText: document.bodySearchText.slice(0, MAX_INDEXED_SEARCH_TEXT_CHARS),
+    searchText: document.searchText.slice(0, MAX_INDEXED_SEARCH_TEXT_CHARS),
+    searchTokens: document.searchTokens.slice(0, MAX_INDEXED_TOKEN_COUNT),
+    mailboxDetail: document.mailboxDetail ? compactMailboxDetail(document.mailboxDetail) : undefined
+  }
+
+  if (estimateSearchDocumentBytes(compacted) <= MAX_SEARCH_DOCUMENT_BYTES) {
+    return compacted
+  }
+
+  compacted = {
+    ...compacted,
+    bodySearchText: compacted.bodySearchText.slice(0, 64 * 1024),
+    searchText: compacted.searchText.slice(0, 128 * 1024),
+    searchTokens: compacted.searchTokens.slice(0, 20000),
+    mailboxDetail: compacted.mailboxDetail
+      ? {
+          ...compacted.mailboxDetail,
+          bodyPrefix: '',
+          bodyHtml: '',
+          bodyRtf: '',
+          transportMessageHeaders: '',
+          attachments: compacted.mailboxDetail.attachments.slice(0, 64)
+        }
+      : undefined
+  }
+
+  if (estimateSearchDocumentBytes(compacted) <= MAX_SEARCH_DOCUMENT_BYTES) {
+    return compacted
+  }
+
+  // Keep the searchable metadata and a header-only preview rather than
+  // allowing one pathological message to abort the whole mailbox refresh.
+  return {
+    ...compacted,
+    bodySearchText: compacted.bodySearchText.slice(0, 16 * 1024),
+    searchText: compacted.searchText.slice(0, 64 * 1024),
+    searchTokens: compacted.searchTokens.slice(0, 10000),
+    mailboxDetail: compacted.mailboxDetail
+      ? {
+          ...compacted.mailboxDetail,
+          bodyText: '',
+          bodyHtml: '',
+          bodyPrefix: '',
+          bodyRtf: '',
+          transportMessageHeaders: '',
+          attachments: []
+        }
+      : undefined
   }
 }
 
@@ -1618,21 +1719,42 @@ function toDocument(
     review: ReviewState
   }>
 ): SearchIndexDocument {
-  const searchText = buildSearchText(base, bodySearchText)
-  const subjectValues = uniqueStrings([base.subject, base.originalSubject])
-  return {
+  const limit = (value: string, max = MAX_INDEXED_ATTACHMENT_TEXT_CHARS): string =>
+    value.length > max ? value.slice(0, max) : value
+  const boundedBodySearchText = limit(normalizeExactValue(bodySearchText), MAX_INDEXED_SEARCH_TEXT_CHARS)
+  const boundedBase = {
     ...base,
-    bodySearchText: normalizeExactValue(bodySearchText),
+    subject: limit(base.subject),
+    originalSubject: limit(base.originalSubject),
+    senderName: limit(base.senderName),
+    senderEmailAddress: limit(base.senderEmailAddress),
+    recipientText: limit(base.recipientText),
+    displayTo: limit(base.displayTo),
+    displayCC: limit(base.displayCC),
+    displayBCC: limit(base.displayBCC),
+    resolvedDisplayTo: limit(base.resolvedDisplayTo),
+    resolvedDisplayCC: limit(base.resolvedDisplayCC),
+    resolvedDisplayBCC: limit(base.resolvedDisplayBCC),
+    messageClass: limit(base.messageClass),
+    mailboxDetail: base.mailboxDetail ? compactMailboxDetail(base.mailboxDetail) : undefined,
+    previewText: base.previewText ? limit(base.previewText, MAX_INDEXED_SEARCH_TEXT_CHARS) : base.previewText,
+    previewHtml: base.previewHtml ? limit(base.previewHtml, MAX_INDEXED_SEARCH_TEXT_CHARS) : base.previewHtml
+  }
+  const searchText = buildSearchText(boundedBase, boundedBodySearchText).slice(0, MAX_INDEXED_SEARCH_TEXT_CHARS)
+  const subjectValues = uniqueStrings([boundedBase.subject, boundedBase.originalSubject])
+  return compactSearchIndexDocument({
+    ...boundedBase,
+    bodySearchText: boundedBodySearchText,
     searchText,
-    searchTokens: tokenizeSearchText(searchText),
+    searchTokens: tokenizeSearchText(searchText).slice(0, MAX_INDEXED_TOKEN_COUNT),
     addressValues: extractEmailAddresses(
-      base.senderEmailAddress,
-      base.displayTo,
-      base.displayCC,
-      base.displayBCC,
-      base.resolvedDisplayTo,
-      base.resolvedDisplayCC,
-      base.resolvedDisplayBCC
+      boundedBase.senderEmailAddress,
+      boundedBase.displayTo,
+      boundedBase.displayCC,
+      boundedBase.displayBCC,
+      boundedBase.resolvedDisplayTo,
+      boundedBase.resolvedDisplayCC,
+      boundedBase.resolvedDisplayBCC
     ),
     subjectValues,
     review: normalizeReview(null),
@@ -1642,7 +1764,7 @@ function toDocument(
     })),
     reviewTagValues: [],
     updatedAt: new Date().toISOString()
-  }
+  })
 }
 
 export function buildSearchIndexDocumentsFromSession(
@@ -1871,7 +1993,7 @@ export class MemorySearchIndexStore implements SearchIndexStore {
   async replaceMailboxDocuments(mailboxKey: string, documents: SearchIndexDocument[]): Promise<void> {
     const key = normalizeText(mailboxKey)
     const records = new Map<string, SearchIndexDocument>()
-    for (const document of dedupeSearchIndexDocuments(documents)) {
+    for (const document of dedupeSearchIndexDocuments(documents.map(compactSearchIndexDocument))) {
       records.set(document.messageId, {
         ...document,
         mailboxKey: key,
@@ -1884,7 +2006,7 @@ export class MemorySearchIndexStore implements SearchIndexStore {
   async upsertMailboxDocument(mailboxKey: string, document: SearchIndexDocument): Promise<void> {
     const key = normalizeText(mailboxKey)
     const mailbox = this.documents.get(key) || new Map<string, SearchIndexDocument>()
-    const [normalizedDocument] = dedupeSearchIndexDocuments([document])
+    const [normalizedDocument] = dedupeSearchIndexDocuments([compactSearchIndexDocument(document)])
     if (!normalizedDocument) {
       return
     }
@@ -2368,22 +2490,24 @@ export class MongoSearchIndexStore implements SearchIndexStore {
   async replaceMailboxDocuments(mailboxKey: string, documents: SearchIndexDocument[]): Promise<void> {
     const key = normalizeText(mailboxKey)
     await this.documents.deleteMany({ mailboxKey: key })
-    const uniqueDocuments = dedupeSearchIndexDocuments(documents)
+    const uniqueDocuments = dedupeSearchIndexDocuments(documents.map(compactSearchIndexDocument))
     if (!uniqueDocuments.length) {
       return
     }
-    await this.documents.insertMany(
-      uniqueDocuments.map((document) => ({
-        ...document,
-        mailboxKey: key,
-        sourceType: normalizeSourceType(document.sourceType)
-      }))
-    )
+    const normalizedDocuments = uniqueDocuments.map((document) => ({
+      ...document,
+      mailboxKey: key,
+      sourceType: normalizeSourceType(document.sourceType)
+    }))
+    const batchSize = 100
+    for (let start = 0; start < normalizedDocuments.length; start += batchSize) {
+      await this.documents.insertMany(normalizedDocuments.slice(start, start + batchSize))
+    }
   }
 
   async upsertMailboxDocument(mailboxKey: string, document: SearchIndexDocument): Promise<void> {
     const key = normalizeText(mailboxKey)
-    const [normalizedDocument] = dedupeSearchIndexDocuments([document])
+    const [normalizedDocument] = dedupeSearchIndexDocuments([compactSearchIndexDocument(document)])
     if (!normalizedDocument) {
       return
     }
@@ -2922,21 +3046,23 @@ export async function refreshSearchIndexSourceFromCatalog(
       continue
     }
 
+    let pstSession: ViewerSessionIndex | null = null
     try {
       let documents: SearchIndexDocument[] = []
       if (normalizedSource === 'mailboxes') {
-        const session = openPstMailbox(rootPath, file.scopePath, file.fileName, {
-          collectDetailSnapshots: true
+        pstSession = openPstMailbox(rootPath, file.scopePath, file.fileName, {
+          collectDetailSnapshots: true,
+          compactForIndex: true
         })
-        const reviewRecords = await reviewStore.listReviews(session.filePath)
+        const reviewRecords = await reviewStore.listReviews(pstSession.filePath)
         documents = buildSearchIndexDocumentsFromSession(
-          session,
+          pstSession,
           {
-            mailboxKey: session.filePath,
+            mailboxKey: pstSession.filePath,
             scopePath: file.scopePath,
             scopeLabel: file.scopeLabel,
             fileName: file.fileName,
-            mailboxName: session.mailboxName
+            mailboxName: pstSession.mailboxName
           },
           reviewRecords
         )
@@ -2952,9 +3078,24 @@ export async function refreshSearchIndexSourceFromCatalog(
       nextFingerprints.push(fingerprint)
       mailboxCount += 1
       messageCount += documents.length
+
+      if (pstSession) {
+        // The session is only needed while this mailbox is being indexed.
+        // Release its PST-derived maps before the next mailbox starts.
+        pstSession.messageDetailSnapshots.clear()
+        pstSession.searchTextByMessageId.clear()
+        pstSession.messages.clear()
+        pstSession.folders.clear()
+      }
     } catch (error) {
       failedCount += 1
       warnOnce(file.scopeLabel, file.fileName, error)
+      if (pstSession) {
+        pstSession.messageDetailSnapshots.clear()
+        pstSession.searchTextByMessageId.clear()
+        pstSession.messages.clear()
+        pstSession.folders.clear()
+      }
     }
   }
 

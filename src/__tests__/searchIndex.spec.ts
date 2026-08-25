@@ -5,6 +5,7 @@ import AdmZip from 'adm-zip'
 import {
   MemorySearchIndexStore,
   MongoSearchIndexStore,
+  buildMailboxSearchDocumentId,
   buildMailboxThreadMetadata,
   refreshSearchIndexFromCatalog,
   refreshSearchIndexSourceFromCatalog,
@@ -987,6 +988,33 @@ describe('search index cache', () => {
     expect(
       buildMailboxThreadMetadata({ ...baseDetail, subject: 'Fw: Indicative offer' }, 'appointment')?.isForward
     ).toBe(false)
+  })
+
+  it('bounds oversized mailbox documents before they reach MongoDB', async () => {
+    const store = new MemorySearchIndexStore()
+    const oversizedBody = 'body '.repeat(450000)
+    await store.replaceMailboxDocuments('C:/PST/Case1/Search1/oversized.pst', [
+      makeDocument({
+        mailboxKey: 'C:/PST/Case1/Search1/oversized.pst',
+        messageId: 'message:oversized',
+        bodySearchText: oversizedBody,
+        searchText: oversizedBody,
+        mailboxDetail: {
+          bodyText: oversizedBody,
+          bodyHtml: `<p>${oversizedBody}</p>`,
+          bodyRtf: oversizedBody,
+          attachments: []
+        } as any
+      })
+    ])
+
+    const stored = await store.findDocumentById(
+      buildMailboxSearchDocumentId('C:/PST/Case1/Search1/oversized.pst', 'message:oversized')
+    )
+    expect(stored).not.toBeNull()
+    expect(Buffer.byteLength(JSON.stringify(stored), 'utf8')).toBeLessThan(12 * 1024 * 1024)
+    expect(stored?.bodySearchText.length).toBeLessThan(300 * 1024)
+    expect(stored?.mailboxDetail?.bodyText.length).toBeLessThan(300 * 1024)
   })
 
   it('includes item sizes and keeps flagged-size totals stable across paging', async () => {

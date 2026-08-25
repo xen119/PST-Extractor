@@ -33,6 +33,7 @@ export interface ViewerSessionIndex {
 
 export interface ViewerSessionCreationOptions {
   collectDetailSnapshots?: boolean
+  compactForIndex?: boolean
 }
 
 const messageDetailCacheBySession = new WeakMap<ViewerSessionIndex, Map<string, MessageDetail>>()
@@ -199,6 +200,20 @@ interface DetailBuildOptions {
   folderIdOverride?: string
   folderPathOverride?: string
   virtualId?: string
+  compactForIndex?: boolean
+}
+
+const INDEXED_BODY_TEXT_LIMIT = 192 * 1024
+const INDEXED_BODY_HTML_LIMIT = 192 * 1024
+const INDEXED_BODY_PREFIX_LIMIT = 32 * 1024
+const INDEXED_BODY_RTF_LIMIT = 64 * 1024
+const INDEXED_HEADERS_LIMIT = 64 * 1024
+const INDEXED_ATTACHMENT_LIMIT = 256
+const INDEXED_ATTACHMENT_TEXT_LIMIT = 4096
+const INDEXED_BODY_SEARCH_LIMIT = 256 * 1024
+
+function limitIndexedText(value: string, limit: number): string {
+  return value.length > limit ? value.slice(0, limit) : value
 }
 
 interface MessageObjectWithMaybeAttachments extends PSTMessage {
@@ -770,10 +785,12 @@ function buildSummaryFromMessage(
 }
 
 function buildBodySearchText(message: PSTMessage): string {
-  return normalizeSearchableText(
-    safeString(message.bodyPrefix),
-    safeString(message.body),
-    htmlToText(safeString(message.bodyHTML))
+  const bodyPrefix = limitIndexedText(safeString(message.bodyPrefix), INDEXED_BODY_PREFIX_LIMIT)
+  const bodyText = limitIndexedText(safeString(message.body), INDEXED_BODY_TEXT_LIMIT)
+  const bodyHtml = limitIndexedText(safeString(message.bodyHTML), INDEXED_BODY_HTML_LIMIT)
+  return limitIndexedText(
+    normalizeSearchableText(bodyPrefix, bodyText, htmlToText(bodyHtml)),
+    INDEXED_BODY_SEARCH_LIMIT
   )
 }
 
@@ -1333,13 +1350,16 @@ function buildAttachmentSummary(
   index: number,
   embeddedDepth: number,
   detailFolderId: string,
-  detailFolderPath: string
+  detailFolderPath: string,
+  compactForIndex = false
 ): AttachmentDetail {
   const attachmentId = `${messageId}:attachment:${index}`
-  const filename = safeString(attachment.filename)
-  const longFilename = safeString(attachment.longFilename)
-  const longPathname = safeString(attachment.longPathname)
-  const pathname = safeString(attachment.pathname)
+  const limitAttachmentText = (value: string): string =>
+    compactForIndex ? limitIndexedText(value, INDEXED_ATTACHMENT_TEXT_LIMIT) : value
+  const filename = limitAttachmentText(safeString(attachment.filename))
+  const longFilename = limitAttachmentText(safeString(attachment.longFilename))
+  const longPathname = limitAttachmentText(safeString(attachment.longPathname))
+  const pathname = limitAttachmentText(safeString(attachment.pathname))
   const downloadFilename = sanitizeFilename(
     longFilename || filename || longPathname || pathname || `attachment-${index}`,
     `attachment-${index}`
@@ -1370,7 +1390,8 @@ function buildAttachmentSummary(
           embeddedDepth: embeddedDepth - 1,
           folderIdOverride: detailFolderId,
           folderPathOverride: detailFolderPath,
-          virtualId: buildEmbeddedDetailId(messageId, index)
+          virtualId: buildEmbeddedDetailId(messageId, index),
+          compactForIndex
         })
       }
     }
@@ -1386,10 +1407,10 @@ function buildAttachmentSummary(
     filename,
     longFilename,
     downloadFilename,
-    mimeTag: safeString(attachment.mimeTag),
+    mimeTag: limitAttachmentText(safeString(attachment.mimeTag)),
     size,
     attachMethod: attachment.attachMethod,
-    contentId: safeString(attachment.contentId),
+    contentId: limitAttachmentText(safeString(attachment.contentId)),
     pathname,
     longPathname,
     isEmbeddedMessage,
@@ -1410,6 +1431,7 @@ function buildMessageDetailFromMessage(
   const folderId = options.folderIdOverride || summary.folderId
   const folderPath = options.folderPathOverride || summary.folderPath
   const attachmentBaseUrl = options.attachmentBaseUrl || ''
+  const compactForIndex = Boolean(options.compactForIndex)
   const detail: MessageDetail = {
     ...summary,
     id: messageId,
@@ -1425,11 +1447,14 @@ function buildMessageDetailFromMessage(
     originalDisplayTo: safeString(message.originalDisplayTo),
     originalDisplayCC: safeString(message.originalDisplayCc),
     originalDisplayBCC: safeString(message.originalDisplayBcc),
-    bodyPrefix: safeString(message.bodyPrefix),
-    bodyText: safeString(message.body),
-    bodyHtml: safeString(message.bodyHTML),
-    bodyRtf: safeString(message.bodyRTF),
-    transportMessageHeaders: safeString(message.transportMessageHeaders),
+    bodyPrefix: limitIndexedText(safeString(message.bodyPrefix), compactForIndex ? INDEXED_BODY_PREFIX_LIMIT : Number.MAX_SAFE_INTEGER),
+    bodyText: limitIndexedText(safeString(message.body), compactForIndex ? INDEXED_BODY_TEXT_LIMIT : Number.MAX_SAFE_INTEGER),
+    bodyHtml: limitIndexedText(safeString(message.bodyHTML), compactForIndex ? INDEXED_BODY_HTML_LIMIT : Number.MAX_SAFE_INTEGER),
+    bodyRtf: limitIndexedText(safeString(message.bodyRTF), compactForIndex ? INDEXED_BODY_RTF_LIMIT : Number.MAX_SAFE_INTEGER),
+    transportMessageHeaders: limitIndexedText(
+      safeString(message.transportMessageHeaders),
+      compactForIndex ? INDEXED_HEADERS_LIMIT : Number.MAX_SAFE_INTEGER
+    ),
     conversationTopic: safeString(message.conversationTopic),
     conversationId: summary.kind === 'appointment' ? encodeConversationId(message) : '',
     originalSubject: safeString(message.originalSubject),
@@ -1447,7 +1472,10 @@ function buildMessageDetailFromMessage(
     }
   })()
 
-  for (let index = 0; index < attachmentCount; index++) {
+  const indexedAttachmentCount = compactForIndex
+    ? Math.min(attachmentCount, INDEXED_ATTACHMENT_LIMIT)
+    : attachmentCount
+  for (let index = 0; index < indexedAttachmentCount; index++) {
     let attachmentDetail: AttachmentDetail
     try {
       const attachment = (message as MessageObjectWithMaybeAttachments).getAttachment(index)
@@ -1457,7 +1485,8 @@ function buildMessageDetailFromMessage(
         index,
         embeddedDepth,
         folderId,
-        folderPath
+        folderPath,
+        compactForIndex
       )
       if (attachmentBaseUrl && attachmentDetail.isDownloadable) {
         attachmentDetail.downloadUrl = `${attachmentBaseUrl}${index}`
@@ -1868,7 +1897,9 @@ function indexFolder(
           session.messageDetailSnapshots.set(
             messageId,
             buildMessageDetail(child, summary, {
-              attachmentBaseUrl: ''
+              attachmentBaseUrl: '',
+              compactForIndex: options.compactForIndex,
+              embeddedDepth: options.compactForIndex ? 0 : 1
             })
           )
         } catch (err) {
@@ -2177,6 +2208,7 @@ export function buildMessageDetail(
   const folderId = options.folderIdOverride || summary.folderId
   const folderPath = options.folderPathOverride || summary.folderPath
   const attachmentBaseUrl = options.attachmentBaseUrl || ''
+  const compactForIndex = Boolean(options.compactForIndex)
   const detail: MessageDetail = {
     ...summary,
     id: messageId,
@@ -2192,11 +2224,14 @@ export function buildMessageDetail(
     originalDisplayTo: safeString(message.originalDisplayTo),
     originalDisplayCC: safeString(message.originalDisplayCc),
     originalDisplayBCC: safeString(message.originalDisplayBcc),
-    bodyPrefix: safeString(message.bodyPrefix),
-    bodyText: safeString(message.body),
-    bodyHtml: safeString(message.bodyHTML),
-    bodyRtf: safeString(message.bodyRTF),
-    transportMessageHeaders: safeString(message.transportMessageHeaders),
+    bodyPrefix: limitIndexedText(safeString(message.bodyPrefix), compactForIndex ? INDEXED_BODY_PREFIX_LIMIT : Number.MAX_SAFE_INTEGER),
+    bodyText: limitIndexedText(safeString(message.body), compactForIndex ? INDEXED_BODY_TEXT_LIMIT : Number.MAX_SAFE_INTEGER),
+    bodyHtml: limitIndexedText(safeString(message.bodyHTML), compactForIndex ? INDEXED_BODY_HTML_LIMIT : Number.MAX_SAFE_INTEGER),
+    bodyRtf: limitIndexedText(safeString(message.bodyRTF), compactForIndex ? INDEXED_BODY_RTF_LIMIT : Number.MAX_SAFE_INTEGER),
+    transportMessageHeaders: limitIndexedText(
+      safeString(message.transportMessageHeaders),
+      compactForIndex ? INDEXED_HEADERS_LIMIT : Number.MAX_SAFE_INTEGER
+    ),
     conversationTopic: safeString(message.conversationTopic),
     conversationId: summary.kind === 'appointment' ? encodeConversationId(message) : '',
     originalSubject: safeString(message.originalSubject),
@@ -2213,7 +2248,10 @@ export function buildMessageDetail(
     attachmentCount = 0
   }
 
-  for (let index = 0; index < attachmentCount; index++) {
+  const indexedAttachmentCount = compactForIndex
+    ? Math.min(attachmentCount, INDEXED_ATTACHMENT_LIMIT)
+    : attachmentCount
+  for (let index = 0; index < indexedAttachmentCount; index++) {
     let attachmentDetail: AttachmentDetail
     try {
       const attachment = (message as MessageObjectWithMaybeAttachments).getAttachment(index)
@@ -2223,7 +2261,8 @@ export function buildMessageDetail(
         index,
         embeddedDepth,
         folderId,
-        folderPath
+        folderPath,
+        compactForIndex
       )
       if (attachmentBaseUrl && attachmentDetail.isDownloadable) {
         attachmentDetail.downloadUrl = `${attachmentBaseUrl}${index}`
