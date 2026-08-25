@@ -36,6 +36,17 @@ export interface ViewerSessionCreationOptions {
   compactForIndex?: boolean
 }
 
+export interface ViewerIndexedMessage {
+  mailboxName: string
+  summary: MessageSummary
+  bodySearchText: string
+  detail?: MessageDetail
+}
+
+export interface ViewerMessageStreamOptions {
+  compactForIndex?: boolean
+}
+
 const messageDetailCacheBySession = new WeakMap<ViewerSessionIndex, Map<string, MessageDetail>>()
 
 function getMessageDetailCache(session: ViewerSessionIndex): Map<string, MessageDetail> {
@@ -1964,6 +1975,137 @@ function indexFolder(
       folderSummary.indexedMessageCount += 1
     }
     order += 1
+  }
+}
+
+/**
+ * Streams compact mailbox records without materializing a full viewer session.
+ * The consumer controls the pace, allowing each record to be released after it
+ * has been written to the search index.
+ */
+export async function* streamPstMailboxMessages(
+  filePath: string,
+  fileName: string,
+  options: ViewerMessageStreamOptions = {}
+): AsyncGenerator<ViewerIndexedMessage> {
+  const pstFile = new PSTFile(filePath)
+  const warnings: string[] = []
+  const visited = new Set<string>()
+
+  try {
+    const messageStore = pstFile.getMessageStore()
+    const mailboxName = safeFolderName(messageStore.displayName, safeString(fileName, 'Mailbox'))
+    const rootFolder = pstFile.getRootFolder()
+
+    async function* walkFolder(
+      folder: PSTFolder,
+      parentPath: string,
+      fallbackFolderId: string
+    ): AsyncGenerator<ViewerIndexedMessage> {
+      const descriptorId = safeRead(() => folder.descriptorNodeId.toString(), '')
+      const folderId = buildFolderId(descriptorId || fallbackFolderId)
+      if (visited.has(folderId)) {
+        return
+      }
+      visited.add(folderId)
+
+      const defaultDisplayName = parentPath ? 'Untitled folder' : mailboxName
+      const displayName = safeFolderName(
+        readFolderString(folder, (value) => value.displayName, defaultDisplayName),
+        defaultDisplayName
+      )
+      const folderPath = parentPath ? `${parentPath}/${displayName}` : displayName
+
+      const childFolders = safeLoadSubFolders(folder, warnings, folderPath)
+      for (let childIndex = 0; childIndex < childFolders.length; childIndex += 1) {
+        yield* walkFolder(childFolders[childIndex], folderPath, `${folderId}:${childIndex}`)
+      }
+
+      try {
+        folder.moveChildCursorTo(0)
+      } catch {
+        // Continue and let getNextChild report whether the folder is readable.
+      }
+
+      let order = 0
+      while (true) {
+        let child: PSTMessage | null = null
+        try {
+          child = loadNextChild(folder)
+        } catch {
+          break
+        }
+
+        if (!child) {
+          break
+        }
+
+        const childDescriptorId = safeRead(() => child.descriptorNodeId.toString(), '')
+        const messageId = buildMessageId(childDescriptorId || `${folderId}:${order}`)
+        let summary: MessageSummary
+        let bodySearchText = ''
+        let detail: MessageDetail | undefined
+
+        try {
+          summary = buildSummaryFromMessage(child, folderId, folderPath, order, messageId)
+          bodySearchText = buildBodySearchText(child)
+          try {
+            detail = buildMessageDetail(child, summary, {
+              attachmentBaseUrl: '',
+              compactForIndex: options.compactForIndex,
+              embeddedDepth: options.compactForIndex ? 0 : 1
+            })
+          } catch (err) {
+            detail = buildEmptyMessageDetail({
+              ...summary,
+              parseError: err instanceof Error ? err.message : String(err)
+            })
+          }
+        } catch (err) {
+          const parseError = err instanceof Error ? err.message : String(err)
+          summary = {
+            id: messageId,
+            descriptorId: childDescriptorId,
+            folderId,
+            folderPath,
+            order,
+            messageClass: safeString(safeRead(() => child.messageClass, ''), ''),
+            kind: classifyMessageClass(safeString(safeRead(() => child.messageClass, ''), '')),
+            subject: '(unavailable)',
+            senderName: '',
+            senderEmailAddress: '',
+            recipientText: '',
+            displayTo: '',
+            displayCC: '',
+            displayBCC: '',
+            resolvedDisplayTo: '',
+            resolvedDisplayCC: '',
+            resolvedDisplayBCC: '',
+            originalSubject: '',
+            clientSubmitTime: null,
+            creationTime: null,
+            modificationTime: null,
+            messageDeliveryTime: null,
+            sortDate: null,
+            sortDateMs: null,
+            importance: 0,
+            hasAttachments: false,
+            isRead: false,
+            isMailLike: false,
+            size: toSafeNumber(safeRead(() => child.messageSize, undefined), 0),
+            parseError
+          }
+          detail = buildEmptyMessageDetail(summary)
+        }
+
+        yield { mailboxName, summary, bodySearchText, detail }
+        order += 1
+      }
+    }
+
+    yield* walkFolder(rootFolder, mailboxName, '0')
+  } finally {
+    pstFile.close()
   }
 }
 

@@ -97,6 +97,8 @@ The example viewer also has a built-in login screen. By default, sign in with `a
 
 The search index refresh button is also admin-only. It is the only manual rebuild path; opening, removing, or restoring mailboxes does not trigger a search index rebuild.
 
+Mailbox refreshes are streamed and written to MongoDB in bounded batches. The indexer does not build a full in-memory viewer session for a PST, so large mailboxes can continue indexing without retaining every message and preview in the Node.js heap. Restart the server after deploying this behavior, then use **Reindex mailboxes** if startup refresh is disabled or if a previous refresh stopped part-way through.
+
 The viewer includes a light/dark mode switcher in the signed-in session bar. The login screen stays light.
 
 Open the address printed by the server, then:

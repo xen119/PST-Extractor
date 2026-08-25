@@ -5,8 +5,10 @@ import type { ReviewStore } from './reviewStore'
 import type { ReviewRecord, ReviewState } from './reviewTypes'
 import {
   cloneMessageDetail,
+  streamPstMailboxMessages,
   type MessageDetail,
   type MessageSummary,
+  type ViewerIndexedMessage,
   type ViewerSessionIndex
 } from './viewer'
 import type { ArchiveBundleItem, ArchiveBundleSourceType } from './archiveBundles'
@@ -195,6 +197,10 @@ export interface SearchIndexStore {
   kind: 'memory' | 'mongo'
   isPersistent: boolean
   replaceMailboxDocuments(mailboxKey: string, documents: SearchIndexDocument[]): Promise<void>
+  replaceMailboxDocumentsFromStream?(
+    mailboxKey: string,
+    documents: AsyncIterable<SearchIndexDocument>
+  ): Promise<void>
   upsertMailboxDocument(mailboxKey: string, document: SearchIndexDocument): Promise<void>
   deleteMailboxDocuments(mailboxKey: string): Promise<void>
   updateReviewState(
@@ -303,6 +309,7 @@ const MAX_INDEXED_SEARCH_TEXT_CHARS = 256 * 1024
 const MAX_INDEXED_TOKEN_COUNT = 50000
 const MAX_INDEXED_ATTACHMENT_COUNT = 256
 const MAX_INDEXED_ATTACHMENT_TEXT_CHARS = 4096
+const MEMORY_STREAM_BATCH_SIZE = 25
 
 export interface MongoSearchIndexStoreConnectOptions {
   documentsCollectionName?: string
@@ -1261,14 +1268,30 @@ function resolveReviewState(
   return entry ? normalizeReview(entry.review) : null
 }
 
-function buildReviewStateEntries(records: ReviewRecord[]): Array<{
+type ReviewStateEntry = {
   reviewerUsername: string
   review: ReviewState
-}> {
+}
+
+function buildReviewStateEntries(records: ReviewRecord[]): ReviewStateEntry[] {
   return records.map((record) => ({
     reviewerUsername: normalizeReviewerUsername(record.reviewerUsername),
     review: normalizeReview(record)
   }))
+}
+
+function buildReviewStatesByMessageId(records: ReviewRecord[]): Map<string, ReviewStateEntry[]> {
+  const states = new Map<string, ReviewStateEntry[]>()
+  for (const record of records) {
+    const messageId = normalizeText(record.messageId)
+    if (!messageId) {
+      continue
+    }
+    const entries = states.get(messageId) || []
+    entries.push(...buildReviewStateEntries([record]))
+    states.set(messageId, entries)
+  }
+  return states
 }
 
 function resolveReviewTagValues(
@@ -1767,6 +1790,65 @@ function toDocument(
   })
 }
 
+export function buildSearchIndexDocumentFromMailboxMessage(
+  record: ViewerIndexedMessage,
+  context: {
+    mailboxKey: string
+    scopePath: string
+    scopeLabel: string
+    fileName: string
+  },
+  reviewStatesByMessageId: Map<string, ReviewStateEntry[]>
+): SearchIndexDocument {
+  const message = record.summary
+  const mailboxDetail = record.detail ? compactMailboxDetail(record.detail) : undefined
+  const threadMetadata = buildMailboxThreadMetadata(mailboxDetail, message.kind)
+  return toDocument(
+    {
+      id: normalizeText(message.id),
+      sourceType: 'mailbox',
+      mailboxKey: normalizeText(context.mailboxKey),
+      scopePath: normalizeText(context.scopePath),
+      scopeLabel: normalizeText(context.scopeLabel),
+      fileName: normalizeText(context.fileName),
+      mailboxName: normalizeText(record.mailboxName),
+      messageId: normalizeText(message.id),
+      descriptorId: normalizeText(message.descriptorId),
+      folderId: normalizeText(message.folderId),
+      folderPath: normalizeText(message.folderPath),
+      order: message.order,
+      messageClass: normalizeText(message.messageClass),
+      kind: message.kind,
+      size: Number(message.size) || 0,
+      subject: normalizeText(message.subject),
+      originalSubject: normalizeText(message.originalSubject),
+      senderName: normalizeText(message.senderName),
+      senderEmailAddress: normalizeText(message.senderEmailAddress),
+      recipientText: normalizeText(message.recipientText),
+      displayTo: normalizeText(message.displayTo),
+      displayCC: normalizeText(message.displayCC),
+      displayBCC: normalizeText(message.displayBCC),
+      resolvedDisplayTo: normalizeText(message.resolvedDisplayTo),
+      resolvedDisplayCC: normalizeText(message.resolvedDisplayCC),
+      resolvedDisplayBCC: normalizeText(message.resolvedDisplayBCC),
+      clientSubmitTime: message.clientSubmitTime,
+      creationTime: message.creationTime,
+      modificationTime: message.modificationTime,
+      messageDeliveryTime: message.messageDeliveryTime,
+      sortDate: message.sortDate,
+      sortDateMs: message.sortDateMs,
+      importance: message.importance,
+      hasAttachments: message.hasAttachments,
+      isRead: message.isRead,
+      isMailLike: message.isMailLike,
+      mailboxDetail,
+      threadMetadata
+    },
+    record.bodySearchText,
+    reviewStatesByMessageId.get(message.id) || []
+  )
+}
+
 export function buildSearchIndexDocumentsFromSession(
   session: ViewerSessionIndex,
   context: {
@@ -1778,75 +1860,20 @@ export function buildSearchIndexDocumentsFromSession(
   },
   reviewRecords: ReviewRecord[]
 ): SearchIndexDocument[] {
-  const reviewStatesByMessageId = new Map<
-    string,
-    Array<{ reviewerUsername: string; review: ReviewState }>
-  >()
-
-  for (const record of reviewRecords) {
-    const messageId = normalizeText(record.messageId)
-    if (!messageId) {
-      continue
-    }
-    const entries = reviewStatesByMessageId.get(messageId) || []
-    entries.push({
-      reviewerUsername: normalizeReviewerUsername(record.reviewerUsername),
-      review: normalizeReview(record)
-    })
-    reviewStatesByMessageId.set(messageId, entries)
-  }
-
+  const reviewStatesByMessageId = buildReviewStatesByMessageId(reviewRecords)
   const documents: SearchIndexDocument[] = []
 
   for (const message of session.messages.values()) {
-    const bodySearchText = normalizeExactValue(session.searchTextByMessageId.get(message.id) || '')
-    const snapshot = session.messageDetailSnapshots.get(message.id) || null
-    const mailboxDetail = snapshot ? compactMailboxDetail(snapshot) : undefined
-    const threadMetadata = buildMailboxThreadMetadata(mailboxDetail, message.kind)
     documents.push(
-      toDocument(
+      buildSearchIndexDocumentFromMailboxMessage(
         {
-          id: normalizeText(message.id),
-          sourceType: 'mailbox',
-          mailboxKey: normalizeText(context.mailboxKey),
-          scopePath: normalizeText(context.scopePath),
-          scopeLabel: normalizeText(context.scopeLabel),
-          fileName: normalizeText(context.fileName),
-          mailboxName: normalizeText(context.mailboxName),
-          messageId: normalizeText(message.id),
-          descriptorId: normalizeText(message.descriptorId),
-          folderId: normalizeText(message.folderId),
-          folderPath: normalizeText(message.folderPath),
-          order: message.order,
-          messageClass: normalizeText(message.messageClass),
-          kind: message.kind,
-          size: Number(message.size) || 0,
-          subject: normalizeText(message.subject),
-          originalSubject: normalizeText(message.originalSubject),
-          senderName: normalizeText(message.senderName),
-          senderEmailAddress: normalizeText(message.senderEmailAddress),
-          recipientText: normalizeText(message.recipientText),
-          displayTo: normalizeText(message.displayTo),
-          displayCC: normalizeText(message.displayCC),
-          displayBCC: normalizeText(message.displayBCC),
-          resolvedDisplayTo: normalizeText(message.resolvedDisplayTo),
-          resolvedDisplayCC: normalizeText(message.resolvedDisplayCC),
-          resolvedDisplayBCC: normalizeText(message.resolvedDisplayBCC),
-          clientSubmitTime: message.clientSubmitTime,
-          creationTime: message.creationTime,
-          modificationTime: message.modificationTime,
-          messageDeliveryTime: message.messageDeliveryTime,
-          sortDate: message.sortDate,
-          sortDateMs: message.sortDateMs,
-          importance: message.importance,
-          hasAttachments: message.hasAttachments,
-          isRead: message.isRead,
-          isMailLike: message.isMailLike,
-          mailboxDetail,
-          threadMetadata
+          mailboxName: context.mailboxName,
+          summary: message,
+          bodySearchText: session.searchTextByMessageId.get(message.id) || '',
+          detail: session.messageDetailSnapshots.get(message.id)
         },
-        bodySearchText,
-        reviewStatesByMessageId.get(message.id) || []
+        context,
+        reviewStatesByMessageId
       )
     )
   }
@@ -2001,6 +2028,68 @@ export class MemorySearchIndexStore implements SearchIndexStore {
       })
     }
     this.documents.set(key, records)
+  }
+
+  async replaceMailboxDocumentsFromStream(
+    mailboxKey: string,
+    documents: AsyncIterable<SearchIndexDocument>
+  ): Promise<void> {
+    const key = normalizeText(mailboxKey)
+    const seen = new Set<string>()
+    const batch: SearchIndexDocument[] = []
+    let firstBatch = true
+
+    const flush = async (): Promise<void> => {
+      if (!batch.length) {
+        return
+      }
+
+      const currentBatch = batch.splice(0, batch.length)
+      if (firstBatch) {
+        firstBatch = false
+        // Dispatch through the public method so test doubles and callers that
+        // observe mailbox replacement retain their existing behavior.
+        await this.replaceMailboxDocuments(key, currentBatch)
+        return
+      }
+
+      const mailbox = this.documents.get(key) || new Map<string, SearchIndexDocument>()
+      for (const document of currentBatch) {
+        mailbox.set(document.messageId, {
+          ...document,
+          mailboxKey: key,
+          sourceType: normalizeSourceType(document.sourceType)
+        })
+      }
+      this.documents.set(key, mailbox)
+    }
+
+    for await (const document of documents) {
+      const normalizedDocument = compactSearchIndexDocument(document)
+      const messageId = normalizeText(normalizedDocument.messageId)
+      if (!messageId) {
+        continue
+      }
+      const dedupeKey = `${key}\u0000${messageId}`
+      if (seen.has(dedupeKey)) {
+        continue
+      }
+      seen.add(dedupeKey)
+      batch.push({
+        ...normalizedDocument,
+        mailboxKey: key,
+        sourceType: normalizeSourceType(normalizedDocument.sourceType)
+      })
+      if (firstBatch || batch.length >= MEMORY_STREAM_BATCH_SIZE) {
+        await flush()
+      }
+    }
+
+    if (batch.length) {
+      await flush()
+    } else if (firstBatch) {
+      await this.replaceMailboxDocuments(key, [])
+    }
   }
 
   async upsertMailboxDocument(mailboxKey: string, document: SearchIndexDocument): Promise<void> {
@@ -2505,6 +2594,46 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     }
   }
 
+  async replaceMailboxDocumentsFromStream(
+    mailboxKey: string,
+    documents: AsyncIterable<SearchIndexDocument>
+  ): Promise<void> {
+    const key = normalizeText(mailboxKey)
+    await this.documents.deleteMany({ mailboxKey: key })
+
+    const seen = new Set<string>()
+    const batch: SearchIndexDocument[] = []
+    const flush = async (): Promise<void> => {
+      if (!batch.length) {
+        return
+      }
+      await this.documents.insertMany(batch.splice(0, batch.length))
+    }
+
+    for await (const document of documents) {
+      const normalizedDocument = compactSearchIndexDocument(document)
+      const messageId = normalizeText(normalizedDocument.messageId)
+      if (!messageId) {
+        continue
+      }
+      const dedupeKey = `${key}\u0000${messageId}`
+      if (seen.has(dedupeKey)) {
+        continue
+      }
+      seen.add(dedupeKey)
+      batch.push({
+        ...normalizedDocument,
+        mailboxKey: key,
+        sourceType: normalizeSourceType(normalizedDocument.sourceType)
+      })
+      if (batch.length >= 100) {
+        await flush()
+      }
+    }
+
+    await flush()
+  }
+
   async upsertMailboxDocument(mailboxKey: string, document: SearchIndexDocument): Promise<void> {
     const key = normalizeText(mailboxKey)
     const [normalizedDocument] = dedupeSearchIndexDocuments([compactSearchIndexDocument(document)])
@@ -2996,7 +3125,6 @@ export async function refreshSearchIndexSourceFromCatalog(
     pruneRemovedFiles?: boolean
   } = {}
 ): Promise<SearchIndexRefreshPlan> {
-  const { openPstMailbox } = await import('./pstCatalog')
   const { extractArchiveBundleItems } = await import('./archiveBundles')
   const normalizedSource = normalizeRefreshSource(source)
   const discoveredFiles = await discoverRefreshSourceFiles(rootPath, normalizedSource)
@@ -3046,56 +3174,62 @@ export async function refreshSearchIndexSourceFromCatalog(
       continue
     }
 
-    let pstSession: ViewerSessionIndex | null = null
     try {
       let documents: SearchIndexDocument[] = []
+      let replacedFromStream = false
+      let indexedMessageCount = 0
       if (normalizedSource === 'mailboxes') {
-        pstSession = openPstMailbox(rootPath, file.scopePath, file.fileName, {
-          collectDetailSnapshots: true,
-          compactForIndex: true
-        })
-        const reviewRecords = await reviewStore.listReviews(pstSession.filePath)
-        documents = buildSearchIndexDocumentsFromSession(
-          pstSession,
-          {
-            mailboxKey: pstSession.filePath,
-            scopePath: file.scopePath,
-            scopeLabel: file.scopeLabel,
-            fileName: file.fileName,
-            mailboxName: pstSession.mailboxName
-          },
-          reviewRecords
+        const reviewStatesByMessageId = buildReviewStatesByMessageId(
+          await reviewStore.listReviews(fingerprint.mailboxKey)
         )
+        const documentStream = (async function* (): AsyncGenerator<SearchIndexDocument> {
+          for await (const record of streamPstMailboxMessages(
+            fingerprint.mailboxKey,
+            file.fileName,
+            { compactForIndex: true }
+          )) {
+            indexedMessageCount += 1
+            yield buildSearchIndexDocumentFromMailboxMessage(
+              record,
+              {
+                mailboxKey: fingerprint.mailboxKey,
+                scopePath: file.scopePath,
+                scopeLabel: file.scopeLabel,
+                fileName: file.fileName
+              },
+              reviewStatesByMessageId
+            )
+          }
+        })()
+
+        if (searchIndexStore.replaceMailboxDocumentsFromStream) {
+          await searchIndexStore.replaceMailboxDocumentsFromStream(
+            fingerprint.mailboxKey,
+            documentStream
+          )
+          replacedFromStream = true
+        } else {
+          for await (const document of documentStream) {
+            documents.push(document)
+          }
+        }
       } else {
         const reviewRecords = await reviewStore.listReviews(fingerprint.mailboxKey)
         const archiveItems = await extractArchiveBundleItems(fingerprint.mailboxKey, file.scopePath, file.fileName)
         documents = buildSearchIndexDocumentsFromArchiveItems(archiveItems, reviewRecords)
       }
 
-      await searchIndexStore.replaceMailboxDocuments(fingerprint.mailboxKey, documents)
+      if (!replacedFromStream) {
+        await searchIndexStore.replaceMailboxDocuments(fingerprint.mailboxKey, documents)
+      }
       await searchIndexStore.upsertFileFingerprint(normalizedSource, fingerprint)
       changedMailboxKeys.push(fingerprint.mailboxKey)
       nextFingerprints.push(fingerprint)
       mailboxCount += 1
-      messageCount += documents.length
-
-      if (pstSession) {
-        // The session is only needed while this mailbox is being indexed.
-        // Release its PST-derived maps before the next mailbox starts.
-        pstSession.messageDetailSnapshots.clear()
-        pstSession.searchTextByMessageId.clear()
-        pstSession.messages.clear()
-        pstSession.folders.clear()
-      }
+      messageCount += normalizedSource === 'mailboxes' ? indexedMessageCount : documents.length
     } catch (error) {
       failedCount += 1
       warnOnce(file.scopeLabel, file.fileName, error)
-      if (pstSession) {
-        pstSession.messageDetailSnapshots.clear()
-        pstSession.searchTextByMessageId.clear()
-        pstSession.messages.clear()
-        pstSession.folders.clear()
-      }
     }
   }
 

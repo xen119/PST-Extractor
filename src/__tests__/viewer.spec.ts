@@ -18,6 +18,7 @@ import {
   messageMatchesQuery,
   listFolderMessages,
   sanitizeFileNameForDownload,
+  streamPstMailboxMessages,
   withSessionMessage,
   type MessageDetail,
   type MessageSummary
@@ -122,6 +123,19 @@ describe('viewer integration', () => {
       expect(itemId.startsWith('folder:') || itemId.startsWith('message:')).toBe(true)
     })
     expect(seen.size).toBeGreaterThan(0)
+  })
+
+  it('streams mailbox records without requiring a full viewer session', async () => {
+    const records = []
+    for await (const record of streamPstMailboxMessages(enronPath, 'enron.pst', {
+      compactForIndex: true
+    })) {
+      records.push(record)
+    }
+
+    expect(records).toHaveLength(enronSession.stats.messageCount)
+    expect(records[0].summary.id).toMatch(/^message:/)
+    expect(records[0].detail?.bodyText.length || 0).toBeLessThanOrEqual(192 * 1024)
   })
 
   it('filters and pages folder messages by metadata', () => {
