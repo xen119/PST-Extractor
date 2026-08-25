@@ -147,6 +147,7 @@ export interface MessageDetail extends MessageSummary {
   bodyRtf: string
   transportMessageHeaders: string
   conversationTopic: string
+  conversationId?: string
   originalSubject: string
   internetMessageId: string
   inReplyToId: string
@@ -242,6 +243,18 @@ function safeRead<T>(getter: () => T, fallback: T): T {
     return value === undefined || value === null ? fallback : value
   } catch {
     return fallback
+  }
+}
+
+function encodeConversationId(message: PSTMessage): string {
+  const conversationId = safeRead(() => message.conversationId, null)
+  if (!conversationId) {
+    return ''
+  }
+  try {
+    return Buffer.from(conversationId).toString('base64')
+  } catch {
+    return ''
   }
 }
 
@@ -1418,6 +1431,7 @@ function buildMessageDetailFromMessage(
     bodyRtf: safeString(message.bodyRTF),
     transportMessageHeaders: safeString(message.transportMessageHeaders),
     conversationTopic: safeString(message.conversationTopic),
+    conversationId: summary.kind === 'appointment' ? encodeConversationId(message) : '',
     originalSubject: safeString(message.originalSubject),
     internetMessageId: safeString(message.internetMessageId),
     inReplyToId: safeString(message.inReplyToId),
@@ -1493,6 +1507,7 @@ export function buildEmptyMessageDetail(summary: MessageSummary): MessageDetail 
     bodyRtf: '',
     transportMessageHeaders: '',
     conversationTopic: '',
+    conversationId: '',
     originalSubject: '',
     internetMessageId: '',
     inReplyToId: '',
@@ -2108,6 +2123,7 @@ export function buildMessageDetailFromSession(
       bodyRtf: '',
       transportMessageHeaders: '',
       conversationTopic: '',
+      conversationId: '',
       originalSubject: '',
       internetMessageId: '',
       inReplyToId: '',
@@ -2182,6 +2198,7 @@ export function buildMessageDetail(
     bodyRtf: safeString(message.bodyRTF),
     transportMessageHeaders: safeString(message.transportMessageHeaders),
     conversationTopic: safeString(message.conversationTopic),
+    conversationId: summary.kind === 'appointment' ? encodeConversationId(message) : '',
     originalSubject: safeString(message.originalSubject),
     internetMessageId: safeString(message.internetMessageId),
     inReplyToId: safeString(message.inReplyToId),

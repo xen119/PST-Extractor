@@ -24,6 +24,7 @@ import type {
   FlaggedBundleJob,
   FlaggedBundleJobsResponse,
   SearchIndexRefreshStatus,
+  SearchThreadResponse,
   UsersResponse,
   UserPasswordResetResponse
 } from '@/types'
@@ -2124,6 +2125,15 @@ describe('shell and preview', () => {
       isMailLike: true,
       folderPath: 'Folder 1',
       kind: 'mail',
+      threadInfo: {
+        threadId: 'thread-preview-1',
+        branchId: 'branch-preview-1',
+        branchIndex: 1,
+        branchCount: 1,
+        threadItemCount: 2,
+        branchItemCount: 2,
+        isRepresentative: true
+      },
       mailboxDetail: previewDetail
     }
 
@@ -2152,6 +2162,29 @@ describe('shell and preview', () => {
       ],
       files: []
     })
+    const threadResponse: SearchThreadResponse = {
+      threadId: 'thread-preview-1',
+      selectedItemId: previewSummary.id,
+      branches: [
+        {
+          branchId: 'branch-preview-1',
+          branchIndex: 1,
+          branchCount: 1,
+          representativeId: previewSummary.id,
+          items: [
+            previewSummary,
+            {
+              ...previewSummary,
+              id: 'all-mailbox-preview-older',
+              messageId: 'all-mailbox-preview-older',
+              subject: 'Older subject',
+              mailboxDetail: undefined
+            }
+          ]
+        }
+      ]
+    }
+    const threadSpy = vi.spyOn(api.item, 'thread').mockResolvedValue(threadResponse)
     vi.spyOn(api.hiddenFilters, 'list').mockResolvedValue(hiddenRulesResponse)
     vi.spyOn(api.pst, 'refreshSearchIndexStatus').mockResolvedValue({ status: idleStatus })
     vi.spyOn(api, 'search').mockImplementation(async (params) => {
@@ -2208,6 +2241,15 @@ describe('shell and preview', () => {
     const previewDialog = await screen.findByRole('dialog', { name: 'Email preview' })
     expect(previewDialog).toBeInTheDocument()
     expect(await within(previewDialog).findByText('Body from subject click')).toBeInTheDocument()
+
+    await user.click(within(previewDialog).getByRole('button', { name: 'Close' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Hide duplicates' }))
+    const branchButton = await within(dialog).findByTitle('Show related thread messages')
+    await user.click(branchButton)
+
+    const threadDialog = await screen.findByRole('dialog', { name: 'Related thread' })
+    expect(within(threadDialog).getByText('Older subject')).toBeInTheDocument()
+    expect(threadSpy).toHaveBeenCalledWith(previewSummary.id)
   })
 
   it('lets the all items modal load more rows in a selected batch size', async () => {

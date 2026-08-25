@@ -8,6 +8,7 @@ import {
   Download,
   FileText,
   Flag,
+  GitBranch,
   Mail,
   RefreshCw,
   Search,
@@ -18,7 +19,13 @@ import { api } from '@/api'
 import { cn, formatBytes, formatDate, normalizeText } from '@/lib/utils'
 import { normalizeSearchResultsPage, resolveSelectionScope } from '@/lib/search'
 import { EmailPreview } from '@/components/layout'
-import type { MessageDetail, MessageSummary, ReviewState, SearchSourceType } from '@/types'
+import type {
+  MessageDetail,
+  MessageSummary,
+  ReviewState,
+  SearchSourceType,
+  SearchThreadResponse
+} from '@/types'
 import {
   Badge,
   Button,
@@ -138,6 +145,8 @@ const INITIAL_SORT_STATE: AllItemsSortState = {
 
 const ITEM_GRID_TEMPLATE =
   'grid grid-cols-[48px_110px_minmax(0,1.6fr)_minmax(0,1.2fr)_minmax(0,1.4fr)_120px_160px_110px]'
+const ITEM_GRID_TEMPLATE_WITH_THREAD =
+  'grid grid-cols-[48px_110px_minmax(0,1.5fr)_minmax(0,1.15fr)_minmax(0,1.25fr)_minmax(150px,1fr)_120px_160px_110px]'
 
 function createPageTrackingState(): Record<AllItemsSourceTab, Set<number>> {
   return {
@@ -223,6 +232,7 @@ export function AllItemsDialog({
   const inFlightPagesRef = React.useRef<Record<AllItemsSourceTab, Set<number>>>(createPageTrackingState())
   const reviewRequestRef = React.useRef(0)
   const previewRequestRef = React.useRef(0)
+  const threadRequestRef = React.useRef(0)
   const pagingGenerationRef = React.useRef(0)
   const activeTabRef = React.useRef<AllItemsSourceTab>('mailbox')
 
@@ -247,6 +257,9 @@ export function AllItemsDialog({
   const [previewDetail, setPreviewDetail] = React.useState<MessageDetail | null>(null)
   const [previewLoading, setPreviewLoading] = React.useState(false)
   const [previewError, setPreviewError] = React.useState('')
+  const [threadDetails, setThreadDetails] = React.useState<SearchThreadResponse | null>(null)
+  const [threadLoading, setThreadLoading] = React.useState(false)
+  const [threadError, setThreadError] = React.useState('')
 
   const selectedTotalsScope = React.useMemo(
     () => resolveSelectionScope(selectedCasePath, selectedScopePath),
@@ -256,6 +269,7 @@ export function AllItemsDialog({
   const activeState = tabState[activeTab]
   const sortKey = getSortKey(sortState)
   const sortLabel = getSortLabel(sortState)
+  const gridTemplate = activeTab === 'mailbox' && hideDuplicates ? ITEM_GRID_TEMPLATE_WITH_THREAD : ITEM_GRID_TEMPLATE
   const hasMoreItems = activeState.page > 0 && activeState.page < activeState.totalPages
   const rows = activeState.items
   const selectedRows = React.useMemo(
@@ -361,6 +375,46 @@ export function AllItemsDialog({
     setPreviewDetail(null)
     setPreviewLoading(false)
     setPreviewError('')
+  }
+
+  async function openThreadDetails(item: MessageSummary): Promise<void> {
+    const itemId = normalizeText(item.id)
+    if (!itemId || item.sourceType !== 'mailbox' || !item.threadInfo) {
+      return
+    }
+
+    const requestId = ++threadRequestRef.current
+    setThreadDetails(null)
+    setThreadError('')
+    setThreadLoading(true)
+
+    try {
+      const response = await api.item.thread(itemId)
+      if (threadRequestRef.current !== requestId) {
+        return
+      }
+      setThreadDetails(response)
+    } catch (error) {
+      if (threadRequestRef.current === requestId) {
+        setThreadError(error instanceof Error ? error.message : 'Unable to load thread details')
+      }
+    } finally {
+      if (threadRequestRef.current === requestId) {
+        setThreadLoading(false)
+      }
+    }
+  }
+
+  function closeThreadDetails(): void {
+    threadRequestRef.current += 1
+    setThreadDetails(null)
+    setThreadLoading(false)
+    setThreadError('')
+  }
+
+  function openThreadMember(item: MessageSummary): void {
+    closeThreadDetails()
+    void openItemPreview(item)
   }
 
   async function togglePreviewFlag(): Promise<void> {
@@ -758,6 +812,7 @@ export function AllItemsDialog({
     setBulkActionLoading(false)
     setDialogError('')
     closeItemPreview()
+    closeThreadDetails()
   }, [open, clearSelection])
 
   React.useLayoutEffect(() => {
@@ -960,7 +1015,7 @@ export function AllItemsDialog({
               <span className="chip chip-active">{`Showing ${activeState.total} items`}</span>
               <span className="chip">Sorted by {sortLabel}</span>
               <span className="chip chip-active">Flagged size: {formatBytes(activeState.flaggedSizeBytes ?? 0)}</span>
-              {hideDuplicates ? <span className="chip chip-active">Older thread items hidden</span> : null}
+              {hideDuplicates ? <span className="chip chip-active">Older linked thread items hidden</span> : null}
               {mailOnly ? <span className="chip chip-active">Mail only</span> : null}
               {reviewFlaggedOnly ? <span className="chip chip-active">Flagged</span> : null}
               {reviewTaggedOnly ? <span className="chip chip-active">Tagged</span> : null}
@@ -1009,7 +1064,7 @@ export function AllItemsDialog({
           ) : null}
 
           <div
-            className={`${ITEM_GRID_TEMPLATE} border-b border-[color:var(--line)] bg-[color:var(--surface)] px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.2em] text-[color:var(--muted)]`}
+            className={`${gridTemplate} border-b border-[color:var(--line)] bg-[color:var(--surface)] px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.2em] text-[color:var(--muted)]`}
           >
             <div className="flex items-center justify-center">
               <input
@@ -1028,6 +1083,7 @@ export function AllItemsDialog({
             {renderSortHeader('subject', 'Subject')}
             {renderSortHeader('sender', 'Sender')}
             {renderSortHeader('location', 'Location')}
+            {activeTab === 'mailbox' && hideDuplicates ? <div>Thread</div> : null}
             <div className="min-w-0 whitespace-nowrap text-right">Size</div>
             {renderSortHeader('date', 'Date')}
             <div className="text-right">Flagged</div>
@@ -1086,7 +1142,7 @@ export function AllItemsDialog({
                         tabIndex={0}
                         aria-selected={active}
                         className={cn(
-                          `${ITEM_GRID_TEMPLATE} items-center gap-4 rounded-2xl border px-4 py-3 text-left transition focus:outline-none focus:ring-2 focus:ring-[color:var(--focus-ring)]`,
+                          `${gridTemplate} items-center gap-4 rounded-2xl border px-4 py-3 text-left transition focus:outline-none focus:ring-2 focus:ring-[color:var(--focus-ring)]`,
                           selected
                             ? 'border-[color:var(--accent)] bg-[color:var(--accent-soft)]'
                             : active
@@ -1185,6 +1241,34 @@ export function AllItemsDialog({
                             {item.scopePath || ''}
                           </div>
                         </div>
+
+                        {activeTab === 'mailbox' && hideDuplicates ? (
+                          <div className="min-w-0">
+                            {item.threadInfo ? (
+                              <button
+                                type="button"
+                                className="flex min-w-0 max-w-full flex-col items-start gap-0.5 rounded-lg px-2 py-1 text-left text-xs text-[color:var(--accent)] transition hover:bg-[color:var(--accent-soft)] focus:outline-none focus:ring-2 focus:ring-[color:var(--focus-ring)]"
+                                title="Show related thread messages"
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  void openThreadDetails(item)
+                                }}
+                              >
+                                <span className="inline-flex max-w-full items-center gap-1.5 truncate font-semibold">
+                                  <GitBranch className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                                  <span className="truncate">
+                                    {`Branch ${item.threadInfo.branchIndex} of ${item.threadInfo.branchCount}`}
+                                  </span>
+                                </span>
+                                <span className="truncate text-[color:var(--muted)]">
+                                  {`${item.threadInfo.branchItemCount} ${item.threadInfo.branchItemCount === 1 ? 'item' : 'items'}`}
+                                </span>
+                              </button>
+                            ) : (
+                              <span className="text-xs text-[color:var(--muted)]">Independent</span>
+                            )}
+                          </div>
+                        ) : null}
 
                         <div
                           className="min-w-0 overflow-hidden text-right text-sm text-[color:var(--text)]"
@@ -1314,6 +1398,84 @@ export function AllItemsDialog({
               emptyStateTitle={previewError ? 'Unable to load preview' : 'Loading preview...'}
               emptyStateDescription={previewError || 'Fetching the selected email from the index.'}
             />
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(threadDetails) || threadLoading || Boolean(threadError)}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) {
+            closeThreadDetails()
+          }
+        }}
+      >
+        <DialogContent
+          showCloseButton
+          className="h-[min(86vh,760px)] max-h-[86vh] w-[min(94vw,900px)] overflow-hidden p-0"
+        >
+          <div className="flex h-full min-h-0 flex-col">
+            <div className="border-b border-[color:var(--line)] px-6 py-5">
+              <DialogTitle>Related thread</DialogTitle>
+              <DialogDescription className="mt-1">
+                Linked messages grouped by reply branch. Select a member to open its indexed preview.
+              </DialogDescription>
+            </div>
+
+            {threadError ? (
+              <div className="m-5 rounded-2xl border border-[color:rgba(220,38,38,0.22)] bg-[color:rgba(220,38,38,0.08)] px-4 py-3 text-sm text-[color:var(--danger)]">
+                {threadError}
+              </div>
+            ) : threadLoading ? (
+              <div className="empty-state m-5">Loading related messages...</div>
+            ) : threadDetails ? (
+              <ScrollArea className="min-h-0 flex-1 px-6 py-5">
+                <div className="space-y-5">
+                  {threadDetails.branches.map((branch) => (
+                    <section key={branch.branchId} className="space-y-2">
+                      <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-[color:var(--text)]">
+                        <GitBranch className="h-4 w-4 text-[color:var(--accent)]" aria-hidden="true" />
+                        <span>{`Branch ${branch.branchIndex} of ${branch.branchCount}`}</span>
+                        <Badge>{`${branch.items.length} ${branch.items.length === 1 ? 'item' : 'items'}`}</Badge>
+                      </div>
+                      <div className="space-y-2">
+                        {branch.items.map((item) => {
+                          const isRepresentative =
+                            normalizeText(item.id) === normalizeText(branch.representativeId)
+                          return (
+                            <button
+                              key={item.id}
+                              type="button"
+                              className="flex w-full flex-wrap items-center justify-between gap-3 rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-strong)] px-4 py-3 text-left transition hover:border-[color:var(--accent)] hover:bg-[color:var(--surface-soft)] focus:outline-none focus:ring-2 focus:ring-[color:var(--focus-ring)]"
+                              onClick={() => openThreadMember(item)}
+                            >
+                              <span className="min-w-0 flex-1">
+                                <span className="flex min-w-0 items-center gap-2">
+                                  <span className="truncate text-sm font-semibold text-[color:var(--text)]">
+                                    {item.subject || '(no subject)'}
+                                  </span>
+                                  {isRepresentative ? <Badge className="shrink-0">Latest</Badge> : null}
+                                </span>
+                                <span className="mt-1 block truncate text-xs text-[color:var(--muted)]">
+                                  {item.senderName || item.senderEmailAddress || '(unknown sender)'}
+                                  {item.senderEmailAddress ? ` · ${item.senderEmailAddress}` : ''}
+                                </span>
+                              </span>
+                              <span className="max-w-[18rem] shrink-0 text-right text-xs text-[color:var(--muted)]">
+                                <span className="block truncate">{formatDate(item.sortDate || item.creationTime || item.clientSubmitTime)}</span>
+                                <span className="mt-1 block truncate" title={getRowLocation(item)}>
+                                  {getRowLocation(item) || '(unknown location)'}
+                                </span>
+                              </span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </section>
+                  ))}
+                </div>
+              </ScrollArea>
+            ) : null}
           </div>
         </DialogContent>
       </Dialog>

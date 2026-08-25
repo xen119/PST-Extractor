@@ -281,6 +281,20 @@ async function main(): Promise<void> {
     apiSecurity
   })
 
+  if (parseBoolean(process.env.SEARCH_INDEX_REFRESH_ON_STARTUP, true)) {
+    const refreshCoordinator = app.get('searchIndexRefreshCoordinator') as {
+      start: (source: 'mailboxes' | 'items', trigger: 'startup' | 'manual') => Promise<unknown>
+    }
+    void refreshCoordinator
+      .start('mailboxes', 'startup')
+      .then(() => {
+        console.log('Mailbox search index startup refresh started.')
+      })
+      .catch((error) => {
+        console.error('Unable to start mailbox search index startup refresh:', error)
+      })
+  }
+
   const httpsOptions = loadHttpsServerOptions()
   const listenerProtocol = httpsOptions ? 'https' : 'http'
   const listenerPort = httpsOptions ? httpsPort : port

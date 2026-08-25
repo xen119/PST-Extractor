@@ -64,7 +64,8 @@ import {
   type SearchIndexSearchOptions,
   type SearchIndexRefreshSource,
   type SearchIndexStore,
-  type SearchScope
+  type SearchScope,
+  type SearchThreadGroup
 } from './searchIndex'
 import {
   buildFlaggedBundleWorkspaceKey,
@@ -669,6 +670,7 @@ interface LoadedReviewableItem {
   resolvedDisplayBCC: string
   sortDate: string
   review: ReviewState
+  threadInfo?: SearchIndexDocument['threadInfo']
 }
 
 function normalizeRequestInfoField(value: unknown): string {
@@ -2795,7 +2797,13 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       'sortDate',
       'flagged',
       'tags',
-      'reviewUpdatedAt'
+      'reviewUpdatedAt',
+      'threadId',
+      'branchId',
+      'branchIndex',
+      'branchCount',
+      'threadItemCount',
+      'branchItemCount'
     ]
       .map(csvCell)
       .join(',')
@@ -2818,7 +2826,13 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       item.sortDate,
       item.review.flagged,
       item.review.tags.join('; '),
-      item.review.updatedAt
+      item.review.updatedAt,
+      item.threadInfo?.threadId || '',
+      item.threadInfo?.branchId || '',
+      item.threadInfo?.branchIndex || '',
+      item.threadInfo?.branchCount || '',
+      item.threadInfo?.threadItemCount || '',
+      item.threadInfo?.branchItemCount || ''
     ]
       .map(csvCell)
       .join(',')
@@ -2850,11 +2864,15 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       resolvedDisplayCC: item.resolvedDisplayCC,
       resolvedDisplayBCC: item.resolvedDisplayBCC,
       sortDate: item.sortDate || '',
-      review: normalizeReviewState(item.review)
+      review: normalizeReviewState(item.review),
+      threadInfo: item.threadInfo
     }
   }
 
-  function buildSearchResultSummary(item: SearchIndexDocument) {
+  function buildSearchResultSummary(
+    item: SearchIndexDocument,
+    options: { includeMailboxDetail?: boolean } = {}
+  ) {
     const id =
       item.sourceType === 'mailbox'
         ? buildMailboxSearchDocumentId(item.mailboxKey, item.messageId)
@@ -2897,9 +2915,45 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       scopeLabel: item.scopeLabel,
       fileName: item.fileName,
       mailboxName: item.mailboxName,
-      mailboxDetail: item.sourceType === 'mailbox' ? buildMailboxSearchPreviewDetail(item) : undefined,
+      mailboxDetail:
+        options.includeMailboxDetail === false || item.sourceType !== 'mailbox'
+          ? undefined
+          : buildMailboxSearchPreviewDetail(item),
+      threadInfo: item.threadInfo,
       contentType: item.contentType,
       downloadFilename: item.downloadFilename
+    }
+  }
+
+  function buildSearchThreadResponse(group: SearchThreadGroup) {
+    return {
+      threadId: group.threadId,
+      selectedItemId: group.selectedItemId,
+      branches: group.branches.map((branch) => ({
+        branchId: branch.branchId,
+        branchIndex: branch.branchIndex,
+        branchCount: branch.branchCount,
+        representativeId: branch.representativeId,
+        items: branch.items.map((item) => {
+          const summary = buildSearchResultSummary(item, { includeMailboxDetail: false })
+          return {
+            ...summary,
+            threadInfo: {
+              threadId: group.threadId,
+              branchId: branch.branchId,
+              branchIndex: branch.branchIndex,
+              branchCount: branch.branchCount,
+              threadItemCount: new Set(
+                group.branches.flatMap((current) =>
+                  current.items.map((member) => buildMailboxSearchDocumentId(member.mailboxKey, member.messageId))
+                )
+              ).size,
+              branchItemCount: branch.items.length,
+              isRepresentative: normalizeText(summary.id) === normalizeText(branch.representativeId)
+            }
+          }
+        })
+      }))
     }
   }
 
@@ -7103,6 +7157,80 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
       })
 
       responseJson(res, 200, { detail })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.itemThread, async (req, res) => {
+    try {
+      const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, {
+          error: 'Authentication required'
+        })
+        return
+      }
+
+      const currentUser = authSession ? await authUserStore.getUser(authSession.username) : null
+      const allowAllCases = !authConfig.enabled || isAdminAuthSession(authSession, authConfig)
+      const allowedCasePaths = allowAllCases ? [] : getAccessibleCasePaths(currentUser)
+      const item = await searchIndexStore.findDocumentById(req.params.itemId)
+      if (!item || item.sourceType !== 'mailbox') {
+        responseJson(res, 404, { error: 'Mailbox thread not found' })
+        return
+      }
+      if (!isScopePathAllowed(item.scopePath, allowedCasePaths, allowAllCases)) {
+        recordAuditEvent({
+          req,
+          session: authSession,
+          action: 'search.thread.view',
+          target: item.subject || item.messageId,
+          outcome: 'denied',
+          metadata: {
+            reason: 'Case access required',
+            scopePath: item.scopePath
+          }
+        })
+        responseJson(res, 403, { error: 'Case access required' })
+        return
+      }
+
+      const allowedMailboxKeys = allowAllCases
+        ? undefined
+        : dedupeTextValues(
+            (await searchIndexStore.listFileFingerprints('mailboxes'))
+              .filter((fingerprint) =>
+                isScopePathAllowed(fingerprint.scopePath, allowedCasePaths, allowAllCases)
+              )
+              .map((fingerprint) => fingerprint.mailboxKey)
+          )
+      if (allowedMailboxKeys && !allowedMailboxKeys.includes(item.mailboxKey)) {
+        allowedMailboxKeys.push(item.mailboxKey)
+      }
+
+      const thread = await searchIndexStore.findThreadById(req.params.itemId, {
+        allowedMailboxKeys,
+        reviewerUsername: getReviewOwnerUsername(authSession)
+      })
+      if (!thread) {
+        responseJson(res, 404, { error: 'No linked mailbox thread found' })
+        return
+      }
+
+      recordAuditEvent({
+        req,
+        session: authSession,
+        action: 'search.thread.view',
+        target: thread.threadId,
+        outcome: 'success',
+        metadata: {
+          scopePath: item.scopePath,
+          branchCount: thread.branches.length,
+          itemCount: thread.branches.reduce((total, branch) => total + branch.items.length, 0)
+        }
+      })
+      responseJson(res, 200, buildSearchThreadResponse(thread))
     } catch (error) {
       createRouteErrorHandler(res, error)
     }

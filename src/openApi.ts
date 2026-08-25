@@ -143,6 +143,19 @@ function messageSummarySchema(): Record<string, unknown> {
           createdAt: { type: 'string' },
           updatedAt: { type: 'string' }
         }
+      },
+      threadInfo: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          threadId: { type: 'string' },
+          branchId: { type: 'string' },
+          branchIndex: { type: 'integer' },
+          branchCount: { type: 'integer' },
+          threadItemCount: { type: 'integer' },
+          branchItemCount: { type: 'integer' },
+          isRepresentative: { type: 'boolean' }
+        }
       }
     }
   }
@@ -890,6 +903,36 @@ function searchResultItemSchema(): Record<string, unknown> {
         }
       }
     ]
+  }
+}
+
+function searchThreadResponseSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['threadId', 'selectedItemId', 'branches'],
+    properties: {
+      threadId: { type: 'string' },
+      selectedItemId: { type: 'string' },
+      branches: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['branchId', 'branchIndex', 'branchCount', 'representativeId', 'items'],
+          properties: {
+            branchId: { type: 'string' },
+            branchIndex: { type: 'integer' },
+            branchCount: { type: 'integer' },
+            representativeId: { type: 'string' },
+            items: {
+              type: 'array',
+              items: messageSummarySchema()
+            }
+          }
+        }
+      }
+    }
   }
 }
 
@@ -2369,6 +2412,21 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
             ...errorResponse(401, 'Authentication required'),
             ...errorResponse(403, 'Case access required'),
             ...errorResponse(404, 'Item not found')
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.itemThread)]: {
+        get: {
+          tags: ['Extraction'],
+          summary: 'List compact mailbox thread members grouped by reply branch',
+          parameters: [
+            { name: 'itemId', in: 'path', required: true, schema: { type: 'string' } }
+          ],
+          responses: {
+            200: jsonResponse(searchThreadResponseSchema()),
+            ...errorResponse(401, 'Authentication required'),
+            ...errorResponse(403, 'Case access required'),
+            ...errorResponse(404, 'Mailbox thread not found')
           }
         }
       },

@@ -5,6 +5,7 @@ import AdmZip from 'adm-zip'
 import {
   MemorySearchIndexStore,
   MongoSearchIndexStore,
+  buildMailboxThreadMetadata,
   refreshSearchIndexFromCatalog,
   refreshSearchIndexSourceFromCatalog,
   type SearchIndexDocument
@@ -502,7 +503,13 @@ describe('search index cache', () => {
         sortDateMs: Date.parse('2024-01-01T00:00:00.000Z'),
         sortDate: '2024-01-01T00:00:00.000Z',
         updatedAt: new Date('2024-01-01T00:00:00.000Z').toISOString(),
-        mailboxDetail: { conversationTopic: 'Project Alpha' } as any
+        threadMetadata: {
+          messageId: '<project-alpha-root@example.com>',
+          inReplyToId: '',
+          referenceIds: [],
+          conversationId: '',
+          isForward: false
+        }
       })
     ])
     await store.replaceMailboxDocuments('C:/PST/Case1/Search1/beta.pst', [
@@ -529,7 +536,13 @@ describe('search index cache', () => {
         sortDateMs: Date.parse('2024-01-03T00:00:00.000Z'),
         sortDate: '2024-01-03T00:00:00.000Z',
         updatedAt: new Date('2024-01-03T00:00:00.000Z').toISOString(),
-        mailboxDetail: { conversationTopic: 'Project Alpha' } as any
+        threadMetadata: {
+          messageId: '<project-alpha-reply@example.com>',
+          inReplyToId: '<project-alpha-root@example.com>',
+          referenceIds: ['project-alpha-root@example.com'],
+          conversationId: '',
+          isForward: false
+        }
       })
     ])
 
@@ -583,7 +596,13 @@ describe('search index cache', () => {
         searchTokens: ['project', 'alpha', 'meeting', 'appointment'],
         sortDate: '2024-01-01T00:00:00.000Z',
         sortDateMs: Date.parse('2024-01-01T00:00:00.000Z'),
-        mailboxDetail: { conversationTopic: 'Project Alpha' } as any
+        threadMetadata: {
+          messageId: '<appointment-root@example.com>',
+          inReplyToId: '',
+          referenceIds: [],
+          conversationId: 'appointment-conversation-a',
+          isForward: false
+        }
       }),
       makeDocument({
         mailboxKey: 'C:/PST/Case1/Search1/calendar.pst',
@@ -595,7 +614,13 @@ describe('search index cache', () => {
         searchTokens: ['project', 'alpha', 'meeting', 'appointment'],
         sortDate: '2024-01-02T00:00:00.000Z',
         sortDateMs: Date.parse('2024-01-02T00:00:00.000Z'),
-        mailboxDetail: { conversationTopic: 'Project Alpha' } as any
+        threadMetadata: {
+          messageId: '<appointment-update@example.com>',
+          inReplyToId: '',
+          referenceIds: [],
+          conversationId: 'appointment-conversation-a',
+          isForward: false
+        }
       }),
       makeDocument({
         mailboxKey: 'C:/PST/Case1/Search1/calendar.pst',
@@ -640,6 +665,328 @@ describe('search index cache', () => {
     expect(collapsed.items).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ messageId: 'appointment:older' })])
     )
+  })
+
+  it('does not collapse same-topic forwards without explicit relationship metadata', async () => {
+    const store = new MemorySearchIndexStore()
+    await store.replaceMailboxDocuments('C:/PST/Case1/Search1/forwarded.pst', [
+      makeDocument({
+        mailboxKey: 'C:/PST/Case1/Search1/forwarded.pst',
+        messageId: 'message:forward-1',
+        subject: 'Indicative offer',
+        searchText: 'indicative offer forwarded message',
+        searchTokens: ['indicative', 'offer', 'forwarded', 'message'],
+        sortDate: '2024-01-01T00:00:00.000Z',
+        sortDateMs: Date.parse('2024-01-01T00:00:00.000Z'),
+        mailboxDetail: { conversationTopic: 'Indicative offer' } as any
+      }),
+      makeDocument({
+        mailboxKey: 'C:/PST/Case1/Search1/forwarded.pst',
+        messageId: 'message:forward-2',
+        subject: 'Indicative offer',
+        searchText: 'indicative offer forwarded message',
+        searchTokens: ['indicative', 'offer', 'forwarded', 'message'],
+        sortDate: '2024-01-02T00:00:00.000Z',
+        sortDateMs: Date.parse('2024-01-02T00:00:00.000Z'),
+        mailboxDetail: { conversationTopic: 'Indicative offer' } as any
+      })
+    ])
+
+    const collapsed = await store.search({
+      scope: 'all',
+      query: 'indicative',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'date-desc',
+      page: 1,
+      pageSize: 20,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: '',
+      collapseDuplicates: true
+    })
+
+    expect(collapsed.total).toBe(2)
+    expect(collapsed.items.map((item) => item.messageId)).toEqual(
+      expect.arrayContaining(['message:forward-1', 'message:forward-2'])
+    )
+  })
+
+  it('keeps copied-reference forwards in separate branches and collapses replies to each forward', async () => {
+    const store = new MemorySearchIndexStore()
+    const mailboxKey = 'C:/PST/Case1/Search1/branches.pst'
+    const makeThreadDocument = (overrides: Partial<SearchIndexDocument>): SearchIndexDocument =>
+      makeDocument({
+        mailboxKey,
+        fileName: 'branches.pst',
+        mailboxName: 'Branches',
+        subject: 'Indicative offer',
+        originalSubject: 'Indicative offer',
+        searchText: 'indicative offer',
+        searchTokens: ['indicative', 'offer'],
+        ...overrides
+      })
+
+    await store.replaceMailboxDocuments(mailboxKey, [
+      makeThreadDocument({
+        messageId: 'message:root',
+        sortDate: '2024-01-01T00:00:00.000Z',
+        sortDateMs: Date.parse('2024-01-01T00:00:00.000Z'),
+        threadMetadata: {
+          messageId: '<root@example.com>',
+          inReplyToId: '',
+          referenceIds: [],
+          conversationId: '',
+          isForward: false
+        }
+      }),
+      makeThreadDocument({
+        messageId: 'message:original-reply',
+        sortDate: '2024-01-02T00:00:00.000Z',
+        sortDateMs: Date.parse('2024-01-02T00:00:00.000Z'),
+        threadMetadata: {
+          messageId: '<original-reply@example.com>',
+          inReplyToId: '<root@example.com>',
+          referenceIds: ['root@example.com'],
+          conversationId: '',
+          isForward: false
+        }
+      }),
+      makeThreadDocument({
+        messageId: 'message:march-forward',
+        subject: 'Fw: Indicative offer',
+        originalSubject: 'Fw: Indicative offer',
+        sortDate: '2024-03-01T00:00:00.000Z',
+        sortDateMs: Date.parse('2024-03-01T00:00:00.000Z'),
+        threadMetadata: {
+          messageId: '<march-forward@example.com>',
+          inReplyToId: '<root@example.com>',
+          referenceIds: ['root@example.com'],
+          conversationId: '',
+          isForward: true
+        }
+      }),
+      makeThreadDocument({
+        messageId: 'message:march-reply',
+        subject: 'Re: Fw: Indicative offer',
+        originalSubject: 'Re: Fw: Indicative offer',
+        sortDate: '2024-03-02T00:00:00.000Z',
+        sortDateMs: Date.parse('2024-03-02T00:00:00.000Z'),
+        threadMetadata: {
+          messageId: '<march-reply@example.com>',
+          inReplyToId: '<march-forward@example.com>',
+          referenceIds: ['root@example.com', 'march-forward@example.com'],
+          conversationId: '',
+          isForward: false
+        }
+      }),
+      makeThreadDocument({
+        messageId: 'message:december-forward',
+        subject: 'Fwd: Indicative offer',
+        originalSubject: 'Fwd: Indicative offer',
+        sortDate: '2024-12-01T00:00:00.000Z',
+        sortDateMs: Date.parse('2024-12-01T00:00:00.000Z'),
+        threadMetadata: {
+          messageId: '<december-forward@example.com>',
+          inReplyToId: '<root@example.com>',
+          referenceIds: ['root@example.com'],
+          conversationId: '',
+          isForward: true
+        }
+      })
+    ])
+
+    const collapsed = await store.search({
+      scope: 'all',
+      query: 'indicative',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'date-desc',
+      page: 1,
+      pageSize: 20,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: '',
+      collapseDuplicates: true
+    })
+
+    expect(collapsed.total).toBe(3)
+    expect(collapsed.items.map((item) => item.messageId)).toEqual([
+      'message:december-forward',
+      'message:march-reply',
+      'message:original-reply'
+    ])
+  })
+
+  it('retains the newest representative for each reply branch', async () => {
+    const store = new MemorySearchIndexStore()
+    const mailboxKey = 'C:/PST/Case1/Search1/branching.pst'
+    const makeBranchDocument = (overrides: Partial<SearchIndexDocument>): SearchIndexDocument =>
+      makeDocument({
+        mailboxKey,
+        fileName: 'branching.pst',
+        subject: 'Branching thread',
+        searchText: 'branching thread root',
+        searchTokens: ['branching', 'thread', 'root'],
+        ...overrides
+      })
+
+    await store.replaceMailboxDocuments(mailboxKey, [
+      makeBranchDocument({
+        messageId: 'message:branch-root',
+        sortDate: '2024-01-01T00:00:00.000Z',
+        sortDateMs: Date.parse('2024-01-01T00:00:00.000Z'),
+        threadMetadata: {
+          messageId: '<branch-root@example.com>',
+          inReplyToId: '',
+          referenceIds: [],
+          conversationId: '',
+          isForward: false
+        }
+      }),
+      makeBranchDocument({
+        messageId: 'message:branch-a',
+        searchText: 'branching branch-a',
+        searchTokens: ['branching', 'branch-a'],
+        sortDate: '2024-01-02T00:00:00.000Z',
+        sortDateMs: Date.parse('2024-01-02T00:00:00.000Z'),
+        threadMetadata: {
+          messageId: '<branch-a@example.com>',
+          inReplyToId: '<branch-root@example.com>',
+          referenceIds: ['branch-root@example.com'],
+          conversationId: '',
+          isForward: false
+        }
+      }),
+      makeBranchDocument({
+        messageId: 'message:branch-a-latest',
+        searchText: 'branching branch-a latest',
+        searchTokens: ['branching', 'branch-a', 'latest'],
+        sortDate: '2024-01-03T00:00:00.000Z',
+        sortDateMs: Date.parse('2024-01-03T00:00:00.000Z'),
+        threadMetadata: {
+          messageId: '<branch-a-latest@example.com>',
+          inReplyToId: '<branch-a@example.com>',
+          referenceIds: ['branch-root@example.com', 'branch-a@example.com'],
+          conversationId: '',
+          isForward: false
+        }
+      }),
+      makeBranchDocument({
+        messageId: 'message:branch-b',
+        searchText: 'branching branch-b',
+        searchTokens: ['branching', 'branch-b'],
+        sortDate: '2024-01-04T00:00:00.000Z',
+        sortDateMs: Date.parse('2024-01-04T00:00:00.000Z'),
+        threadMetadata: {
+          messageId: '<branch-b@example.com>',
+          inReplyToId: '<branch-root@example.com>',
+          referenceIds: ['branch-root@example.com'],
+          conversationId: '',
+          isForward: false
+        }
+      })
+    ])
+
+    const collapsed = await store.search({
+      scope: 'all',
+      query: 'branching',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'date-desc',
+      page: 1,
+      pageSize: 20,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: '',
+      collapseDuplicates: true
+    })
+
+    expect(collapsed.items.map((item) => item.messageId)).toEqual([
+      'message:branch-b',
+      'message:branch-a-latest'
+    ])
+    expect(collapsed.items.every((item) => item.threadInfo?.branchCount === 2)).toBe(true)
+    expect(collapsed.items.find((item) => item.messageId === 'message:branch-a-latest')?.threadInfo).toMatchObject({
+      branchItemCount: 3,
+      threadItemCount: 4,
+      isRepresentative: true
+    })
+
+    const oneBranch = await store.search({
+      scope: 'all',
+      query: 'branch-a',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'date-desc',
+      page: 1,
+      pageSize: 20,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: '',
+      collapseDuplicates: true
+    })
+    expect(oneBranch.items.map((item) => item.messageId)).toEqual(['message:branch-a-latest'])
+  })
+
+  it('parses folded reply and references headers into relationship metadata', () => {
+    expect(
+      buildMailboxThreadMetadata(
+        {
+          internetMessageId: '<reply@example.com>',
+          inReplyToId: '',
+          conversationId: '',
+          transportMessageHeaders:
+            'In-Reply-To: <root@example.com>\r\nReferences: <root@example.com>\r\n  <prior@example.com>'
+        },
+        'mail'
+      )
+    ).toEqual({
+      messageId: 'reply@example.com',
+      inReplyToId: 'root@example.com',
+      referenceIds: ['root@example.com', 'prior@example.com'],
+      conversationId: '',
+      isForward: false
+    })
+    expect(
+      buildMailboxThreadMetadata(
+        {
+          internetMessageId: 'not-a-message-id',
+          inReplyToId: 'also-invalid',
+          conversationId: '',
+          transportMessageHeaders: 'References: malformed-value'
+        },
+        'mail'
+      )
+    ).toBeUndefined()
+  })
+
+  it('classifies forwards from subject prefixes and unambiguous body markers only', () => {
+    const baseDetail = {
+      internetMessageId: '<message@example.com>',
+      inReplyToId: '',
+      conversationId: '',
+      transportMessageHeaders: ''
+    }
+
+    expect(
+      buildMailboxThreadMetadata({ ...baseDetail, subject: 'Fw: Indicative offer' }, 'mail')?.isForward
+    ).toBe(true)
+    expect(
+      buildMailboxThreadMetadata({ ...baseDetail, subject: 'Re: Fwd: Indicative offer' }, 'mail')?.isForward
+    ).toBe(true)
+    expect(
+      buildMailboxThreadMetadata({ ...baseDetail, bodyText: '-----Original Message-----\nFrom: Alice' }, 'mail')?.isForward
+    ).toBe(true)
+    expect(
+      buildMailboxThreadMetadata({ ...baseDetail, bodyText: 'Begin forwarded message:\nFrom: Alice' }, 'mail')?.isForward
+    ).toBe(true)
+    expect(
+      buildMailboxThreadMetadata({ ...baseDetail, subject: 'Re: Indicative offer', bodyText: 'From: Alice\nSent: today' }, 'mail')?.isForward
+    ).toBe(false)
+    expect(
+      buildMailboxThreadMetadata({ ...baseDetail, subject: 'Fw: Indicative offer' }, 'appointment')?.isForward
+    ).toBe(false)
   })
 
   it('includes item sizes and keeps flagged-size totals stable across paging', async () => {
@@ -1382,7 +1729,13 @@ describe('search index cache', () => {
       searchTokens: ['legacy-term', 'thread'],
       sortDate: '2024-01-01T00:00:00.000Z',
       sortDateMs: Date.parse('2024-01-01T00:00:00.000Z'),
-      mailboxDetail: { conversationTopic: 'Mongo thread' } as any
+      threadMetadata: {
+        messageId: '<mongo-root@example.com>',
+        inReplyToId: '',
+        referenceIds: [],
+        conversationId: '',
+        isForward: false
+      }
     })
     const newer = makeDocument({
       messageId: 'mongo:newer',
@@ -1390,7 +1743,13 @@ describe('search index cache', () => {
       searchTokens: ['thread'],
       sortDate: '2024-01-02T00:00:00.000Z',
       sortDateMs: Date.parse('2024-01-02T00:00:00.000Z'),
-      mailboxDetail: { conversationTopic: 'Mongo thread' } as any
+      threadMetadata: {
+        messageId: '<mongo-reply@example.com>',
+        inReplyToId: '<mongo-root@example.com>',
+        referenceIds: ['mongo-root@example.com'],
+        conversationId: '',
+        isForward: false
+      }
     })
     const find = jest.fn(() => {
       let skipCount = 0

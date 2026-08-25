@@ -826,7 +826,13 @@ describe('pst review api', () => {
       sortDate: '2024-01-02T00:00:00.000Z',
       sortDateMs: Date.parse('2024-01-02T00:00:00.000Z'),
       updatedAt: new Date('2024-01-02T00:00:00.000Z').toISOString(),
-      mailboxDetail: { conversationTopic: 'Shared contract' } as any
+      threadMetadata: {
+        messageId: '<shared-contract-root@example.com>',
+        inReplyToId: '',
+        referenceIds: [],
+        conversationId: '',
+        isForward: false
+      }
     })
     const duplicateDocB = makeSearchIndexDocument({
       mailboxKey: betaMailboxPath,
@@ -851,7 +857,13 @@ describe('pst review api', () => {
       sortDate: '2024-01-03T00:00:00.000Z',
       sortDateMs: Date.parse('2024-01-03T00:00:00.000Z'),
       updatedAt: new Date('2024-01-03T00:00:00.000Z').toISOString(),
-      mailboxDetail: { conversationTopic: 'Shared contract' } as any
+      threadMetadata: {
+        messageId: '<shared-contract-reply@example.com>',
+        inReplyToId: '<shared-contract-root@example.com>',
+        referenceIds: ['shared-contract-root@example.com'],
+        conversationId: '',
+        isForward: false
+      }
     })
 
     const seededSearchIndexStore = new MemorySearchIndexStore()
@@ -876,6 +888,12 @@ describe('pst review api', () => {
     expect(csvLines[1]).toContain('Shared contract')
 
     const itemId = buildMailboxSearchDocumentId(betaMailboxPath, newerMessageId)
+    const thread = await requestJson(`${started.baseUrl}/api/items/${encodeURIComponent(itemId)}/thread`)
+    expect(thread.branches).toHaveLength(1)
+    expect(thread.branches[0].items).toHaveLength(2)
+    expect(thread.branches[0].representativeId).toBe(itemId)
+    expect(thread.branches[0].items.every((item: { mailboxDetail?: unknown }) => !item.mailboxDetail)).toBe(true)
+
     const patch = await requestJson(`${started.baseUrl}/api/items/${encodeURIComponent(itemId)}/review`, {
       method: 'PATCH',
       headers: {

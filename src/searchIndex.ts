@@ -1,4 +1,4 @@
-import { randomBytes } from 'crypto'
+import { createHash, randomBytes } from 'crypto'
 import * as path from 'path'
 import { MongoClient } from 'mongodb'
 import type { ReviewStore } from './reviewStore'
@@ -29,7 +29,8 @@ export interface HiddenRuleRecord {
 export interface SearchIndexDocument {
   id?: string
   sourceType: SearchSourceType
-  threadKey?: string
+  threadMetadata?: MailboxThreadMetadata
+  threadInfo?: SearchThreadInfo
   mailboxKey: string
   scopePath: string
   scopeLabel: string
@@ -96,7 +97,40 @@ export interface SearchIndexFileFingerprint {
   scopeLabel: string
   size: number
   modifiedAt: string | null
+  indexVersion?: number
   updatedAt: string
+}
+
+export interface MailboxThreadMetadata {
+  messageId: string
+  inReplyToId: string
+  referenceIds: string[]
+  conversationId: string
+  isForward: boolean
+}
+
+export interface SearchThreadInfo {
+  threadId: string
+  branchId: string
+  branchIndex: number
+  branchCount: number
+  threadItemCount: number
+  branchItemCount: number
+  isRepresentative: boolean
+}
+
+export interface SearchThreadBranch {
+  branchId: string
+  branchIndex: number
+  branchCount: number
+  representativeId: string
+  items: SearchIndexDocument[]
+}
+
+export interface SearchThreadGroup {
+  threadId: string
+  selectedItemId: string
+  branches: SearchThreadBranch[]
 }
 
 export interface SearchIndexRefreshPlan {
@@ -179,6 +213,10 @@ export interface SearchIndexStore {
   deleteHiddenRule(filterId: string): Promise<boolean>
   search(options: SearchIndexSearchOptions): Promise<SearchIndexPage>
   findDocumentById(id: string): Promise<SearchIndexDocument | null>
+  findThreadById(
+    id: string,
+    options?: { allowedMailboxKeys?: string[]; reviewerUsername?: string }
+  ): Promise<SearchThreadGroup | null>
   listFileFingerprints(source: SearchIndexRefreshSource): Promise<SearchIndexFileFingerprint[]>
   upsertFileFingerprint(source: SearchIndexRefreshSource, fingerprint: SearchIndexFileFingerprint): Promise<void>
   replaceFileFingerprints(source: SearchIndexRefreshSource, fingerprints: SearchIndexFileFingerprint[]): Promise<void>
@@ -253,6 +291,8 @@ interface FileFingerprintCollectionLike {
 const DEFAULT_INDEX_COLLECTION = 'pst_search_documents'
 const DEFAULT_RULE_COLLECTION = 'pst_search_hidden_rules'
 const DEFAULT_FINGERPRINT_COLLECTION = 'pst_search_file_fingerprints'
+const CURRENT_MAILBOX_SEARCH_INDEX_VERSION = 3
+const CURRENT_ITEM_SEARCH_INDEX_VERSION = 0
 
 export interface MongoSearchIndexStoreConnectOptions {
   documentsCollectionName?: string
@@ -286,6 +326,12 @@ function normalizeRefreshSource(value: unknown): SearchIndexRefreshSource {
   return normalizeText(value).toLowerCase() === 'items' ? 'items' : 'mailboxes'
 }
 
+function getSearchIndexVersion(source: SearchIndexRefreshSource): number {
+  return normalizeRefreshSource(source) === 'mailboxes'
+    ? CURRENT_MAILBOX_SEARCH_INDEX_VERSION
+    : CURRENT_ITEM_SEARCH_INDEX_VERSION
+}
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
@@ -298,22 +344,97 @@ function uniqueTextValues(values: string[]): string[] {
   return [...new Set(values.map((value) => normalizeText(value)).filter(Boolean))]
 }
 
-export function buildMailboxThreadKey(
-  record: Pick<SearchIndexDocument, 'sourceType' | 'kind' | 'mailboxDetail'>
-): string {
-  const kind = normalizeText(record.kind).toLowerCase()
-  if (normalizeSourceType(record.sourceType) !== 'mailbox' || (kind !== 'mail' && kind !== 'appointment')) {
+function normalizeThreadMessageId(value: unknown): string {
+  const text = normalizeText(value).toLowerCase()
+  if (!text) {
     return ''
   }
+  const bracketed = text.match(/<[^<>]+>/)?.[0]
+  const normalized = (bracketed || text.split(/\s+/)[0]).replace(/^</, '').replace(/>$/, '').trim()
+  return normalized.includes('@') ? normalized : ''
+}
 
-  const conversationTopic = normalizeExactValue(
-    (record.mailboxDetail as MessageDetail | undefined)?.conversationTopic || ''
+function parseReferenceIds(value: unknown): string[] {
+  const text = String(value || '')
+  const bracketed = [...text.matchAll(/<([^<>]+)>/g)].map((match) => match[1])
+  const values = bracketed.length ? bracketed : text.split(/\s+/)
+  return [...new Set(values.map(normalizeThreadMessageId).filter(Boolean))]
+}
+
+function readRelationshipHeaders(headers: unknown): { inReplyTo: string; references: string } {
+  const raw = String(headers || '')
+  if (!raw || !/(?:^|\r?\n)(?:In-Reply-To|References)\s*:/i.test(raw)) {
+    return { inReplyTo: '', references: '' }
+  }
+  const values = { inReplyTo: '', references: '' }
+  const unfolded = raw.replace(/\r?\n[ \t]+/g, ' ')
+  for (const line of unfolded.split(/\r?\n/)) {
+    const match = line.match(/^(In-Reply-To|References)\s*:\s*(.*)$/i)
+    if (!match) {
+      continue
+    }
+    if (match[1].toLowerCase() === 'in-reply-to') {
+      values.inReplyTo = match[2].trim()
+    } else {
+      values.references = match[2].trim()
+    }
+  }
+  return values
+}
+
+function hasForwardSubject(subject: unknown, originalSubject: unknown): boolean {
+  return [subject, originalSubject].some((value) => {
+    const normalized = normalizeText(value)
+    return /^(?:(?:re\s*:\s*)*)(?:fw|fwd)\s*:/i.test(normalized)
+  })
+}
+
+function hasForwardBody(bodyText: unknown, bodyHtml: unknown): boolean {
+  const htmlText = String(bodyHtml || '').replace(/<[^>]*>/g, ' ')
+  const text = `${String(bodyText || '')}\n${htmlText}`.slice(0, 64 * 1024)
+  return /begin\s+forwarded\s+message\s*:/i.test(text) ||
+    /[-_]{2,}\s*original\s+message\s*[-_]{2,}/i.test(text)
+}
+
+export function buildMailboxThreadMetadata(
+  detail:
+    | (Pick<
+        MessageDetail,
+        'internetMessageId' | 'inReplyToId' | 'transportMessageHeaders' | 'conversationId'
+      > &
+        Partial<Pick<MessageDetail, 'subject' | 'originalSubject' | 'bodyText' | 'bodyHtml'>>)
+    | undefined,
+  kind: SearchIndexDocument['kind']
+): MailboxThreadMetadata | undefined {
+  const normalizedKind = normalizeText(kind).toLowerCase()
+  if (normalizedKind !== 'mail' && normalizedKind !== 'appointment') {
+    return undefined
+  }
+
+  const relationshipHeaders = readRelationshipHeaders(detail?.transportMessageHeaders)
+  const messageId = normalizeThreadMessageId(detail?.internetMessageId)
+  const inReplyToId = normalizeThreadMessageId(
+    detail?.inReplyToId || relationshipHeaders.inReplyTo
   )
-  return conversationTopic
+  const referenceIds = parseReferenceIds(relationshipHeaders.references)
+  const conversationId = normalizedKind === 'appointment' ? normalizeExactValue(detail?.conversationId || '') : ''
+  const isForward = normalizedKind === 'mail' &&
+    (hasForwardSubject(detail?.subject, detail?.originalSubject) ||
+      hasForwardBody(detail?.bodyText, detail?.bodyHtml))
+  if (!messageId && !inReplyToId && !referenceIds.length && !conversationId && !isForward) {
+    return undefined
+  }
+  return { messageId, inReplyToId, referenceIds, conversationId, isForward }
 }
 
 function getSearchDocumentIdentity(document: SearchIndexDocument): string {
   return `${normalizeText(document.sourceType)}\u0000${normalizeText(document.mailboxKey)}\u0000${normalizeText(document.messageId)}`
+}
+
+function getSearchDocumentPublicId(document: SearchIndexDocument): string {
+  return document.sourceType === 'mailbox'
+    ? buildMailboxSearchDocumentId(document.mailboxKey, document.messageId)
+    : normalizeText(document.id || document.messageId)
 }
 
 function compareThreadRecency(left: SearchIndexDocument, right: SearchIndexDocument): number {
@@ -335,37 +456,402 @@ function compareThreadRecency(left: SearchIndexDocument, right: SearchIndexDocum
   })
 }
 
+interface SearchThreadIndex {
+  groups: SearchThreadGroup[]
+  groupByIdentity: Map<string, SearchThreadGroup>
+}
+
+function stableThreadHash(values: string[]): string {
+  return createHash('sha256')
+    .update([...values].sort().join('\n'))
+    .digest('hex')
+    .slice(0, 24)
+}
+
+function buildMailboxThreadIndex(scopeDocuments: SearchIndexDocument[]): SearchThreadIndex {
+  const eligibleDocuments = scopeDocuments.filter((document) => {
+    const kind = normalizeText(document.kind).toLowerCase()
+    return normalizeSourceType(document.sourceType) === 'mailbox' && (kind === 'mail' || kind === 'appointment')
+  })
+  const indexesByIdentity = new Map<string, number>()
+  eligibleDocuments.forEach((document, index) => {
+    indexesByIdentity.set(getSearchDocumentIdentity(document), index)
+  })
+
+  const parents = eligibleDocuments.map((_, index) => index)
+  const find = (index: number): number => {
+    let root = index
+    while (parents[root] !== root) {
+      root = parents[root]
+    }
+    while (parents[index] !== index) {
+      const next = parents[index]
+      parents[index] = root
+      index = next
+    }
+    return root
+  }
+  const union = (left: number, right: number): void => {
+    const leftRoot = find(left)
+    const rightRoot = find(right)
+    if (leftRoot !== rightRoot) {
+      parents[rightRoot] = leftRoot
+    }
+  }
+
+  const messageIdIndexes = new Map<string, number[]>()
+  const referenceIndexes = new Map<string, number[]>()
+  const appointmentConversationIndexes = new Map<string, number[]>()
+  const appendIndex = (map: Map<string, number[]>, key: string, index: number): void => {
+    if (!key) {
+      return
+    }
+    const indexes = map.get(key) || []
+    indexes.push(index)
+    map.set(key, indexes)
+  }
+
+  eligibleDocuments.forEach((document, index) => {
+    const metadata = document.threadMetadata
+    if (!metadata) {
+      return
+    }
+    const messageId = normalizeThreadMessageId(metadata.messageId)
+    appendIndex(messageIdIndexes, messageId, index)
+    for (const referenceId of metadata.referenceIds || []) {
+      appendIndex(referenceIndexes, normalizeThreadMessageId(referenceId), index)
+    }
+    const kind = normalizeText(document.kind).toLowerCase()
+    if (kind === 'appointment') {
+      appendIndex(appointmentConversationIndexes, normalizeExactValue(metadata.conversationId), index)
+    }
+  })
+
+  // A reply to a forward can carry the original conversation's References as
+  // well. Track its forward ancestry so those copied references cannot bridge
+  // the new branch back into the original conversation.
+  const forwardBranchesByIndex = new Map<number, Set<string>>()
+  eligibleDocuments.forEach((document, index) => {
+    const metadata = document.threadMetadata
+    const kind = normalizeText(document.kind).toLowerCase()
+    const messageId = normalizeThreadMessageId(metadata?.messageId)
+    if (metadata?.isForward && kind === 'mail' && messageId) {
+      forwardBranchesByIndex.set(index, new Set([messageId]))
+    }
+  })
+  let branchAssignmentsChanged = true
+  while (branchAssignmentsChanged) {
+    branchAssignmentsChanged = false
+    eligibleDocuments.forEach((document, index) => {
+      const metadata = document.threadMetadata
+      if (!metadata || metadata.isForward) {
+        return
+      }
+      const parentId = normalizeThreadMessageId(metadata.inReplyToId)
+      if (!parentId) {
+        return
+      }
+      const inheritedBranches = new Set<string>()
+      for (const parentIndex of messageIdIndexes.get(parentId) || []) {
+        for (const branchId of forwardBranchesByIndex.get(parentIndex) || []) {
+          inheritedBranches.add(branchId)
+        }
+      }
+      if (!inheritedBranches.size) {
+        return
+      }
+      const existingBranches = forwardBranchesByIndex.get(index) || new Set<string>()
+      const previousSize = existingBranches.size
+      for (const branchId of inheritedBranches) {
+        existingBranches.add(branchId)
+      }
+      if (existingBranches.size !== previousSize) {
+        forwardBranchesByIndex.set(index, existingBranches)
+        branchAssignmentsChanged = true
+      }
+    })
+  }
+
+  eligibleDocuments.forEach((document, index) => {
+    const metadata = document.threadMetadata
+    if (!metadata) {
+      return
+    }
+    const kind = normalizeText(document.kind).toLowerCase()
+    if (kind === 'mail' && metadata.isForward) {
+      // A forward's relationship headers often copy the original chain. It
+      // starts a new branch and must not connect backward through those refs.
+      return
+    }
+    const parentId = normalizeThreadMessageId(metadata.inReplyToId)
+    const forwardBranches = forwardBranchesByIndex.get(index)
+    if (forwardBranches?.size && parentId) {
+      // Keep replies attached to their immediate forward branch parent. Do
+      // not union their copied References into the original conversation.
+      for (const parentIndex of messageIdIndexes.get(parentId) || []) {
+        union(index, parentIndex)
+      }
+      return
+    }
+    const targets = [metadata.inReplyToId, ...(metadata.referenceIds || [])]
+      .map(normalizeThreadMessageId)
+      .filter(Boolean)
+    for (const target of targets) {
+      for (const targetIndex of [
+        ...(messageIdIndexes.get(target) || []),
+        ...(referenceIndexes.get(target) || [])
+      ].filter((candidateIndex) => {
+        const candidateMetadata = eligibleDocuments[candidateIndex].threadMetadata
+        return !candidateMetadata?.isForward && !forwardBranchesByIndex.get(candidateIndex)?.size
+      })) {
+        union(index, targetIndex)
+      }
+    }
+  })
+  for (const indexes of referenceIndexes.values()) {
+    const branchSafeIndexes = indexes.filter((index) => {
+      const metadata = eligibleDocuments[index].threadMetadata
+      return !metadata?.isForward && !forwardBranchesByIndex.get(index)?.size
+    })
+    if (branchSafeIndexes.length < 2) {
+      continue
+    }
+    for (let index = 1; index < branchSafeIndexes.length; index++) {
+      union(branchSafeIndexes[0], branchSafeIndexes[index])
+    }
+  }
+  for (const indexes of appointmentConversationIndexes.values()) {
+    for (let index = 1; index < indexes.length; index++) {
+      union(indexes[0], indexes[index])
+    }
+  }
+
+  const parentIndexesByIndex = new Map<number, number[]>()
+  const childrenByIndex = new Map<number, Set<number>>()
+  eligibleDocuments.forEach((document, index) => {
+    const metadata = document.threadMetadata
+    if (!metadata || metadata.isForward) {
+      return
+    }
+    const parentId = normalizeThreadMessageId(metadata.inReplyToId)
+    if (!parentId) {
+      return
+    }
+    const forwardBranches = forwardBranchesByIndex.get(index)
+    const parentIndexes = (messageIdIndexes.get(parentId) || []).filter((candidateIndex) => {
+      const candidateMetadata = eligibleDocuments[candidateIndex].threadMetadata
+      return Boolean(forwardBranches?.size) ||
+        (!candidateMetadata?.isForward && !forwardBranchesByIndex.get(candidateIndex)?.size)
+    })
+    if (!parentIndexes.length) {
+      return
+    }
+    parentIndexesByIndex.set(index, parentIndexes)
+    for (const parentIndex of parentIndexes) {
+      const children = childrenByIndex.get(parentIndex) || new Set<number>()
+      children.add(index)
+      childrenByIndex.set(parentIndex, children)
+    }
+  })
+
+  const documentsByRoot = new Map<number, SearchIndexDocument[]>()
+  eligibleDocuments.forEach((document, index) => {
+    const root = find(index)
+    const documents = documentsByRoot.get(root) || []
+    documents.push(document)
+    documentsByRoot.set(root, documents)
+  })
+
+  const groups: SearchThreadGroup[] = []
+  const groupByIdentity = new Map<string, SearchThreadGroup>()
+  for (const component of documentsByRoot.values()) {
+    const componentIndexes = component.map((document) => indexesByIdentity.get(getSearchDocumentIdentity(document)))
+      .filter((index): index is number => index !== undefined)
+    const appointmentComponent = component.every(
+      (document) => normalizeText(document.kind).toLowerCase() === 'appointment'
+    )
+    const leafIndexes = componentIndexes.filter((index) => !childrenByIndex.has(index))
+    const branchLeafIndexes = appointmentComponent
+      ? [componentIndexes[0]]
+      : leafIndexes.length
+        ? leafIndexes
+        : componentIndexes
+    const threadId = `thread-${stableThreadHash(component.map(getSearchDocumentIdentity))}`
+    const branches = branchLeafIndexes.map((leafIndex) => {
+      const branchIndexes = appointmentComponent
+        ? new Set(componentIndexes)
+        : new Set<number>()
+      if (!appointmentComponent) {
+        const pending = [leafIndex]
+        while (pending.length) {
+          const currentIndex = pending.pop()
+          if (currentIndex === undefined || branchIndexes.has(currentIndex)) {
+            continue
+          }
+          branchIndexes.add(currentIndex)
+          pending.push(...(parentIndexesByIndex.get(currentIndex) || []))
+        }
+      }
+      const branchItems = [...branchIndexes]
+        .map((index) => eligibleDocuments[index])
+        .sort((left, right) => compareThreadRecency(left, right))
+      const representative = branchItems.reduce((latest, document) => {
+        return compareThreadRecency(document, latest) < 0 ? document : latest
+      }, branchItems[0])
+      return {
+        branchId: `branch-${stableThreadHash(branchItems.map(getSearchDocumentIdentity))}`,
+        branchIndex: 0,
+        branchCount: 0,
+        representativeId: getSearchDocumentPublicId(representative),
+        items: branchItems
+      }
+    }).sort((left, right) => {
+      const leftRepresentative = eligibleDocuments.find(
+        (document) => getSearchDocumentPublicId(document) === left.representativeId
+      )
+      const rightRepresentative = eligibleDocuments.find(
+        (document) => getSearchDocumentPublicId(document) === right.representativeId
+      )
+      if (!leftRepresentative || !rightRepresentative) {
+        return left.branchId.localeCompare(right.branchId)
+      }
+      return compareThreadRecency(leftRepresentative, rightRepresentative) || left.branchId.localeCompare(right.branchId)
+    })
+    branches.forEach((branch, index) => {
+      branch.branchIndex = index + 1
+      branch.branchCount = branches.length
+    })
+    const hasRelationship = component.some((document) => {
+      const metadata = document.threadMetadata
+      return Boolean(metadata && (
+        metadata.isForward ||
+        metadata.inReplyToId ||
+        metadata.referenceIds.length ||
+        metadata.conversationId
+      ))
+    })
+    if (!hasRelationship && component.length === 1) {
+      continue
+    }
+    const group: SearchThreadGroup = {
+      threadId,
+      selectedItemId: '',
+      branches
+    }
+    groups.push(group)
+    for (const document of component) {
+      groupByIdentity.set(getSearchDocumentIdentity(document), group)
+    }
+  }
+
+  return { groups, groupByIdentity }
+}
+
+function addThreadInfo(
+  document: SearchIndexDocument,
+  group: SearchThreadGroup,
+  branch: SearchThreadBranch
+): SearchIndexDocument {
+  return {
+    ...document,
+    threadInfo: {
+      threadId: group.threadId,
+      branchId: branch.branchId,
+      branchIndex: branch.branchIndex,
+      branchCount: branch.branchCount,
+      threadItemCount: new Set(
+        group.branches.flatMap((current) => current.items.map(getSearchDocumentIdentity))
+      ).size,
+      branchItemCount: branch.items.length,
+      isRepresentative: true
+    }
+  }
+}
+
 function collapseLatestThreadDocuments(
   scopeDocuments: SearchIndexDocument[],
   matchingDocuments: SearchIndexDocument[]
 ): SearchIndexDocument[] {
+  const threadIndex = buildMailboxThreadIndex(scopeDocuments)
   const matchingIdentities = new Set(matchingDocuments.map(getSearchDocumentIdentity))
-  const matchingThreadKeys = new Set(
-    matchingDocuments.map((document) => buildMailboxThreadKey(document)).filter(Boolean)
-  )
-  const latestByThread = new Map<string, SearchIndexDocument>()
+  const representatives = new Map<string, SearchIndexDocument>()
   const standaloneMatches: SearchIndexDocument[] = []
-
-  for (const document of scopeDocuments) {
-    const threadKey = buildMailboxThreadKey(document)
-    if (!threadKey) {
-      if (matchingIdentities.has(getSearchDocumentIdentity(document))) {
-        standaloneMatches.push(document)
+  for (const matchingDocument of matchingDocuments) {
+    const identity = getSearchDocumentIdentity(matchingDocument)
+    const group = threadIndex.groupByIdentity.get(identity)
+    if (!group) {
+      standaloneMatches.push(matchingDocument)
+      continue
+    }
+    group.selectedItemId = identity
+    for (const branch of group.branches) {
+      if (!branch.items.some((document) => matchingIdentities.has(getSearchDocumentIdentity(document)))) {
+        continue
       }
-      continue
-    }
-
-    if (!matchingThreadKeys.has(threadKey)) {
-      continue
-    }
-
-    const current = latestByThread.get(threadKey)
-    if (!current || compareThreadRecency(document, current) < 0) {
-      latestByThread.set(threadKey, document)
+      const representative = branch.items.find(
+        (document) => getSearchDocumentPublicId(document) === branch.representativeId
+      )
+      if (representative) {
+        representatives.set(getSearchDocumentIdentity(representative), addThreadInfo(representative, group, branch))
+      }
     }
   }
 
-  return [...standaloneMatches, ...latestByThread.values()]
+  return [...standaloneMatches, ...representatives.values()]
+}
+
+function findMailboxThreadGroup(
+  scopeDocuments: SearchIndexDocument[],
+  itemId: string
+): SearchThreadGroup | null {
+  const targetIdentity = getSearchDocumentIdentityFromId(itemId, scopeDocuments)
+  if (!targetIdentity) {
+    return null
+  }
+  const threadIndex = buildMailboxThreadIndex(scopeDocuments)
+  const group = threadIndex.groupByIdentity.get(targetIdentity)
+  if (!group) {
+    return null
+  }
+  const target = scopeDocuments.find((document) => getSearchDocumentIdentity(document) === targetIdentity)
+  group.selectedItemId = target ? getSearchDocumentPublicId(target) : ''
+  return group
+}
+
+function getSearchDocumentIdentityFromId(
+  itemId: string,
+  documents: SearchIndexDocument[]
+): string | null {
+  const normalizedId = normalizeText(itemId)
+  const parsedId = parseMailboxSearchDocumentId(normalizedId)
+  if (parsedId) {
+    const exact = documents.find((document) =>
+      normalizeSourceType(document.sourceType) === 'mailbox' &&
+      normalizeText(document.mailboxKey) === normalizeText(parsedId.mailboxKey) &&
+      normalizeText(document.messageId) === normalizeText(parsedId.messageId)
+    )
+    return exact ? getSearchDocumentIdentity(exact) : null
+  }
+  const exact = documents.find((document) =>
+    normalizeText(document.id || document.messageId) === normalizedId ||
+    normalizeText(document.messageId) === normalizedId
+  )
+  return exact ? getSearchDocumentIdentity(exact) : null
+}
+
+function resolveSearchThreadGroup(
+  group: SearchThreadGroup,
+  reviewerUsername?: string
+): SearchThreadGroup {
+  return {
+    ...group,
+    branches: group.branches.map((branch) => ({
+      ...branch,
+      items: branch.items.map((document) =>
+        resolveSearchIndexDocument(document, reviewerUsername)
+      )
+    }))
+  }
 }
 
 export function buildMailboxSearchDocumentId(mailboxKey: string, messageId: string): string {
@@ -443,7 +929,8 @@ function fingerprintMatches(
     normalizeRefreshSource(left.source) === normalizeRefreshSource(right.source) &&
     normalizeText(left.mailboxKey) === normalizeText(right.mailboxKey) &&
     Number(left.size || 0) === Number(right.size || 0) &&
-    normalizeText(left.modifiedAt || '') === normalizeText(right.modifiedAt || '')
+    normalizeText(left.modifiedAt || '') === normalizeText(right.modifiedAt || '') &&
+    Number(left.indexVersion || 0) === Number(right.indexVersion || 0)
   )
 }
 
@@ -456,6 +943,7 @@ function normalizeFingerprintRecord(record: SearchIndexFileFingerprint): SearchI
     scopeLabel: normalizeText(record.scopeLabel),
     size: Number.isFinite(record.size) ? Number(record.size) : 0,
     modifiedAt: record.modifiedAt ? normalizeText(record.modifiedAt) || null : null,
+    indexVersion: Number.isFinite(record.indexVersion) ? Number(record.indexVersion) : 0,
     updatedAt: normalizeText(record.updatedAt) || new Date().toISOString()
   }
 }
@@ -1192,11 +1680,7 @@ export function buildSearchIndexDocumentsFromSession(
     const bodySearchText = normalizeExactValue(session.searchTextByMessageId.get(message.id) || '')
     const snapshot = session.messageDetailSnapshots.get(message.id) || null
     const mailboxDetail = snapshot ? compactMailboxDetail(snapshot) : undefined
-    const threadKey = buildMailboxThreadKey({
-      sourceType: 'mailbox',
-      kind: message.kind,
-      mailboxDetail
-    })
+    const threadMetadata = buildMailboxThreadMetadata(mailboxDetail, message.kind)
     documents.push(
       toDocument(
         {
@@ -1237,7 +1721,7 @@ export function buildSearchIndexDocumentsFromSession(
           isRead: message.isRead,
           isMailLike: message.isMailLike,
           mailboxDetail,
-          threadKey
+          threadMetadata
         },
         bodySearchText,
         reviewStatesByMessageId.get(message.id) || []
@@ -1536,6 +2020,25 @@ export class MemorySearchIndexStore implements SearchIndexStore {
       }
     }
     return null
+  }
+
+  async findThreadById(
+    id: string,
+    options: { allowedMailboxKeys?: string[]; reviewerUsername?: string } = {}
+  ): Promise<SearchThreadGroup | null> {
+    const target = await this.findDocumentById(id)
+    if (!target || normalizeSourceType(target.sourceType) !== 'mailbox') {
+      return null
+    }
+    const allowedMailboxKeys = options.allowedMailboxKeys
+      ? new Set(uniqueTextValues(options.allowedMailboxKeys))
+      : null
+    const documents = [...this.documents.values()]
+      .flatMap((mailbox) => [...mailbox.values()])
+      .filter((document) => normalizeSourceType(document.sourceType) === 'mailbox')
+      .filter((document) => !allowedMailboxKeys || allowedMailboxKeys.has(normalizeText(document.mailboxKey)))
+    const group = findMailboxThreadGroup(documents, id)
+    return group ? resolveSearchThreadGroup(group, options.reviewerUsername) : null
   }
 
   async search(options: SearchIndexSearchOptions): Promise<SearchIndexPage> {
@@ -1837,7 +2340,6 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     )
     await documents.createIndex?.({ mailboxKey: 1, messageId: 1 }, { unique: true })
     await documents.createIndex?.({ messageId: 1 })
-    await documents.createIndex?.({ sourceType: 1, threadKey: 1, sortDateMs: -1 })
     await documents.createIndex?.({ sourceType: 1, scopePath: 1 })
     await documents.createIndex?.({ mailboxKey: 1, scopePath: 1 })
     await documents.createIndex?.({ scopePath: 1, searchTokens: 1 })
@@ -1982,6 +2484,28 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     return this.documents.findOne({
       $or: [{ messageId: normalizedId }, { id: normalizedId }]
     })
+  }
+
+  async findThreadById(
+    id: string,
+    options: { allowedMailboxKeys?: string[]; reviewerUsername?: string } = {}
+  ): Promise<SearchThreadGroup | null> {
+    const target = await this.findDocumentById(id)
+    if (!target || normalizeSourceType(target.sourceType) !== 'mailbox') {
+      return null
+    }
+    const filter: Record<string, unknown> = { sourceType: 'mailbox' }
+    if (options.allowedMailboxKeys) {
+      filter.mailboxKey = { $in: uniqueTextValues(options.allowedMailboxKeys) }
+    }
+    const documents = await this.documents
+      .find(filter)
+      .sort({ sortDateMs: -1 })
+      .skip(0)
+      .limit(0)
+      .toArray()
+    const group = findMailboxThreadGroup(documents, id)
+    return group ? resolveSearchThreadGroup(group, options.reviewerUsername) : null
   }
 
   async updateReviewState(
@@ -2387,6 +2911,7 @@ export async function refreshSearchIndexSourceFromCatalog(
       scopeLabel: file.scopeLabel,
       size: file.size,
       modifiedAt: file.modifiedAt,
+      indexVersion: getSearchIndexVersion(normalizedSource),
       updatedAt: new Date().toISOString()
     })
     discoveredMailboxKeys.add(fingerprint.mailboxKey)

@@ -18,6 +18,7 @@ import type {
   EntraSettingsResponse,
   PstCatalogResponse,
   SearchResponse,
+  SearchThreadResponse,
   SessionOpenResponse,
   FolderMessagesResponse,
   MessageDetailResponse,
@@ -356,6 +357,10 @@ export const api = {
   item: {
     detail: (itemId: string) =>
       requestJson<{ detail: MessageDetail }>(`/api/items/${encodeURIComponent(itemId)}`, {
+        cache: 'no-store'
+      }),
+    thread: (itemId: string) =>
+      requestJson<SearchThreadResponse>(`/api/items/${encodeURIComponent(itemId)}/thread`, {
         cache: 'no-store'
       }),
     review: (itemId: string) =>

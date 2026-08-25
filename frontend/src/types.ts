@@ -51,6 +51,16 @@ export interface ReviewState {
   updatedAt: string
 }
 
+export interface SearchThreadInfo {
+  threadId: string
+  branchId: string
+  branchIndex: number
+  branchCount: number
+  threadItemCount: number
+  branchItemCount: number
+  isRepresentative: boolean
+}
+
 export interface CatalogEntry {
   fileName: string
   size: number
@@ -158,6 +168,7 @@ export interface MessageSummary {
   previewUrl?: string
   downloadUrl?: string
   mailboxDetail?: MessageDetail
+  threadInfo?: SearchThreadInfo
 }
 
 export interface ReviewFilters {
@@ -198,6 +209,20 @@ export interface SearchResponse {
   scopeLabel: string
   sourceType?: SearchSourceType | 'all'
   page: PageResponse<MessageSummary>
+}
+
+export interface SearchThreadBranch {
+  branchId: string
+  branchIndex: number
+  branchCount: number
+  representativeId: string
+  items: MessageSummary[]
+}
+
+export interface SearchThreadResponse {
+  threadId: string
+  selectedItemId: string
+  branches: SearchThreadBranch[]
 }
 
 export interface FlaggedBundlePrepareRequest {
