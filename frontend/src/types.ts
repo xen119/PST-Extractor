@@ -196,6 +196,7 @@ export interface PageResponse<TItem> {
   sourceCounts?: Record<SearchSourceType, number>
   flaggedSizeBytes?: number
   reviewFilters?: ReviewFilters
+  collapseProgress?: MailboxCollapseStatus
 }
 
 export interface FolderMessagesResponse {
@@ -544,6 +545,28 @@ export interface SearchIndexRefreshStatus {
 
 export interface SearchIndexRefreshResponse {
   status: SearchIndexRefreshStatus
+}
+
+export interface MailboxCollapseStatus {
+  jobId: string | null
+  status: 'idle' | 'running' | 'succeeded' | 'failed' | 'reindex-required'
+  version: number
+  startedAt: string | null
+  completedAt: string | null
+  updatedAt: string
+  processedPartitions: number
+  totalPartitions: number
+  completedPartitionKeys?: string[]
+  processedWorkUnits: number
+  totalWorkUnits: number
+  percentage: number
+  provisional: boolean
+  error: string | null
+  reindexRequired: boolean
+}
+
+export interface MailboxCollapseResponse {
+  status: MailboxCollapseStatus
 }
 
 export interface ActivityLogActor {

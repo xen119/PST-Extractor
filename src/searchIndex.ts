@@ -32,6 +32,9 @@ export interface SearchIndexDocument {
   id?: string
   sourceType: SearchSourceType
   threadMetadata?: MailboxThreadMetadata
+  threadCollapse?: SearchThreadCollapseReference[]
+  threadCollapsePartitions?: string[]
+  threadCollapseVersion?: number
   threadInfo?: SearchThreadInfo
   mailboxKey: string
   scopePath: string
@@ -121,6 +124,32 @@ export interface SearchThreadInfo {
   isRepresentative: boolean
 }
 
+export interface SearchThreadCollapseReference extends SearchThreadInfo {
+  partitionKey: string
+  representativeMailboxKey: string
+  representativeMessageId: string
+}
+
+export type MailboxCollapseJobState = 'idle' | 'running' | 'succeeded' | 'failed' | 'reindex-required'
+
+export interface MailboxCollapseJobStatus {
+  jobId: string | null
+  status: MailboxCollapseJobState
+  version: number
+  startedAt: string | null
+  completedAt: string | null
+  updatedAt: string
+  processedPartitions: number
+  totalPartitions: number
+  completedPartitionKeys: string[]
+  processedWorkUnits: number
+  totalWorkUnits: number
+  percentage: number
+  provisional: boolean
+  error: string | null
+  reindexRequired: boolean
+}
+
 export interface SearchThreadBranch {
   branchId: string
   branchIndex: number
@@ -158,6 +187,7 @@ export interface SearchIndexSearchOptions {
   sourceType?: SearchSourceType | 'all'
   requirePreviewPayload?: boolean
   collapseDuplicates?: boolean
+  collapseProgress?: MailboxCollapseJobStatus
   query: string
   mode: SearchMode
   mailOnly: boolean
@@ -186,6 +216,7 @@ export interface SearchIndexPage {
   sourceType: SearchSourceType | 'all'
   sourceCounts: Record<SearchSourceType, number>
   flaggedSizeBytes: number
+  collapseProgress?: MailboxCollapseJobStatus
   reviewFilters: {
     flaggedOnly: boolean
     taggedOnly: boolean
@@ -203,6 +234,17 @@ export interface SearchIndexStore {
   ): Promise<void>
   upsertMailboxDocument(mailboxKey: string, document: SearchIndexDocument): Promise<void>
   deleteMailboxDocuments(mailboxKey: string): Promise<void>
+  rebuildMailboxCollapseMetadata?(): Promise<void>
+  getMailboxCollapseDocuments?(): Promise<SearchIndexDocument[]>
+  resetMailboxCollapseMetadata?(): Promise<void>
+  writeMailboxCollapsePartition?(
+    partitionKey: string,
+    documents: SearchIndexDocument[],
+    referencesByIdentity: Map<string, SearchThreadCollapseReference[]>
+  ): Promise<void>
+  finalizeMailboxCollapseMetadata?(version: number): Promise<void>
+  getMailboxCollapseJob?(): Promise<MailboxCollapseJobStatus | null>
+  saveMailboxCollapseJob?(status: MailboxCollapseJobStatus): Promise<void>
   updateReviewState(
     mailboxKey: string,
     messageId: string,
@@ -248,6 +290,19 @@ interface SearchIndexCollectionLike {
     filter: Record<string, unknown>,
     update: Record<string, unknown>,
     options?: { upsert?: boolean }
+  ) => Promise<unknown>
+  updateMany?: (
+    filter: Record<string, unknown>,
+    update: Record<string, unknown>
+  ) => Promise<unknown>
+  bulkWrite?: (
+    operations: Array<{
+      updateOne: {
+        filter: Record<string, unknown>
+        update: Record<string, unknown>
+      }
+    }>,
+    options?: { ordered?: boolean }
   ) => Promise<unknown>
   find: (
     filter: Record<string, unknown>,
@@ -300,7 +355,9 @@ interface FileFingerprintCollectionLike {
 const DEFAULT_INDEX_COLLECTION = 'pst_search_documents'
 const DEFAULT_RULE_COLLECTION = 'pst_search_hidden_rules'
 const DEFAULT_FINGERPRINT_COLLECTION = 'pst_search_file_fingerprints'
-const CURRENT_MAILBOX_SEARCH_INDEX_VERSION = 4
+const DEFAULT_COLLAPSE_JOB_COLLECTION = 'pst_search_collapse_jobs'
+export const CURRENT_MAILBOX_SEARCH_INDEX_VERSION = 5
+export const CURRENT_MAILBOX_COLLAPSE_VERSION = 6
 const CURRENT_ITEM_SEARCH_INDEX_VERSION = 0
 const MAX_SEARCH_DOCUMENT_BYTES = 12 * 1024 * 1024
 const MAX_INDEXED_BODY_TEXT_CHARS = 192 * 1024
@@ -314,6 +371,16 @@ const MAX_INDEXED_ATTACHMENT_COUNT = 256
 const MAX_INDEXED_ATTACHMENT_TEXT_CHARS = 4096
 const MEMORY_STREAM_BATCH_SIZE = 25
 
+interface MailboxCollapseJobCollectionLike {
+  createIndex?: (index: Record<string, 1 | -1>, options?: { unique?: boolean; name?: string }) => Promise<unknown>
+  findOne: (filter: Record<string, unknown>) => Promise<MailboxCollapseJobStatus | null>
+  updateOne: (
+    filter: Record<string, unknown>,
+    update: Record<string, unknown>,
+    options?: { upsert?: boolean }
+  ) => Promise<unknown>
+}
+
 // Dedupe only needs relationship, sort, identity, and review metadata. In
 // particular, do not pull mailboxDetail/body/searchText into the in-memory
 // thread graph; some indexed messages are several megabytes each.
@@ -322,6 +389,9 @@ const COLLAPSE_DOCUMENT_PROJECTION: Record<string, 0 | 1> = {
   id: 1,
   sourceType: 1,
   threadMetadata: 1,
+  threadCollapse: 1,
+  threadCollapsePartitions: 1,
+  threadCollapseVersion: 1,
   mailboxKey: 1,
   scopePath: 1,
   scopeLabel: 1,
@@ -362,6 +432,7 @@ export interface MongoSearchIndexStoreConnectOptions {
   documentsCollectionName?: string
   rulesCollectionName?: string
   fingerprintsCollectionName?: string
+  collapseJobsCollectionName?: string
 }
 
 function normalizeText(value: unknown): string {
@@ -591,6 +662,29 @@ function buildMailboxThreadIndex(scopeDocuments: SearchIndexDocument[]): SearchT
     }
   })
 
+  const parentIndexesByIndex = new Map<number, number[]>()
+  const childrenByIndex = new Map<number, Set<number>>()
+  eligibleDocuments.forEach((document, index) => {
+    const metadata = document.threadMetadata
+    if (!metadata || metadata.isForward) {
+      return
+    }
+    const parentId = normalizeThreadMessageId(metadata.inReplyToId)
+    if (!parentId) {
+      return
+    }
+    const parentIndexes = messageIdIndexes.get(parentId) || []
+    if (!parentIndexes.length) {
+      return
+    }
+    parentIndexesByIndex.set(index, parentIndexes)
+    for (const parentIndex of parentIndexes) {
+      const children = childrenByIndex.get(parentIndex) || new Set<number>()
+      children.add(index)
+      childrenByIndex.set(parentIndex, children)
+    }
+  })
+
   // A reply to a forward can carry the original conversation's References as
   // well. Track its forward ancestry so those copied references cannot bridge
   // the new branch back into the original conversation.
@@ -603,37 +697,28 @@ function buildMailboxThreadIndex(scopeDocuments: SearchIndexDocument[]): SearchT
       forwardBranchesByIndex.set(index, new Set([messageId]))
     }
   })
-  let branchAssignmentsChanged = true
-  while (branchAssignmentsChanged) {
-    branchAssignmentsChanged = false
-    eligibleDocuments.forEach((document, index) => {
-      const metadata = document.threadMetadata
-      if (!metadata || metadata.isForward) {
-        return
+  const propagationQueue = [...forwardBranchesByIndex.keys()]
+  for (let queueIndex = 0; queueIndex < propagationQueue.length; queueIndex += 1) {
+    const parentIndex = propagationQueue[queueIndex]
+    const parentBranches = forwardBranchesByIndex.get(parentIndex)
+    if (!parentBranches?.size) {
+      continue
+    }
+    for (const childIndex of childrenByIndex.get(parentIndex) || []) {
+      const childMetadata = eligibleDocuments[childIndex].threadMetadata
+      if (childMetadata?.isForward) {
+        continue
       }
-      const parentId = normalizeThreadMessageId(metadata.inReplyToId)
-      if (!parentId) {
-        return
+      const childBranches = forwardBranchesByIndex.get(childIndex) || new Set<string>()
+      const previousSize = childBranches.size
+      for (const branchId of parentBranches) {
+        childBranches.add(branchId)
       }
-      const inheritedBranches = new Set<string>()
-      for (const parentIndex of messageIdIndexes.get(parentId) || []) {
-        for (const branchId of forwardBranchesByIndex.get(parentIndex) || []) {
-          inheritedBranches.add(branchId)
-        }
+      if (childBranches.size !== previousSize) {
+        forwardBranchesByIndex.set(childIndex, childBranches)
+        propagationQueue.push(childIndex)
       }
-      if (!inheritedBranches.size) {
-        return
-      }
-      const existingBranches = forwardBranchesByIndex.get(index) || new Set<string>()
-      const previousSize = existingBranches.size
-      for (const branchId of inheritedBranches) {
-        existingBranches.add(branchId)
-      }
-      if (existingBranches.size !== previousSize) {
-        forwardBranchesByIndex.set(index, existingBranches)
-        branchAssignmentsChanged = true
-      }
-    })
+    }
   }
 
   eligibleDocuments.forEach((document, index) => {
@@ -652,7 +737,7 @@ function buildMailboxThreadIndex(scopeDocuments: SearchIndexDocument[]): SearchT
     if (forwardBranches?.size && parentId) {
       // Keep replies attached to their immediate forward branch parent. Do
       // not union their copied References into the original conversation.
-      for (const parentIndex of messageIdIndexes.get(parentId) || []) {
+      for (const parentIndex of parentIndexesByIndex.get(index) || []) {
         union(index, parentIndex)
       }
       return
@@ -690,34 +775,6 @@ function buildMailboxThreadIndex(scopeDocuments: SearchIndexDocument[]): SearchT
     }
   }
 
-  const parentIndexesByIndex = new Map<number, number[]>()
-  const childrenByIndex = new Map<number, Set<number>>()
-  eligibleDocuments.forEach((document, index) => {
-    const metadata = document.threadMetadata
-    if (!metadata || metadata.isForward) {
-      return
-    }
-    const parentId = normalizeThreadMessageId(metadata.inReplyToId)
-    if (!parentId) {
-      return
-    }
-    const forwardBranches = forwardBranchesByIndex.get(index)
-    const parentIndexes = (messageIdIndexes.get(parentId) || []).filter((candidateIndex) => {
-      const candidateMetadata = eligibleDocuments[candidateIndex].threadMetadata
-      return Boolean(forwardBranches?.size) ||
-        (!candidateMetadata?.isForward && !forwardBranchesByIndex.get(candidateIndex)?.size)
-    })
-    if (!parentIndexes.length) {
-      return
-    }
-    parentIndexesByIndex.set(index, parentIndexes)
-    for (const parentIndex of parentIndexes) {
-      const children = childrenByIndex.get(parentIndex) || new Set<number>()
-      children.add(index)
-      childrenByIndex.set(parentIndex, children)
-    }
-  })
-
   const documentsByRoot = new Map<number, SearchIndexDocument[]>()
   eligibleDocuments.forEach((document, index) => {
     const root = find(index)
@@ -728,6 +785,9 @@ function buildMailboxThreadIndex(scopeDocuments: SearchIndexDocument[]): SearchT
 
   const groups: SearchThreadGroup[] = []
   const groupByIdentity = new Map<string, SearchThreadGroup>()
+  const documentsByPublicId = new Map(
+    eligibleDocuments.map((document) => [getSearchDocumentPublicId(document), document])
+  )
   for (const component of documentsByRoot.values()) {
     const componentIndexes = component.map((document) => indexesByIdentity.get(getSearchDocumentIdentity(document)))
       .filter((index): index is number => index !== undefined)
@@ -770,12 +830,8 @@ function buildMailboxThreadIndex(scopeDocuments: SearchIndexDocument[]): SearchT
         items: branchItems
       }
     }).sort((left, right) => {
-      const leftRepresentative = eligibleDocuments.find(
-        (document) => getSearchDocumentPublicId(document) === left.representativeId
-      )
-      const rightRepresentative = eligibleDocuments.find(
-        (document) => getSearchDocumentPublicId(document) === right.representativeId
-      )
+      const leftRepresentative = documentsByPublicId.get(left.representativeId)
+      const rightRepresentative = documentsByPublicId.get(right.representativeId)
       if (!leftRepresentative || !rightRepresentative) {
         return left.branchId.localeCompare(right.branchId)
       }
@@ -859,6 +915,224 @@ function collapseLatestThreadDocuments(
         representatives.set(getSearchDocumentIdentity(representative), addThreadInfo(representative, group, branch))
       }
     }
+  }
+
+  return [...standaloneMatches, ...representatives.values()]
+}
+
+export function getMailboxCollapsePartitionKeys(document: SearchIndexDocument): string[] {
+  const keys = new Set<string>(['all', `pst:${normalizeText(document.mailboxKey)}`])
+  const scopePath = normalizeText(document.scopePath)
+  if (!scopePath) {
+    return [...keys]
+  }
+
+  const parts = scopePath.split('/').filter(Boolean)
+  for (let index = 1; index <= parts.length; index += 1) {
+    keys.add(`case:${parts.slice(0, index).join('/')}`)
+  }
+  keys.add(`search:${scopePath}`)
+  return [...keys]
+}
+
+function getCollapsePartitionCandidates(
+  document: SearchIndexDocument,
+  options: SearchIndexSearchOptions
+): string[] {
+  const mailboxPartition = `pst:${normalizeText(document.mailboxKey)}`
+  const searchPartition = `search:${normalizeText(document.scopePath)}`
+  const casePath = normalizeText(options.casePath)
+  if (options.scope === 'pst') {
+    return [`pst:${normalizeText(options.mailboxKey)}`]
+  }
+  if (options.scope === 'search') {
+    return [`search:${normalizeText(options.scopePath)}`, mailboxPartition]
+  }
+  if (casePath) {
+    return [`case:${casePath}`, searchPartition, mailboxPartition]
+  }
+
+  const casePartitions: string[] = []
+  const parts = normalizeText(document.scopePath).split('/').filter(Boolean)
+  for (let index = parts.length; index > 0; index -= 1) {
+    casePartitions.push(`case:${parts.slice(0, index).join('/')}`)
+  }
+  return ['all', ...casePartitions, searchPartition, mailboxPartition]
+}
+
+function isCollapsePartitionCompleted(
+  document: SearchIndexDocument,
+  partitionKey: string,
+  options: SearchIndexSearchOptions
+): boolean {
+  if (document.threadCollapsePartitions?.includes(partitionKey)) {
+    if (!options.collapseProgress || options.collapseProgress.status === 'succeeded') {
+      return true
+    }
+    return options.collapseProgress.completedPartitionKeys.includes(partitionKey)
+  }
+  return (
+    document.threadCollapseVersion === CURRENT_MAILBOX_SEARCH_INDEX_VERSION &&
+    !document.threadCollapsePartitions?.length &&
+    (!options.collapseProgress || options.collapseProgress.status === 'succeeded') &&
+    partitionKey === 'all'
+  )
+}
+
+export function buildMailboxCollapsePartitionMetadata(
+  partitionKey: string,
+  partitionRecords: SearchIndexDocument[],
+  hiddenRules: HiddenRuleRecord[]
+): Map<string, SearchThreadCollapseReference[]> {
+  const visibleOptions: SearchIndexSearchOptions = {
+    scope: 'all',
+    sourceType: 'all',
+    query: '',
+    mode: 'and',
+    mailOnly: false,
+    sort: 'date-desc',
+    page: 1,
+    pageSize: 1,
+    reviewFlaggedOnly: false,
+    reviewTaggedOnly: false,
+    reviewTag: ''
+  }
+  const visibleRecords = partitionRecords.filter((record) =>
+    matchesDocument(record, visibleOptions, hiddenRules)
+  )
+  const threadIndex = buildMailboxThreadIndex(visibleRecords)
+  const referencesByIdentity = new Map<string, SearchThreadCollapseReference[]>()
+  for (const group of threadIndex.groups) {
+    const documentsByPublicId = new Map(
+      group.branches.flatMap((branch) => branch.items).map((document) => [
+        getSearchDocumentPublicId(document),
+        document
+      ])
+    )
+    for (const branch of group.branches) {
+      const representative = documentsByPublicId.get(branch.representativeId)
+      if (!representative) {
+        continue
+      }
+      const reference: SearchThreadCollapseReference = {
+        partitionKey,
+        threadId: group.threadId,
+        branchId: branch.branchId,
+        branchIndex: branch.branchIndex,
+        branchCount: branch.branchCount,
+        threadItemCount: new Set(
+          group.branches.flatMap((current) => current.items.map(getSearchDocumentIdentity))
+        ).size,
+        branchItemCount: branch.items.length,
+        isRepresentative: true,
+        representativeMailboxKey: normalizeText(representative.mailboxKey),
+        representativeMessageId: normalizeText(representative.messageId)
+      }
+      for (const member of branch.items) {
+        const identity = getSearchDocumentIdentity(member)
+        const current = referencesByIdentity.get(identity) || []
+        if (!current.some((entry) => entry.partitionKey === partitionKey && entry.branchId === reference.branchId)) {
+          current.push(reference)
+          referencesByIdentity.set(identity, current)
+        }
+      }
+    }
+  }
+  return referencesByIdentity
+}
+
+export function buildMailboxCollapseMetadata(
+  documents: SearchIndexDocument[],
+  hiddenRules: HiddenRuleRecord[]
+): Map<string, SearchThreadCollapseReference[]> {
+  const partitionDocuments = new Map<string, SearchIndexDocument[]>()
+  for (const document of documents) {
+    if (normalizeSourceType(document.sourceType) !== 'mailbox') {
+      continue
+    }
+    for (const partitionKey of getMailboxCollapsePartitionKeys(document)) {
+      const current = partitionDocuments.get(partitionKey) || []
+      current.push(document)
+      partitionDocuments.set(partitionKey, current)
+    }
+  }
+
+  const referencesByIdentity = new Map<string, SearchThreadCollapseReference[]>()
+  for (const [partitionKey, partitionRecords] of partitionDocuments) {
+    const partitionReferences = buildMailboxCollapsePartitionMetadata(
+      partitionKey,
+      partitionRecords,
+      hiddenRules
+    )
+    for (const [identity, references] of partitionReferences) {
+      referencesByIdentity.set(identity, [
+        ...(referencesByIdentity.get(identity) || []),
+        ...references
+      ])
+    }
+  }
+
+  return referencesByIdentity
+}
+
+function addThreadInfoFromCollapseReference(
+  document: SearchIndexDocument,
+  reference: SearchThreadCollapseReference
+): SearchIndexDocument {
+  return {
+    ...document,
+    threadInfo: {
+      threadId: reference.threadId,
+      branchId: reference.branchId,
+      branchIndex: reference.branchIndex,
+      branchCount: reference.branchCount,
+      threadItemCount: reference.threadItemCount,
+      branchItemCount: reference.branchItemCount,
+      isRepresentative: reference.isRepresentative
+    }
+  }
+}
+
+function collapseLatestThreadDocumentsFromMetadata(
+  scopeDocuments: SearchIndexDocument[],
+  matchingDocuments: SearchIndexDocument[],
+  options: SearchIndexSearchOptions
+): SearchIndexDocument[] {
+  const scopeByIdentity = new Map(
+    scopeDocuments.map((document) => [getSearchDocumentIdentity(document), document])
+  )
+  const representatives = new Map<string, SearchIndexDocument>()
+  const standaloneMatches: SearchIndexDocument[] = []
+
+  for (const matchingDocument of matchingDocuments) {
+    const partitionKey = getCollapsePartitionCandidates(matchingDocument, options).find((key) =>
+      isCollapsePartitionCompleted(matchingDocument, key, options)
+    )
+    const reference = partitionKey
+      ? (matchingDocument.threadCollapse || []).find((entry) => entry.partitionKey === partitionKey)
+      : undefined
+    if (!reference) {
+      standaloneMatches.push(matchingDocument)
+      continue
+    }
+
+    const representativeIdentity = getSearchDocumentIdentity({
+      sourceType: 'mailbox',
+      mailboxKey: reference.representativeMailboxKey,
+      messageId: reference.representativeMessageId
+    } as SearchIndexDocument)
+    const representative = scopeByIdentity.get(representativeIdentity)
+    if (!representative) {
+      // A representative outside the active scope must never be leaked. The
+      // stale/partial scope is treated as an independent visible match until
+      // the next metadata rebuild completes.
+      standaloneMatches.push(matchingDocument)
+      continue
+    }
+    representatives.set(
+      representativeIdentity,
+      addThreadInfoFromCollapseReference(representative, reference)
+    )
   }
 
   return [...standaloneMatches, ...representatives.values()]
@@ -1002,6 +1276,7 @@ function estimateSearchDocumentBytes(document: SearchIndexDocument): number {
 function compactSearchIndexDocument(document: SearchIndexDocument): SearchIndexDocument {
   let compacted: SearchIndexDocument = {
     ...document,
+    threadCollapse: document.threadCollapse?.slice(0, 16),
     bodySearchText: document.bodySearchText.slice(0, MAX_INDEXED_SEARCH_TEXT_CHARS),
     searchText: document.searchText.slice(0, MAX_INDEXED_SEARCH_TEXT_CHARS),
     searchTokens: document.searchTokens.slice(0, MAX_INDEXED_TOKEN_COUNT),
@@ -2077,15 +2352,36 @@ export class MemorySearchIndexStore implements SearchIndexStore {
   private readonly documents = new Map<string, Map<string, SearchIndexDocument>>()
   private readonly hiddenRules = new MemoryHiddenRuleStore()
   private readonly fingerprints = new Map<string, SearchIndexFileFingerprint>()
+  private mailboxCollapseJob: MailboxCollapseJobStatus | null = null
+
+  private invalidateMailboxCollapseMetadata(): void {
+    for (const mailbox of this.documents.values()) {
+      for (const [messageId, document] of mailbox) {
+        if (normalizeSourceType(document.sourceType) !== 'mailbox') {
+          continue
+        }
+        mailbox.set(messageId, {
+          ...document,
+          threadCollapse: [],
+          threadCollapsePartitions: [],
+          threadCollapseVersion: 0
+        })
+      }
+    }
+  }
 
   async replaceMailboxDocuments(mailboxKey: string, documents: SearchIndexDocument[]): Promise<void> {
+    this.invalidateMailboxCollapseMetadata()
     const key = normalizeText(mailboxKey)
     const records = new Map<string, SearchIndexDocument>()
     for (const document of dedupeSearchIndexDocuments(documents.map(compactSearchIndexDocument))) {
       records.set(document.messageId, {
         ...document,
         mailboxKey: key,
-        sourceType: normalizeSourceType(document.sourceType)
+        sourceType: normalizeSourceType(document.sourceType),
+        threadCollapse: [],
+        threadCollapsePartitions: [],
+        threadCollapseVersion: 0
       })
     }
     this.documents.set(key, records)
@@ -2119,7 +2415,10 @@ export class MemorySearchIndexStore implements SearchIndexStore {
         mailbox.set(document.messageId, {
           ...document,
           mailboxKey: key,
-          sourceType: normalizeSourceType(document.sourceType)
+          sourceType: normalizeSourceType(document.sourceType),
+          threadCollapse: [],
+          threadCollapsePartitions: [],
+          threadCollapseVersion: 0
         })
       }
       this.documents.set(key, mailbox)
@@ -2154,6 +2453,7 @@ export class MemorySearchIndexStore implements SearchIndexStore {
   }
 
   async upsertMailboxDocument(mailboxKey: string, document: SearchIndexDocument): Promise<void> {
+    this.invalidateMailboxCollapseMetadata()
     const key = normalizeText(mailboxKey)
     const mailbox = this.documents.get(key) || new Map<string, SearchIndexDocument>()
     const [normalizedDocument] = dedupeSearchIndexDocuments([compactSearchIndexDocument(document)])
@@ -2163,14 +2463,93 @@ export class MemorySearchIndexStore implements SearchIndexStore {
     mailbox.set(normalizedDocument.messageId, {
       ...normalizedDocument,
       mailboxKey: key,
-      sourceType: normalizeSourceType(normalizedDocument.sourceType)
+      sourceType: normalizeSourceType(normalizedDocument.sourceType),
+      threadCollapse: [],
+      threadCollapsePartitions: [],
+      threadCollapseVersion: 0
     })
     this.documents.set(key, mailbox)
   }
 
   async deleteMailboxDocuments(mailboxKey: string): Promise<void> {
+    this.invalidateMailboxCollapseMetadata()
     const key = normalizeText(mailboxKey)
     this.documents.delete(key)
+  }
+
+  async getMailboxCollapseDocuments(): Promise<SearchIndexDocument[]> {
+    return [...this.documents.values()]
+      .flatMap((mailbox) => [...mailbox.values()])
+      .filter((document) => normalizeSourceType(document.sourceType) === 'mailbox')
+      .map((document) => compactSearchIndexDocument({ ...document }))
+  }
+
+  async resetMailboxCollapseMetadata(): Promise<void> {
+    this.invalidateMailboxCollapseMetadata()
+  }
+
+  async writeMailboxCollapsePartition(
+    partitionKey: string,
+    documents: SearchIndexDocument[],
+    referencesByIdentity: Map<string, SearchThreadCollapseReference[]>
+  ): Promise<void> {
+    for (const document of documents) {
+      const mailbox = this.documents.get(normalizeText(document.mailboxKey))
+      const current = mailbox?.get(normalizeText(document.messageId))
+      if (!mailbox || !current) {
+        continue
+      }
+      const references = (current.threadCollapse || []).filter((reference) => reference.partitionKey !== partitionKey)
+      references.push(...(referencesByIdentity.get(getSearchDocumentIdentity(document)) || []))
+      mailbox.set(current.messageId, {
+        ...current,
+        threadCollapse: references,
+        threadCollapsePartitions: [...new Set([...(current.threadCollapsePartitions || []), partitionKey])],
+        threadCollapseVersion: 0
+      })
+    }
+  }
+
+  async finalizeMailboxCollapseMetadata(version: number): Promise<void> {
+    for (const mailbox of this.documents.values()) {
+      for (const [messageId, document] of mailbox) {
+        if (normalizeSourceType(document.sourceType) !== 'mailbox') {
+          continue
+        }
+        mailbox.set(messageId, { ...document, threadCollapseVersion: version })
+      }
+    }
+  }
+
+  async getMailboxCollapseJob(): Promise<MailboxCollapseJobStatus | null> {
+    return this.mailboxCollapseJob ? { ...this.mailboxCollapseJob } : null
+  }
+
+  async saveMailboxCollapseJob(status: MailboxCollapseJobStatus): Promise<void> {
+    this.mailboxCollapseJob = { ...status }
+  }
+
+  async rebuildMailboxCollapseMetadata(): Promise<void> {
+    const documents = [...this.documents.values()]
+      .flatMap((mailbox) => [...mailbox.values()])
+      .filter((document) => normalizeSourceType(document.sourceType) === 'mailbox')
+    const referencesByIdentity = buildMailboxCollapseMetadata(
+      documents,
+      this.hiddenRules.listHiddenRules()
+    )
+    for (const mailbox of this.documents.values()) {
+      for (const [messageId, document] of mailbox) {
+        if (normalizeSourceType(document.sourceType) !== 'mailbox') {
+          continue
+        }
+        mailbox.set(messageId, {
+          ...document,
+          threadCollapse: referencesByIdentity.get(getSearchDocumentIdentity(document)) || [],
+          threadCollapsePartitions: getMailboxCollapsePartitionKeys(document),
+          threadCollapseVersion: CURRENT_MAILBOX_COLLAPSE_VERSION
+        })
+      }
+    }
   }
 
   async updateReviewState(
@@ -2264,11 +2643,17 @@ export class MemorySearchIndexStore implements SearchIndexStore {
   }
 
   async upsertHiddenRule(input: { kind: HiddenRuleKind; value: string; label?: string }): Promise<HiddenRuleRecord> {
-    return this.hiddenRules.upsertHiddenRule(input)
+    const record = this.hiddenRules.upsertHiddenRule(input)
+    await this.rebuildMailboxCollapseMetadata()
+    return record
   }
 
   async deleteHiddenRule(filterId: string): Promise<boolean> {
-    return this.hiddenRules.deleteHiddenRule(filterId)
+    const deleted = this.hiddenRules.deleteHiddenRule(filterId)
+    if (deleted) {
+      await this.rebuildMailboxCollapseMetadata()
+    }
+    return deleted
   }
 
   async findDocumentById(id: string): Promise<SearchIndexDocument | null> {
@@ -2317,11 +2702,30 @@ export class MemorySearchIndexStore implements SearchIndexStore {
     const hiddenRules = this.hiddenRules.listHiddenRules()
     const mailboxKeysProvided = options.allowedMailboxKeys !== undefined
     const allowedMailboxKeys = uniqueTextValues(options.allowedMailboxKeys || [])
-    const allRecords = [...this.documents.values()].flatMap((mailbox) => [...mailbox.values()])
-    const records = mailboxKeysProvided
+    let allRecords = [...this.documents.values()].flatMap((mailbox) => [...mailbox.values()])
+    let records = mailboxKeysProvided
       ? allRecords.filter((record) => allowedMailboxKeys.includes(record.mailboxKey))
       : allRecords
-    if (options.collapseDuplicates) {
+    if (
+      options.collapseDuplicates &&
+      (!options.sourceType || options.sourceType === 'all' || options.sourceType === 'mailbox')
+    ) {
+      // The memory store is also used directly by unit tests and local
+      // development without a coordinator. Preserve that convenience while
+      // production Mongo requests use the resumable coordinator.
+      if (
+        this.mailboxCollapseJob === null &&
+        records.some(
+          (record) => normalizeSourceType(record.sourceType) === 'mailbox' &&
+            record.threadCollapseVersion !== CURRENT_MAILBOX_COLLAPSE_VERSION
+        )
+      ) {
+        await this.rebuildMailboxCollapseMetadata()
+        allRecords = [...this.documents.values()].flatMap((mailbox) => [...mailbox.values()])
+        records = mailboxKeysProvided
+          ? allRecords.filter((record) => allowedMailboxKeys.includes(record.mailboxKey))
+          : allRecords
+      }
       const scopeOptions: SearchIndexSearchOptions = {
         ...options,
         sourceType: 'all',
@@ -2343,7 +2747,7 @@ export class MemorySearchIndexStore implements SearchIndexStore {
       }
       const scopeRecords = records.filter((record) => matchesDocument(record, scopeOptions, hiddenRules))
       const matchingRecords = scopeRecords.filter((record) => matchesDocument(record, matchingOptions, hiddenRules))
-      const representatives = collapseLatestThreadDocuments(scopeRecords, matchingRecords)
+      const representatives = collapseLatestThreadDocumentsFromMetadata(scopeRecords, matchingRecords, scopeOptions)
         .filter((record) => matchesDocument(record, reviewOptions, hiddenRules))
         .sort((left, right) => sortDocuments(left, right, options.sort))
       const resolvedRepresentatives = representatives.map((record) =>
@@ -2572,6 +2976,7 @@ function paginateSearchResults(
     sourceType: options.sourceType || 'all',
     sourceCounts: resolvedSourceCounts,
     flaggedSizeBytes: calculateFlaggedSizeBytes(records),
+    collapseProgress: options.collapseProgress,
     reviewFilters: {
       flaggedOnly: options.reviewFlaggedOnly,
       taggedOnly: options.reviewTaggedOnly,
@@ -2592,7 +2997,9 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     private readonly dbName = 'pst-extractor',
     private readonly documentsCollectionName = DEFAULT_INDEX_COLLECTION,
     private readonly rulesCollectionName = DEFAULT_RULE_COLLECTION,
-    private readonly fingerprintsCollectionName = DEFAULT_FINGERPRINT_COLLECTION
+    private readonly fingerprintsCollectionName = DEFAULT_FINGERPRINT_COLLECTION,
+    private readonly collapseJobs?: MailboxCollapseJobCollectionLike,
+    private readonly collapseJobsCollectionName = DEFAULT_COLLAPSE_JOB_COLLECTION
   ) {}
 
   static async connect(
@@ -2610,6 +3017,9 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     const fingerprints = db.collection<SearchIndexFileFingerprint>(
       options.fingerprintsCollectionName || DEFAULT_FINGERPRINT_COLLECTION
     )
+    const collapseJobs = db.collection<MailboxCollapseJobStatus>(
+      options.collapseJobsCollectionName || DEFAULT_COLLAPSE_JOB_COLLECTION
+    )
     await documents.createIndex?.({ mailboxKey: 1, messageId: 1 }, { unique: true })
     await documents.createIndex?.({ messageId: 1 })
     await documents.createIndex?.({ sourceType: 1, scopePath: 1 })
@@ -2621,10 +3031,12 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     await documents.createIndex?.({ mailboxKey: 1, 'reviewStates.review.flagged': 1 })
     await documents.createIndex?.({ mailboxKey: 1, 'reviewStates.review.tags': 1 })
     await documents.createIndex?.({ mailboxKey: 1, sortDateMs: -1 })
+    await documents.createIndex?.({ sourceType: 1, threadCollapseVersion: 1 })
     await rules.createIndex?.({ kind: 1, value: 1 }, { unique: true })
     await rules.createIndex?.({ updatedAt: -1 })
     await fingerprints.createIndex?.({ source: 1, mailboxKey: 1 }, { unique: true })
     await fingerprints.createIndex?.({ source: 1, updatedAt: -1 })
+    await collapseJobs.createIndex?.({ updatedAt: -1 })
     return new MongoSearchIndexStore(
       documents as unknown as SearchIndexCollectionLike,
       rules as unknown as HiddenRuleCollectionLike,
@@ -2633,7 +3045,9 @@ export class MongoSearchIndexStore implements SearchIndexStore {
       dbName,
       options.documentsCollectionName || DEFAULT_INDEX_COLLECTION,
       options.rulesCollectionName || DEFAULT_RULE_COLLECTION,
-      options.fingerprintsCollectionName || DEFAULT_FINGERPRINT_COLLECTION
+      options.fingerprintsCollectionName || DEFAULT_FINGERPRINT_COLLECTION,
+      collapseJobs as unknown as MailboxCollapseJobCollectionLike,
+      options.collapseJobsCollectionName || DEFAULT_COLLAPSE_JOB_COLLECTION
     )
   }
 
@@ -2642,12 +3056,19 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     await this.documents.deleteMany({ mailboxKey: key })
     const uniqueDocuments = dedupeSearchIndexDocuments(documents.map(compactSearchIndexDocument))
     if (!uniqueDocuments.length) {
+      await this.documents.updateMany?.(
+        { sourceType: 'mailbox' },
+        { $set: { threadCollapse: [], threadCollapsePartitions: [], threadCollapseVersion: 0 } }
+      )
       return
     }
     const normalizedDocuments = uniqueDocuments.map((document) => ({
       ...document,
       mailboxKey: key,
-      sourceType: normalizeSourceType(document.sourceType)
+      sourceType: normalizeSourceType(document.sourceType),
+      threadCollapse: [],
+      threadCollapsePartitions: [],
+      threadCollapseVersion: 0
     }))
     const batchSize = 100
     for (let start = 0; start < normalizedDocuments.length; start += batchSize) {
@@ -2685,7 +3106,10 @@ export class MongoSearchIndexStore implements SearchIndexStore {
       batch.push({
         ...normalizedDocument,
         mailboxKey: key,
-        sourceType: normalizeSourceType(normalizedDocument.sourceType)
+        sourceType: normalizeSourceType(normalizedDocument.sourceType),
+        threadCollapse: [],
+        threadCollapsePartitions: [],
+        threadCollapseVersion: 0
       })
       if (batch.length >= 100) {
         await flush()
@@ -2710,7 +3134,10 @@ export class MongoSearchIndexStore implements SearchIndexStore {
         $set: {
           ...normalizedDocument,
           mailboxKey: key,
-          sourceType: normalizeSourceType(normalizedDocument.sourceType)
+          sourceType: normalizeSourceType(normalizedDocument.sourceType),
+          threadCollapse: [],
+          threadCollapsePartitions: [],
+          threadCollapseVersion: 0
         }
       },
       { upsert: true }
@@ -2720,6 +3147,131 @@ export class MongoSearchIndexStore implements SearchIndexStore {
   async deleteMailboxDocuments(mailboxKey: string): Promise<void> {
     const key = normalizeText(mailboxKey)
     await this.documents.deleteMany({ mailboxKey: key })
+    await this.documents.updateMany?.(
+      { sourceType: 'mailbox' },
+      { $set: { threadCollapse: [], threadCollapsePartitions: [], threadCollapseVersion: 0 } }
+    )
+  }
+
+  async getMailboxCollapseDocuments(): Promise<SearchIndexDocument[]> {
+    return this.documents
+      .find({ sourceType: 'mailbox' }, { projection: COLLAPSE_DOCUMENT_PROJECTION })
+      .sort({})
+      .skip(0)
+      .limit(0)
+      .toArray()
+  }
+
+  async resetMailboxCollapseMetadata(): Promise<void> {
+    await this.documents.updateMany?.(
+      { sourceType: 'mailbox' },
+      { $set: { threadCollapse: [], threadCollapsePartitions: [], threadCollapseVersion: 0 } }
+    )
+  }
+
+  async writeMailboxCollapsePartition(
+    partitionKey: string,
+    documents: SearchIndexDocument[],
+    referencesByIdentity: Map<string, SearchThreadCollapseReference[]>
+  ): Promise<void> {
+    const operations = documents.map((document) => {
+      const references = referencesByIdentity.get(getSearchDocumentIdentity(document)) || []
+      const addToSet: Record<string, unknown> = {
+        threadCollapsePartitions: partitionKey
+      }
+      if (references.length) {
+        addToSet.threadCollapse = { $each: references }
+      }
+      return {
+        updateOne: {
+          filter: {
+            mailboxKey: normalizeText(document.mailboxKey),
+            messageId: normalizeText(document.messageId)
+          },
+          update: {
+            $set: { threadCollapseVersion: 0 },
+            $addToSet: addToSet
+          }
+        }
+      }
+    })
+    const batchSize = 500
+    for (let start = 0; start < operations.length; start += batchSize) {
+      const batch = operations.slice(start, start + batchSize)
+      if (this.documents.bulkWrite) {
+        await this.documents.bulkWrite(batch, { ordered: false })
+      } else {
+        for (const operation of batch) {
+          await this.documents.updateOne(operation.updateOne.filter, operation.updateOne.update)
+        }
+      }
+    }
+  }
+
+  async finalizeMailboxCollapseMetadata(version: number): Promise<void> {
+    await this.documents.updateMany?.(
+      { sourceType: 'mailbox' },
+      { $set: { threadCollapseVersion: version } }
+    )
+  }
+
+  async getMailboxCollapseJob(): Promise<MailboxCollapseJobStatus | null> {
+    const status = this.collapseJobs ? await this.collapseJobs.findOne({ _id: 'mailbox' }) : null
+    if (!status) {
+      return null
+    }
+    return {
+      jobId: status.jobId || null,
+      status: status.status,
+      version: status.version,
+      startedAt: status.startedAt || null,
+      completedAt: status.completedAt || null,
+      updatedAt: status.updatedAt,
+      processedPartitions: status.processedPartitions,
+      totalPartitions: status.totalPartitions,
+      completedPartitionKeys: [...(status.completedPartitionKeys || [])],
+      processedWorkUnits: status.processedWorkUnits,
+      totalWorkUnits: status.totalWorkUnits,
+      percentage: status.percentage,
+      provisional: status.provisional,
+      error: status.error || null,
+      reindexRequired: status.reindexRequired
+    }
+  }
+
+  async saveMailboxCollapseJob(status: MailboxCollapseJobStatus): Promise<void> {
+    if (!this.collapseJobs) {
+      return
+    }
+    await this.collapseJobs.updateOne(
+      { _id: 'mailbox' },
+      { $set: status },
+      { upsert: true }
+    )
+  }
+
+  async rebuildMailboxCollapseMetadata(): Promise<void> {
+    await this.resetMailboxCollapseMetadata()
+    const documents = await this.getMailboxCollapseDocuments()
+    const referencesByIdentity = buildMailboxCollapseMetadata(
+      documents,
+      await this.listHiddenRules()
+    )
+    for (const partitionKey of new Set(documents.flatMap(getMailboxCollapsePartitionKeys))) {
+      const partitionDocuments = documents.filter((document) =>
+        getMailboxCollapsePartitionKeys(document).includes(partitionKey)
+      )
+      const partitionReferences = new Map<string, SearchThreadCollapseReference[]>()
+      for (const document of partitionDocuments) {
+        const references = (referencesByIdentity.get(getSearchDocumentIdentity(document)) || [])
+          .filter((reference) => reference.partitionKey === partitionKey)
+        if (references.length) {
+          partitionReferences.set(getSearchDocumentIdentity(document), references)
+        }
+      }
+      await this.writeMailboxCollapsePartition(partitionKey, partitionDocuments, partitionReferences)
+    }
+    await this.finalizeMailboxCollapseMetadata(CURRENT_MAILBOX_COLLAPSE_VERSION)
   }
 
   async listFileFingerprints(source: SearchIndexRefreshSource): Promise<SearchIndexFileFingerprint[]> {
@@ -2892,11 +3444,15 @@ export class MongoSearchIndexStore implements SearchIndexStore {
       updatedAt: now
     }
     await this.rules.updateOne({ kind, value }, { $set: record }, { upsert: true })
+    await this.rebuildMailboxCollapseMetadata()
     return record
   }
 
   async deleteHiddenRule(filterId: string): Promise<boolean> {
     const result = await this.rules.deleteOne({ filterId: normalizeText(filterId) })
+    if (result.deletedCount && result.deletedCount > 0) {
+      await this.rebuildMailboxCollapseMetadata()
+    }
     return Boolean(result.deletedCount && result.deletedCount > 0)
   }
 
@@ -2913,7 +3469,10 @@ export class MongoSearchIndexStore implements SearchIndexStore {
     const sourceTypeFilter =
       options.sourceType && options.sourceType !== 'all' ? normalizeSourceType(options.sourceType) : null
     const normalizedReviewerUsername = normalizeReviewerUsername(options.reviewerUsername)
-    const collapseDuplicates = Boolean(options.collapseDuplicates)
+    const collapseDuplicates = Boolean(
+      options.collapseDuplicates &&
+        (!sourceTypeFilter || sourceTypeFilter === 'mailbox')
+    )
 
     if (collapseDuplicates) {
       const scopeOptions: SearchIndexSearchOptions = {
@@ -2938,14 +3497,6 @@ export class MongoSearchIndexStore implements SearchIndexStore {
         // projected graph intentionally does not carry mailboxDetail.
         requirePreviewPayload: false
       }
-      const scopeItems = await this.documents
-        .find(buildFilterMatch(scopeOptions, hiddenRules), {
-          projection: COLLAPSE_DOCUMENT_PROJECTION
-        })
-        .sort(createSortSpec(options.sort))
-        .skip(0)
-        .limit(0)
-        .toArray()
       const matchingItems = await this.documents
         .find(buildFilterMatch(matchingOptions, hiddenRules), {
           projection: COLLAPSE_DOCUMENT_PROJECTION
@@ -2954,7 +3505,47 @@ export class MongoSearchIndexStore implements SearchIndexStore {
         .skip(0)
         .limit(0)
         .toArray()
-      const representatives = collapseLatestThreadDocuments(scopeItems, matchingItems)
+      const representativeClauses = new Map<string, { mailboxKey: string; messageId: string }>()
+      for (const matchingItem of matchingItems) {
+        const partitionKey = getCollapsePartitionCandidates(matchingItem, scopeOptions).find((key) =>
+          isCollapsePartitionCompleted(matchingItem, key, scopeOptions)
+        )
+        const reference = partitionKey
+          ? (matchingItem.threadCollapse || []).find((entry) => entry.partitionKey === partitionKey)
+          : undefined
+        if (reference) {
+          const identity = `${reference.representativeMailboxKey}\u0000${reference.representativeMessageId}`
+          representativeClauses.set(identity, {
+            mailboxKey: normalizeText(reference.representativeMailboxKey),
+            messageId: normalizeText(reference.representativeMessageId)
+          })
+        }
+      }
+      const representativeItems = representativeClauses.size
+        ? await this.documents
+            .find({
+              $and: [
+                buildFilterMatch(scopeOptions, hiddenRules),
+                { $or: [...representativeClauses.values()] }
+              ]
+            }, {
+              projection: COLLAPSE_DOCUMENT_PROJECTION
+            })
+            .sort(createSortSpec(options.sort))
+            .skip(0)
+            .limit(0)
+            .toArray()
+        : []
+      const scopeItems = [
+        ...new Map(
+          [...matchingItems, ...representativeItems].map((record) => [getSearchDocumentIdentity(record), record])
+        ).values()
+      ]
+      const representatives = collapseLatestThreadDocumentsFromMetadata(
+        scopeItems,
+        matchingItems,
+        scopeOptions
+      )
         .filter((record) => matchesDocument(record, reviewOptions, hiddenRules))
         .sort((left, right) => sortDocuments(left, right, options.sort))
       const resolvedAllItems = representatives.map((record) =>
@@ -3021,6 +3612,7 @@ export class MongoSearchIndexStore implements SearchIndexStore {
         sourceType: options.sourceType || 'all',
         sourceCounts,
         flaggedSizeBytes: calculateFlaggedSizeBytes(resolvedItems),
+        collapseProgress: options.collapseProgress,
         reviewFilters: {
           flaggedOnly: options.reviewFlaggedOnly,
           taggedOnly: options.reviewTaggedOnly,
@@ -3136,6 +3728,7 @@ export class MongoSearchIndexStore implements SearchIndexStore {
       sourceType: options.sourceType || 'all',
       sourceCounts,
       flaggedSizeBytes,
+      collapseProgress: options.collapseProgress,
       reviewFilters: {
         flaggedOnly: options.reviewFlaggedOnly,
         taggedOnly: options.reviewTaggedOnly,

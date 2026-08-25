@@ -989,7 +989,27 @@ function searchPageSchema(): Record<string, unknown> {
         items: hiddenRuleSchema()
       },
       flaggedSizeBytes: { type: 'integer' },
-      reviewFilters: { type: 'object', additionalProperties: true }
+      reviewFilters: { type: 'object', additionalProperties: true },
+      collapseProgress: {
+        type: ['object', 'null'],
+        additionalProperties: true,
+        properties: {
+          jobId: { type: ['string', 'null'] },
+          status: { type: 'string', enum: ['idle', 'running', 'succeeded', 'failed', 'reindex-required'] },
+          version: { type: 'integer' },
+          startedAt: { type: ['string', 'null'] },
+          completedAt: { type: ['string', 'null'] },
+          updatedAt: { type: 'string' },
+          processedPartitions: { type: 'integer' },
+          totalPartitions: { type: 'integer' },
+          processedWorkUnits: { type: 'integer' },
+          totalWorkUnits: { type: 'integer' },
+          percentage: { type: 'integer' },
+          provisional: { type: 'boolean' },
+          error: { type: ['string', 'null'] },
+          reindexRequired: { type: 'boolean' }
+        }
+      }
     }
   }
 }
@@ -2204,6 +2224,34 @@ export function buildOpenApiDocument(options: BuildOpenApiOptions): Record<strin
                   }
                 }
               }
+            })
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.searchIndexDedupe)]: {
+        post: {
+          tags: ['Extraction'],
+          summary: 'Start or resume Mongo mailbox duplicate grouping',
+          responses: {
+            ...errorResponse(401, 'Authentication required'),
+            202: jsonResponse({
+              type: 'object',
+              required: ['status'],
+              properties: { status: { type: 'object', additionalProperties: true } }
+            })
+          }
+        }
+      },
+      [openApiPath(API_ROUTES.searchIndexDedupeStatus)]: {
+        get: {
+          tags: ['Extraction'],
+          summary: 'Get Mongo mailbox duplicate grouping progress',
+          responses: {
+            ...errorResponse(401, 'Authentication required'),
+            200: jsonResponse({
+              type: 'object',
+              required: ['status'],
+              properties: { status: { type: 'object', additionalProperties: true } }
             })
           }
         }

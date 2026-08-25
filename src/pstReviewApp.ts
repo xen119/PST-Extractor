@@ -89,6 +89,10 @@ import {
   type SearchIndexRefreshStatus
 } from './searchIndexRefresh'
 import {
+  createMailboxCollapseCoordinator,
+  type MailboxCollapseCoordinator
+} from './searchIndexCollapse'
+import {
   buildEmptyMessageDetail,
   collectFolderMessages,
   buildFolderTree,
@@ -144,6 +148,7 @@ export interface CreatePstReviewAppOptions {
   apiSecurity?: ApiSecurityConfig
   smtpTransportFactory?: SmtpTransportFactory
   searchIndexRefreshCoordinator?: SearchIndexRefreshCoordinator
+  mailboxCollapseCoordinator?: MailboxCollapseCoordinator
 }
 
 export interface AppAuthConfig {
@@ -2456,6 +2461,9 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
   const pstRootDir = options.pstRootDir || getDefaultPstRootDirectory()
   const reviewStore = options.reviewStore
   const searchIndexStore = options.searchIndexStore
+  const mailboxCollapseCoordinator =
+    options.mailboxCollapseCoordinator ||
+    createMailboxCollapseCoordinator({ searchIndexStore })
   const flaggedBundleStore = options.flaggedBundleStore || createMemoryFlaggedBundleStore()
   const authConfig = normalizeAuthConfig(options.auth)
   const authUserStore = options.authUserStore || createMemoryAuthUserStore(authConfig.seedUsers)
@@ -3315,11 +3323,24 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         })
         if (refreshStatus.source === 'mailboxes' && refreshStatus.status === 'succeeded') {
           clearOpenMailboxDetailCaches()
+          void mailboxCollapseCoordinator
+            .reset()
+            .then(() => {
+              if (searchIndexStore.kind === 'mongo' && searchIndexStore.isPersistent) {
+                return mailboxCollapseCoordinator.ensureStarted()
+              }
+              return undefined
+            })
+            .catch(() => undefined)
         }
       }
     })
 
   app.set('searchIndexRefreshCoordinator', searchIndexRefreshCoordinator)
+  app.set('mailboxCollapseCoordinator', mailboxCollapseCoordinator)
+  if (searchIndexStore.kind === 'mongo' && searchIndexStore.isPersistent) {
+    void mailboxCollapseCoordinator.ensureStarted().catch(() => undefined)
+  }
 
   function getAuthMfaChallengeCookieName(): string {
     return `${authConfig.cookieName}${DEFAULT_AUTH_MFA_CHALLENGE_COOKIE_SUFFIX}`
@@ -7045,6 +7066,12 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         allowedMailboxKeys = archiveSelection.mailboxKeys
       }
 
+      let collapseProgress
+      if (collapseDuplicates && sourceType === 'mailbox') {
+        await mailboxCollapseCoordinator.ensureStarted()
+        collapseProgress = await mailboxCollapseCoordinator.getStatus()
+      }
+
       const page = await searchIndexStore.search({
         scope,
         scopePath,
@@ -7063,7 +7090,8 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
         reviewFlaggedOnly: filters.reviewFlaggedOnly,
         reviewTaggedOnly: filters.reviewTaggedOnly,
         reviewTag: filters.reviewTag,
-        collapseDuplicates
+        collapseDuplicates,
+        collapseProgress
       })
       recordAuditEvent({
         req,
@@ -7765,6 +7793,36 @@ export function createPstReviewApp(options: CreatePstReviewAppOptions): express.
 
       responseJson(res, 200, {
         status: searchIndexRefreshCoordinator.getStatus(source)
+      })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.post(API_ROUTES.searchIndexDedupe, async (req, res) => {
+    try {
+      const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, { error: 'Authentication required' })
+        return
+      }
+      responseJson(res, 202, {
+        status: await mailboxCollapseCoordinator.start()
+      })
+    } catch (error) {
+      createRouteErrorHandler(res, error)
+    }
+  })
+
+  app.get(API_ROUTES.searchIndexDedupeStatus, async (req, res) => {
+    try {
+      const authSession = getAuthSessionFromRequest(req)
+      if (authConfig.enabled && !authSession) {
+        responseJson(res, 401, { error: 'Authentication required' })
+        return
+      }
+      responseJson(res, 200, {
+        status: await mailboxCollapseCoordinator.getStatus()
       })
     } catch (error) {
       createRouteErrorHandler(res, error)

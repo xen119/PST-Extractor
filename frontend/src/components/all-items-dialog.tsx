@@ -24,7 +24,8 @@ import type {
   MessageSummary,
   ReviewState,
   SearchSourceType,
-  SearchThreadResponse
+  SearchThreadResponse,
+  MailboxCollapseStatus
 } from '@/types'
 import {
   Badge,
@@ -73,6 +74,7 @@ interface TabState {
   loading: boolean
   loadingMore: boolean
   error: string
+  collapseProgress: MailboxCollapseStatus | null
 }
 
 const INITIAL_TAB_STATE: TabState = {
@@ -83,7 +85,8 @@ const INITIAL_TAB_STATE: TabState = {
   flaggedSizeBytes: 0,
   loading: false,
   loadingMore: false,
-  error: ''
+  error: '',
+  collapseProgress: null
 }
 
 function createInitialTabStates(): Record<AllItemsSourceTab, TabState> {
@@ -233,6 +236,10 @@ export function AllItemsDialog({
   const reviewRequestRef = React.useRef(0)
   const previewRequestRef = React.useRef(0)
   const threadRequestRef = React.useRef(0)
+  const searchAbortControllerRef = React.useRef<AbortController | null>(null)
+  const dedupeAbortControllerRef = React.useRef<AbortController | null>(null)
+  const dedupeTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  const dedupeCompletedVersionRef = React.useRef('')
   const pagingGenerationRef = React.useRef(0)
   const activeTabRef = React.useRef<AllItemsSourceTab>('mailbox')
 
@@ -250,6 +257,9 @@ export function AllItemsDialog({
   const [sortState, setSortState] = React.useState<AllItemsSortState>(INITIAL_SORT_STATE)
   const [pageSize, setPageSize] = React.useState<number>(PAGE_SIZE)
   const [scrollResetToken, setScrollResetToken] = React.useState(0)
+  const [collapseProgress, setCollapseProgress] = React.useState<MailboxCollapseStatus | null>(null)
+  const [dedupeRefreshToken, setDedupeRefreshToken] = React.useState(0)
+  const [dedupeRetryToken, setDedupeRetryToken] = React.useState(0)
   const [selectedItemIdsByTab, setSelectedItemIdsByTab] = React.useState<AllItemsSelectionState>(
     createSelectionState
   )
@@ -260,6 +270,8 @@ export function AllItemsDialog({
   const [threadDetails, setThreadDetails] = React.useState<SearchThreadResponse | null>(null)
   const [threadLoading, setThreadLoading] = React.useState(false)
   const [threadError, setThreadError] = React.useState('')
+  const tabStateRef = React.useRef(tabState)
+  tabStateRef.current = tabState
 
   const selectedTotalsScope = React.useMemo(
     () => resolveSelectionScope(selectedCasePath, selectedScopePath),
@@ -267,6 +279,9 @@ export function AllItemsDialog({
   )
   const activeSelection = selectedItemIdsByTab[activeTab]
   const activeState = tabState[activeTab]
+  const activeCollapseProgress = activeTab === 'mailbox'
+    ? collapseProgress || activeState.collapseProgress
+    : null
   const sortKey = getSortKey(sortState)
   const sortLabel = getSortLabel(sortState)
   const gridTemplate = activeTab === 'mailbox' && hideDuplicates ? ITEM_GRID_TEMPLATE_WITH_THREAD : ITEM_GRID_TEMPLATE
@@ -491,11 +506,17 @@ export function AllItemsDialog({
     if (tab === activeTab) {
       return
     }
+    searchAbortControllerRef.current?.abort()
+    searchAbortControllerRef.current = null
+    pagingGenerationRef.current += 1
+    inFlightPagesRef.current = createPageTrackingState()
     clearSelection()
     setActiveTab(tab)
   }
 
   const resetPagingState = React.useCallback(() => {
+    searchAbortControllerRef.current?.abort()
+    searchAbortControllerRef.current = null
     pagingGenerationRef.current += 1
     loadedPagesRef.current = createPageTrackingState()
     inFlightPagesRef.current = createPageTrackingState()
@@ -504,7 +525,25 @@ export function AllItemsDialog({
       teams: 0,
       sharepoint: 0
     }
-    setTabState(createInitialTabStates())
+    const initialState = createInitialTabStates()
+    const previousState = tabStateRef.current
+    for (const tab of SOURCE_TABS) {
+      const previousTab = previousState[tab.key]
+      if (!previousTab.items.length) {
+        continue
+      }
+      initialState[tab.key] = {
+        ...initialState[tab.key],
+        items: previousTab.items,
+        total: previousTab.total,
+        totalPages: previousTab.totalPages,
+        flaggedSizeBytes: previousTab.flaggedSizeBytes,
+        collapseProgress: previousTab.collapseProgress,
+        loadingMore: true
+      }
+    }
+    tabStateRef.current = initialState
+    setTabState(initialState)
     setDialogError('')
     clearSelection()
     setScrollResetToken((current) => current + 1)
@@ -520,6 +559,9 @@ export function AllItemsDialog({
     }
 
     const requestGeneration = pagingGenerationRef.current
+    searchAbortControllerRef.current?.abort()
+    const abortController = new AbortController()
+    searchAbortControllerRef.current = abortController
     inFlightPages.add(normalizedPage)
     setDialogError('')
     setTabState((current) => {
@@ -549,12 +591,16 @@ export function AllItemsDialog({
         sort: sortKey,
         reviewFlagged: reviewFlaggedOnly,
         reviewTagged: reviewTaggedOnly,
-        collapseDuplicates: hideDuplicates && normalizedTab === 'mailbox'
+        collapseDuplicates: hideDuplicates && normalizedTab === 'mailbox',
+        signal: abortController.signal
       })
       if (pagingGenerationRef.current !== requestGeneration) {
         return
       }
       const pageResponse = normalizeSearchResultsPage(response.page)
+      if (normalizedTab === 'mailbox') {
+        setCollapseProgress(pageResponse.collapseProgress || null)
+      }
       loadedPages.add(pageResponse.page)
       setTabState((current) => {
         const prev = current[normalizedTab]
@@ -569,6 +615,7 @@ export function AllItemsDialog({
             total: pageResponse.total,
             totalPages: pageResponse.totalPages,
             flaggedSizeBytes: pageResponse.flaggedSizeBytes ?? 0,
+            collapseProgress: pageResponse.collapseProgress || prev.collapseProgress,
             loading: false,
             loadingMore: false,
             error: ''
@@ -576,6 +623,9 @@ export function AllItemsDialog({
         }
       })
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return
+      }
       if (pagingGenerationRef.current !== requestGeneration) {
         return
       }
@@ -595,6 +645,9 @@ export function AllItemsDialog({
       setDialogError(message)
     } finally {
       inFlightPages.delete(normalizedPage)
+      if (searchAbortControllerRef.current === abortController) {
+        searchAbortControllerRef.current = null
+      }
     }
   }
 
@@ -786,7 +839,8 @@ export function AllItemsDialog({
     selectedCasePath,
     selectedScopePath,
     pageSize,
-    sortKey
+    sortKey,
+    dedupeRefreshToken
   ])
 
   React.useEffect(() => {
@@ -799,14 +853,130 @@ export function AllItemsDialog({
     }
 
     const state = tabState[activeTab]
+    if (state.items.length && state.loadingMore && state.page === 0) {
+      void loadPage(activeTab, 1)
+      return
+    }
     if (!state.items.length && !state.loading && !state.loadingMore) {
       void loadPage(activeTab, 1)
     }
-  }, [activeTab, activeState.loading, activeState.loadingMore, activeState.items.length, open, sortKey, tabState])
+  }, [activeTab, activeState.loading, activeState.loadingMore, activeState.items.length, activeState.page, open, sortKey, tabState])
+
+  React.useEffect(() => {
+    dedupeAbortControllerRef.current?.abort()
+    if (dedupeTimerRef.current) {
+      clearTimeout(dedupeTimerRef.current)
+      dedupeTimerRef.current = null
+    }
+
+    if (!open || !hideDuplicates || activeTab !== 'mailbox') {
+      setCollapseProgress(null)
+      return
+    }
+
+    const controller = new AbortController()
+    dedupeAbortControllerRef.current = controller
+    let cancelled = false
+
+    const poll = async (): Promise<void> => {
+      if (cancelled || controller.signal.aborted) {
+        return
+      }
+      try {
+        const response = await api.pst.mailboxDedupeStatus(controller.signal)
+        if (cancelled || controller.signal.aborted) {
+          return
+        }
+        const status = response.status
+        setCollapseProgress(status)
+        if (status.status === 'succeeded') {
+          const completionKey = `${status.jobId || ''}:${status.updatedAt}`
+          if (dedupeCompletedVersionRef.current !== completionKey) {
+            dedupeCompletedVersionRef.current = completionKey
+            setDedupeRefreshToken((current) => current + 1)
+          }
+          return
+        }
+        if (status.status === 'failed' || status.status === 'reindex-required') {
+          return
+        }
+        dedupeTimerRef.current = setTimeout(() => void poll(), 1500)
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          return
+        }
+        if (!cancelled) {
+          setCollapseProgress((current) => ({
+            ...(current || {
+              jobId: null,
+              status: 'failed',
+              version: 0,
+              startedAt: null,
+              completedAt: null,
+              updatedAt: new Date().toISOString(),
+              processedPartitions: 0,
+              totalPartitions: 0,
+              completedPartitionKeys: [],
+              processedWorkUnits: 0,
+              totalWorkUnits: 0,
+              percentage: 0,
+              provisional: true,
+              error: null,
+              reindexRequired: false
+            }),
+            status: 'failed',
+            error: error instanceof Error ? error.message : 'Unable to read grouping progress'
+          }))
+        }
+      }
+    }
+
+    const initialRequest = dedupeRetryToken > 0
+      ? api.pst.startMailboxDedupe().then(() => poll())
+      : poll()
+    void initialRequest.catch((error) => {
+        if (!cancelled && !(error instanceof DOMException && error.name === 'AbortError')) {
+          setDialogError(error instanceof Error ? error.message : 'Unable to start grouping')
+        }
+      })
+
+    return () => {
+      cancelled = true
+      controller.abort()
+      if (dedupeTimerRef.current) {
+        clearTimeout(dedupeTimerRef.current)
+        dedupeTimerRef.current = null
+      }
+      if (dedupeAbortControllerRef.current === controller) {
+        dedupeAbortControllerRef.current = null
+      }
+    }
+  }, [
+    activeTab,
+    appliedQuery,
+    dedupeRetryToken,
+    hideDuplicates,
+    mailOnly,
+    open,
+    pageSize,
+    reviewFlaggedOnly,
+    reviewTaggedOnly,
+    selectedCasePath,
+    selectedScopePath,
+    sortKey
+  ])
 
   React.useEffect(() => {
     if (open) {
       return
+    }
+    searchAbortControllerRef.current?.abort()
+    searchAbortControllerRef.current = null
+    dedupeAbortControllerRef.current?.abort()
+    dedupeAbortControllerRef.current = null
+    if (dedupeTimerRef.current) {
+      clearTimeout(dedupeTimerRef.current)
+      dedupeTimerRef.current = null
     }
     clearSelection()
     setBulkActionLoading(false)
@@ -923,7 +1093,14 @@ export function AllItemsDialog({
             <div className="flex flex-wrap items-center gap-2">
               {SOURCE_TABS.map((tab) => {
                 const active = tab.key === activeTab
-                const count = sourceCounts ? sourceCounts[tab.key] : '…'
+                const count =
+                  tab.key === 'mailbox' && hideDuplicates && activeTab === 'mailbox'
+                    ? activeState.page > 0
+                      ? activeState.total
+                      : '…'
+                    : sourceCounts
+                      ? sourceCounts[tab.key]
+                      : '…'
                 return (
                   <button
                     key={tab.key}
@@ -1015,7 +1192,9 @@ export function AllItemsDialog({
               <span className="chip chip-active">{`Showing ${activeState.total} items`}</span>
               <span className="chip">Sorted by {sortLabel}</span>
               <span className="chip chip-active">Flagged size: {formatBytes(activeState.flaggedSizeBytes ?? 0)}</span>
-              {hideDuplicates ? <span className="chip chip-active">Older linked thread items hidden</span> : null}
+              {hideDuplicates && activeTab === 'mailbox' ? (
+                <span className="chip chip-active">Older linked thread items hidden</span>
+              ) : null}
               {mailOnly ? <span className="chip chip-active">Mail only</span> : null}
               {reviewFlaggedOnly ? <span className="chip chip-active">Flagged</span> : null}
               {reviewTaggedOnly ? <span className="chip chip-active">Tagged</span> : null}
@@ -1063,6 +1242,49 @@ export function AllItemsDialog({
             </div>
           ) : null}
 
+          {hideDuplicates && activeTab === 'mailbox' && activeState.page === 0 && activeState.loadingMore ? (
+            <div className="border-b border-[color:var(--line)] px-6 py-2 text-sm text-[color:var(--muted)]">
+              Preparing grouped view... Existing rows remain visible until the grouped results are ready.
+            </div>
+          ) : null}
+
+          {hideDuplicates && activeTab === 'mailbox' && activeCollapseProgress && activeCollapseProgress.status !== 'succeeded' ? (
+            <div className="border-b border-[color:var(--line)] px-6 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+                <div>
+                  <div className="font-semibold text-[color:var(--text)]">
+                    {activeCollapseProgress.status === 'reindex-required'
+                      ? 'Mailbox metadata needs reindexing'
+                      : activeCollapseProgress.status === 'failed'
+                        ? 'Grouping failed'
+                        : `Grouping mailbox items: ${activeCollapseProgress.percentage}%`}
+                  </div>
+                  <div className="text-[color:var(--muted)]">
+                    {activeCollapseProgress.status === 'reindex-required'
+                      ? activeCollapseProgress.error || 'Reindex mailboxes, then retry grouping.'
+                      : activeCollapseProgress.status === 'failed'
+                        ? activeCollapseProgress.error || 'The grouped view is still provisional.'
+                        : `${activeCollapseProgress.processedPartitions} of ${activeCollapseProgress.totalPartitions} partitions · ${activeCollapseProgress.processedWorkUnits} of ${activeCollapseProgress.totalWorkUnits} documents${activeCollapseProgress.provisional ? ' · provisional results' : ''}`}
+                  </div>
+                </div>
+                {activeCollapseProgress.status === 'failed' || activeCollapseProgress.status === 'reindex-required' ? (
+                  <Button type="button" variant="secondary" onClick={() => setDedupeRetryToken((current) => current + 1)}>
+                    <RefreshCw className="h-4 w-4" />
+                    Retry
+                  </Button>
+                ) : null}
+              </div>
+              {activeCollapseProgress.status !== 'failed' && activeCollapseProgress.status !== 'reindex-required' ? (
+                <div className="mt-2 h-2 overflow-hidden rounded-full bg-[color:var(--surface-soft)]" aria-label="Mailbox grouping progress">
+                  <div
+                    className="h-full rounded-full bg-[color:var(--accent)] transition-[width] duration-300"
+                    style={{ width: `${activeCollapseProgress.percentage}%` }}
+                  />
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
           <div
             className={`${gridTemplate} border-b border-[color:var(--line)] bg-[color:var(--surface)] px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.2em] text-[color:var(--muted)]`}
           >
@@ -1102,7 +1324,9 @@ export function AllItemsDialog({
             ) : null}
 
             {!rows.length && activeState.loading ? (
-              <div className="empty-state m-4">Loading items...</div>
+              <div className="empty-state m-4">
+                {hideDuplicates && activeTab === 'mailbox' ? 'Preparing grouped view...' : 'Loading items...'}
+              </div>
             ) : !rows.length ? (
               <div className="empty-state m-4">No items found in this tab.</div>
             ) : (

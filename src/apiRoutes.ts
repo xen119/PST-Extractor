@@ -40,6 +40,8 @@ export const API_ROUTES = {
   pstRestore: '/api/psts/restore',
   searchIndexRefresh: '/api/search/index/refresh',
   searchIndexRefreshStatus: '/api/search/index/refresh/status',
+  searchIndexDedupe: '/api/search/index/dedupe',
+  searchIndexDedupeStatus: '/api/search/index/dedupe/status',
   searchFilters: '/api/search/filters',
   searchFilter: '/api/search/filters/:filterId',
   search: '/api/search',

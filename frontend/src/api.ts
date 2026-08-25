@@ -26,6 +26,7 @@ import type {
   SearchIndexRefreshResponse,
   SearchIndexRefreshSource,
   SearchIndexRefreshStatus,
+  MailboxCollapseResponse,
   SmtpSettingsResponse,
   SmtpTestResponse,
   UserInviteResponse,
@@ -301,6 +302,15 @@ export const api = {
     refreshSearchIndexStatus: (source: SearchIndexRefreshSource) =>
       requestJson<SearchIndexRefreshResponse>(`/api/search/index/refresh/status?${buildQuery({ source })}`, {
         cache: 'no-store'
+      }),
+    startMailboxDedupe: () =>
+      requestJson<MailboxCollapseResponse>('/api/search/index/dedupe', {
+        method: 'POST'
+      }),
+    mailboxDedupeStatus: (signal?: AbortSignal) =>
+      requestJson<MailboxCollapseResponse>('/api/search/index/dedupe/status', {
+        cache: 'no-store',
+        signal
       })
   },
   hiddenFilters: {
@@ -332,6 +342,7 @@ export const api = {
     scopePath?: string
     casePath?: string
     sessionId?: string
+    signal?: AbortSignal
   }) => {
     const query = buildQuery({
       scope: params.scope,
@@ -351,7 +362,8 @@ export const api = {
       sessionId: params.sessionId
     })
     return requestJson<SearchResponse>(query ? `/api/search?${query}` : '/api/search', {
-      cache: 'no-store'
+      cache: 'no-store',
+      signal: params.signal
     })
   },
   item: {

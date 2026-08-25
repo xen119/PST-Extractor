@@ -1779,6 +1779,22 @@ describe('search index cache', () => {
         isForward: false
       }
     })
+    const collapseReference = {
+      partitionKey: 'all',
+      threadId: 'thread-mongo-test',
+      branchId: 'branch-mongo-test',
+      branchIndex: 1,
+      branchCount: 1,
+      threadItemCount: 2,
+      branchItemCount: 2,
+      isRepresentative: true,
+      representativeMailboxKey: older.mailboxKey,
+      representativeMessageId: newer.messageId
+    }
+    older.threadCollapseVersion = 5
+    older.threadCollapse = [collapseReference]
+    newer.threadCollapseVersion = 5
+    newer.threadCollapse = [collapseReference]
     const find = jest.fn(() => {
       let skipCount = 0
       let limitCount = 0
@@ -1864,5 +1880,75 @@ describe('search index cache', () => {
     expect(results.totalPages).toBe(1)
     expect(results.items[0].messageId).toBe('mongo:newer')
     expect(results.sourceCounts).toEqual({ mailbox: 1, teams: 0, sharepoint: 0 })
+
+    const emptyQueryResults = await store.search({
+      scope: 'all',
+      sourceType: 'mailbox',
+      query: '',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'date-desc',
+      page: 1,
+      pageSize: 1,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: '',
+      collapseDuplicates: true
+    })
+
+    expect(find).toHaveBeenCalledTimes(6)
+    expect(find.mock.calls[3][1]?.projection).not.toHaveProperty('mailboxDetail')
+    expect(emptyQueryResults.total).toBe(1)
+    expect(emptyQueryResults.items[0].messageId).toBe('mongo:newer')
+  })
+
+  it('returns a provisional raw view instead of blocking Mongo search while metadata is incomplete', async () => {
+    const findOne = jest.fn().mockResolvedValue({ sourceType: 'mailbox' })
+    const find = jest.fn(() => ({
+      sort: jest.fn(() => ({
+        skip: jest.fn(() => ({
+          limit: jest.fn(() => ({ toArray: jest.fn().mockResolvedValue([]) }))
+        }))
+      }))
+    }))
+    const documentsCollection = {
+      find,
+      findOne,
+      aggregate: jest.fn(),
+      countDocuments: jest.fn(),
+      updateOne: jest.fn(),
+      insertMany: jest.fn(),
+      deleteMany: jest.fn(),
+      createIndex: jest.fn()
+    } as any
+    const rulesCollection = {
+      find: jest.fn(() => ({
+        sort: jest.fn(() => ({ toArray: jest.fn().mockResolvedValue([]) }))
+      }))
+    } as any
+    const fingerprintsCollection = {
+      find: jest.fn(() => ({
+        sort: jest.fn(() => ({ toArray: jest.fn().mockResolvedValue([]) }))
+      }))
+    } as any
+
+    const store = new MongoSearchIndexStore(documentsCollection, rulesCollection, fingerprintsCollection)
+    const result = await store.search({
+      scope: 'all',
+      sourceType: 'mailbox',
+      query: '',
+      mode: 'and',
+      mailOnly: true,
+      sort: 'date-desc',
+      page: 1,
+      pageSize: 50,
+      reviewFlaggedOnly: false,
+      reviewTaggedOnly: false,
+      reviewTag: '',
+      collapseDuplicates: true
+    })
+    expect(result.total).toBe(0)
+    expect(findOne).not.toHaveBeenCalled()
+    expect(find).toHaveBeenCalled()
   })
 })
